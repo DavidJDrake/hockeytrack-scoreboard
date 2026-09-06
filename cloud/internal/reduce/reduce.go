@@ -265,9 +265,3 @@ func (s State) applyPlay(e Event) (State, bool, error) {
 	}
 	return s, false, nil
 }
-
-// tickPenalties is defined in Task 6; addPenalty and endMinorOnPowerPlayGoal
-// are temporary stubs (removed in Task 6) so the package compiles until then.
-func (s *State) tickPenalties()                         {}
-func (s *State) addPenalty(d playDetail)                {}
-func (s *State) endMinorOnPowerPlayGoal(scoring string) {}
