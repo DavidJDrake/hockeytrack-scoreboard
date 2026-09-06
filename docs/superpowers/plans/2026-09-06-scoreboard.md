@@ -8,7 +8,7 @@
 
 **Tech Stack:** Go 1.27 (Lambda, `provided.al2023` on arm64 as a zip — no container, no Docker flatten step), Terraform ≥ 1.10, DynamoDB, AWS IoT Core (MQTT/TLS 8883, X.509 per device), Python 3.11 on Raspberry Pi OS Lite (Bookworm) with `paho-mqtt` 2.x and `pygame` 2.x, pytest.
 
-**Spec:** `docs/superpowers/specs/2026-09-06-scoreboard-design.md` (this repo). The HockeyTrack-side events it depends on are planned in `/home/jay/projects/hockeytrack/docs/superpowers/plans/2026-09-06-scoreboard-events.md` and must be deployed before Task 14's end-to-end check; everything before that runs against fixtures.
+**Spec:** `docs/superpowers/specs/2026-09-06-scoreboard-design.md` (this repo). The HockeyTrack-side events it depends on are planned in the HockeyTrack repository's own plan of the same date (`docs/superpowers/plans/` there) and must be deployed before Task 14's end-to-end check; everything before that runs against fixtures.
 
 ## Global Constraints
 
@@ -92,7 +92,7 @@ terraform/*.tfplan
 .playwright-mcp/
 ```
 
-`LICENSE`: MIT, copyright 2026 David J Drake (copy the text from `/home/jay/projects/hockeytrack/LICENSE` and keep the same name).
+`LICENSE`: MIT, copyright 2026 David J Drake (copy the text from the HockeyTrack repository's `LICENSE` and keep the same name).
 
 - [ ] **Step 2: Go module and a placeholder package so `go test ./...` has something to run**
 
