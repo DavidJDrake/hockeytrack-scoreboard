@@ -1,0 +1,16 @@
+[Unit]
+Description=HockeyTrack scoreboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=pi
+WorkingDirectory=/home/pi/hockeytrack-scoreboard/device
+Environment=SDL_VIDEODRIVER=kmsdrm
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/pi/hockeytrack-scoreboard/device/.venv/bin/python -m scoreboard.main
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
