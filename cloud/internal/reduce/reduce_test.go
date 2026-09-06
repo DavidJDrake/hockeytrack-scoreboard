@@ -2,6 +2,7 @@ package reduce
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -84,5 +85,44 @@ func TestUnknownDetailTypeIsIgnored(t *testing.T) {
 	s2, changed, err := Reduce(s, Event{DetailType: "hockeytrack.alert", Detail: json.RawMessage(`{"gameId":2025020001,"reason":"x"}`)})
 	if err != nil || changed || s2.GameState != "LIVE" {
 		t.Errorf("err=%v changed=%v state=%+v", err, changed, s2)
+	}
+}
+
+// clockEvent builds a heartbeat inline so this test does not depend on a
+// helper a later task introduces.
+func clockEvent(period int, periodType, code string, at time.Time) Event {
+	body := fmt.Sprintf(`{"gameId":2025020001,"gameState":"LIVE","period":%d,"periodType":%q,`+
+		`"secondsRemaining":0,"running":false,"inIntermission":false,"situationCode":%q,`+
+		`"homeTeam":"FLA","awayTeam":"CHI","score":{"CHI":2,"FLA":2},"shots":{"CHI":30,"FLA":31},`+
+		`"observedAt":%q}`, period, periodType, code, at.Format(time.RFC3339))
+	return Event{DetailType: "nhl.game.clock", Detail: json.RawMessage(body), Time: at}
+}
+
+// A shootout's situation codes (0101, 1010) describe one skater against a
+// goalie with the other net empty, so they parse as a real empty net. Neither
+// the power-play nor the empty-net indicator means anything there, and an EN
+// badge would sit on screen for the whole shootout.
+func TestShootoutClearsPowerPlayAndEmptyNet(t *testing.T) {
+	base := time.Date(2025, 10, 7, 23, 0, 0, 0, time.UTC)
+	for i, code := range []string{"0101", "1010"} {
+		var s State
+		s, _, _ = Reduce(s, load(t, "nhl.game.status", "status_live.json"))
+		s, _, err := Reduce(s, clockEvent(5, "SO", code, base.Add(time.Duration(i)*time.Minute)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s.Situation.PP != "" || s.Situation.EmptyNet != "" {
+			t.Errorf("code %s in a shootout: pp=%q emptyNet=%q, want both empty", code, s.Situation.PP, s.Situation.EmptyNet)
+		}
+		if s.Situation.Code != code {
+			t.Errorf("code %s should still be carried through, got %q", code, s.Situation.Code)
+		}
+	}
+	// The same shape of code outside a shootout must still report the empty net.
+	var s State
+	s, _, _ = Reduce(s, load(t, "nhl.game.status", "status_live.json"))
+	s, _, _ = Reduce(s, clockEvent(3, "REG", "1560", base.Add(5*time.Minute)))
+	if s.Situation.EmptyNet == "" {
+		t.Error("a pulled goalie in regulation must still report an empty net")
 	}
 }

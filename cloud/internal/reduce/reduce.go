@@ -133,6 +133,14 @@ func Reduce(s State, e Event) (State, bool, error) {
 		}
 		s.Clock = Clock{Seconds: d.SecondsRemaining, Running: d.Running, Intermission: d.InIntermission}
 		s.Situation = ParseSituation(d.SituationCode, d.AwayTeam, d.HomeTeam)
+		// A shootout is one skater against a goalie with the other net empty,
+		// so its situation codes (0101, 1010) parse as a genuine empty net and
+		// would light the EN badge for the whole shootout. Neither indicator
+		// means anything once regulation and overtime are over; keep the code
+		// for consumers that want it, drop the readings.
+		if d.PeriodType == "SO" {
+			s.Situation.PP, s.Situation.EmptyNet = "", ""
+		}
 		s.tickPenalties()
 		stamp()
 		return s, true, nil
