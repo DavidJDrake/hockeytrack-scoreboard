@@ -1,6 +1,6 @@
 # HockeyTrack Scoreboard — design
 
-*2026-09-06. Status: draft for review.*
+*2026-09-06 (rev. 2: HDMI bar display, Pi Zero 2 W). Status: draft for review.*
 
 A physical LED scoreboard that follows a live NHL game, driven entirely by
 HockeyTrack's EventBridge bus. It is a separate project from HockeyTrack and
@@ -10,7 +10,7 @@ the event contract (§6).
 
 ## 1. Goals
 
-- A 4:1 LED panel (128×32 pixels, ~12" wide) shows, for one chosen game:
+- A 4:1 bar display (480×1920, ~8–11" wide) shows, for one chosen game:
   game clock, period, score, shots on goal, the players currently in the
   penalty box with their penalty clocks, power-play state, and a goal flash.
 - Updates reach the panel by push, within about a second of HockeyTrack
@@ -25,15 +25,26 @@ that requires the device to talk to the NHL directly.
 
 ## 2. Hardware
 
+The display under consideration is a LESOWN stretched bar monitor: a
+480×1920 IPS panel with an HDMI input, 60 Hz, sold in 7.9", 8.8" and 11.3"
+diagonals (about 7.7", 8.5" and 11.0" wide at 4:1), roughly $60–$140. An
+HDMI monitor rules out the Pico 2 W — it has no HDMI output, and a single
+1920×480 frame is larger than the RP2350's entire RAM — so the controller is
+a Raspberry Pi Zero 2 W instead.
+
 | Part | Choice | Why |
 |---|---|---|
-| Controller | Raspberry Pi Pico 2 W (RP2350, Wi-Fi) | Dual-core, 520 KB RAM: enough for TLS + MQTT + a 128×32 frame buffer |
-| Carrier | Pimoroni Interstate 75 W (Pico 2 W edition) | Drives HUB75 panels from PIO, exposes two user buttons, has a MicroPython graphics library; avoids hand-writing a panel driver |
-| Panel | 2 × 64×32 HUB75 LED matrix, chained | 128×32 is exactly 4:1; at P2.5 pitch the pair is 320 × 80 mm (12.6" × 3.1") |
-| Power | 5 V / 4 A | Two panels at full white draw ~3.5 A |
+| Display | LESOWN 480×1920 bar monitor, HDMI (11.3" or 8.8") | 4:1 IPS, 60 Hz, powered over USB; any 4:1 HDMI panel works the same |
+| Controller | Raspberry Pi Zero 2 W | $15, mini-HDMI, Wi-Fi, 512 MB RAM, runs Raspberry Pi OS Lite; renders 1920×480 with real fonts and logos |
+| Cables | mini-HDMI → HDMI; two USB power leads | The Zero cannot power the monitor from its own USB port |
+| Power | 5 V / 3 A supply (or two 5 V/2 A) | Zero 2 W ≈ 0.5 A, the monitor ≈ 1 A at full brightness |
+| Buttons | Two momentary buttons on GPIO (optional) | Game select and brightness; the v2 web selector makes them optional |
 
-Any other 4:1 panel works if the driver exposes a 128×32 (or scaled) frame
-buffer; the firmware's layout is expressed in a 128×32 logical grid.
+The renderer draws into a 1920×480 canvas; every layout constant is
+expressed in that grid, so a different 4:1 panel just changes the HDMI
+mode. (A 128×32 HUB75 LED matrix on a Pimoroni Interstate 75 W remains a
+viable low-resolution alternative with the same cloud side; it would need
+a separate MicroPython renderer.)
 
 ## 3. Architecture
 
@@ -45,7 +56,7 @@ HockeyTrack bus ──rule──▶ scoreboard reducer (Lambda) ──publish─
    nhl.game.clock  (new)                                               │
    nhl.game.roster (new)                                               │ MQTT over TLS
                                                                        ▼
-                                                              Pico 2 W (MicroPython)
+                                                              Pi Zero 2 W (Python)
                                                               subscribes to one game,
                                                               renders state, runs the
                                                               clock locally between updates
@@ -64,8 +75,9 @@ Chosen over a WebSocket API and over HTTP polling because:
 - Keepalive, reconnect, QoS and last-will are protocol features rather than
   code on the device. (API Gateway WebSockets also force a reconnect every two
   hours.)
-- MicroPython's `umqtt` client with `ssl` and a per-device X.509 certificate
-  runs on the Pico W within memory.
+- `paho-mqtt` with a per-device X.509 certificate is a few lines of Python
+  on the Pi; the same design would also fit a microcontroller if the display
+  ever changed.
 - Cost is effectively zero: IoT Core charges per million connection-minutes
   and messages; one device online all season is a few cents.
 
@@ -129,40 +141,53 @@ the situation code wins for the PP indicator.
 Cost: a heartbeat every 5 s per live game ≈ 720 invocations per game-hour;
 ≈ 3 M invocations a season ≈ $1 with duration. DynamoDB and IoT are cents.
 
-### 3.4 Device firmware (MicroPython)
+### 3.4 Device software (Python on Raspberry Pi OS Lite)
 
-- Boot: join Wi-Fi (credentials in a `secrets.py` never committed), NTP
-  sync, load the last chosen `gameId` from flash, connect to IoT Core with
-  the device certificate, subscribe to `hockeytrack/games/today` and
+- A single `systemd` service, `scoreboard.service`, starts at boot: joins
+  Wi-Fi (configured with the standard OS tooling), reads the last chosen
+  `gameId` from a state file, connects to IoT Core with the device
+  certificate (`paho-mqtt`, TLS 1.2, ALPN not needed on port 8883), and
+  subscribes to `hockeytrack/games/today` and
   `hockeytrack/games/<gameId>/state`.
-- Render loop at 10 Hz: draw from the last state doc; derive displayed clock
-  and penalty clocks as `seconds − (now − asOf)` while running.
-- Buttons: A cycles through today's games (from the day topic), B toggles
-  brightness; the choice is written to flash. Holding A during boot enters
-  a Wi-Fi setup mode (v2; v1 uses `secrets.py`).
+- Rendering: `pygame` (SDL2) drawing straight to the framebuffer/KMS at
+  1920×480, no desktop, no browser. Loop at 10 Hz; derive the displayed
+  clock and penalty clocks as `seconds − (now − asOf)` while running.
+  Vector fonts (Barlow Condensed, matching the website) and PNG team logos
+  are bundled with the app.
+- Game selection: GPIO buttons (A cycles today's games, B toggles
+  brightness) if fitted; otherwise the v2 web selector. The choice persists
+  in the state file.
 - Reconnect with backoff; while disconnected, keep rendering the last state
-  with a small "no link" glyph.
+  with a small "no link" glyph. The service restarts on crash.
 - Pre-game (`state: PRE`): puck-drop countdown from `start`. Post-game:
-  FINAL held with the final score.
+  FINAL held with the final score. Screen blanks (backlight off via DPMS)
+  after a configurable idle period when no game is selected.
+- Provisioning: `tools/provision.sh` creates the IoT thing and certificate
+  and writes an image-ready `config/` directory; first boot needs only
+  Wi-Fi credentials.
 
-### 3.5 Screen layout (128 × 32)
+### 3.5 Screen layout (1920 × 480)
 
 ```
-┌────────────────────────────────────────────────────────────────┐
-│ TBL  2        14:32  P2        1  NYR   ← abbrevs in team colour │
-│ SOG 17      PP 1:14            SOG 22                            │
-│ ▌NYR 23 1:14                                                    │  ← penalty rows (up to 2 per side)
-│ ▌                                                               │
-└────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│  [TBL logo]  TBL   2            14:32              1   NYR  [NYR logo]           │
+│              SOG 17          2nd PERIOD                SOG 22                    │
+│              ▌#23 NYR  1:14    PP  TBL  1:14                                     │
+└──────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Clock in a 7×13 digit font, everything else in 5×7. Goal: the scoring
-team's side flashes for 3 s with the scorer's number. Intermission: the
-clock area shows `INT 12:40`. Empty net: `EN` replaces `SOG` on that side.
+Clock ≈ 220 px tall, centered; scores ≈ 180 px beside the abbreviations in
+team colour; shots and period in ≈ 60 px; penalty rows in ≈ 48 px along the
+bottom, up to two per side, each with a shrinking bar for time remaining.
+Goal: the scoring side flashes in team colour for 3 s with the scorer's
+number and name. Intermission: the clock area shows `INTERMISSION 12:40`.
+Empty net: `EN` badge replaces the goalie-side SOG. At 8.8" the same layout
+scales; nothing is positioned in inches.
 
 ### 3.6 Game selection (decision 2)
 
-v1: the device's A button cycles the day's games; the chosen id persists.
+v1: GPIO buttons if fitted (A cycles the day's games, choice persists); otherwise
+the game is set in the state file or via the v2 selector.
 v2: a small static web page in this repo (hosted alongside the site or on
 its own CloudFront) lists today's games and lets a signed-in owner publish
 `{gameId}` to `scoreboard/<deviceId>/config`, which the device also
@@ -187,7 +212,7 @@ subscribes to. No per-device server state is needed for v1.
 ```
 hockeytrack-scoreboard/
   README.md              what it is, the wiring photo, the 3-step setup
-  firmware/              MicroPython: main.py, render.py, mqtt.py, fonts/
+  device/                Python: scoreboard.py, render.py, mqtt.py, fonts/, logos/, scoreboard.service
   cloud/                 Go: cmd/reducer, internal/reduce (pure fold + tests)
   terraform/             rule on the hockeytrack bus, Lambda, DynamoDB, IoT policy
   tools/provision.sh     create thing + cert, emit device files
@@ -197,7 +222,7 @@ hockeytrack-scoreboard/
 Tests: the fold is a pure function `reduce(state, event) → state`, tested
 with real HockeyTrack events captured from the bus (and, until the season
 starts, synthesised from the archived play-by-play via the replay harness).
-Firmware rendering is testable on a desktop MicroPython with a stub display.
+The renderer runs unchanged on a desktop (pygame window) for layout work.
 
 ## 6. Changes needed in HockeyTrack (filed as HOC tickets)
 
@@ -216,16 +241,17 @@ Both are additive and versioned under the existing `schemaVersion`.
 1. Platform: the two events above, deployed and visible on the bus.
 2. Reducer + Terraform: state documents on the retained topics, verified
    with replayed games.
-3. Firmware on the bench: renders a fixed state doc, then a live topic.
+3. Device on the bench: renders a fixed state doc, then a live topic.
 4. Game selection, reconnect handling, pre/post-game screens.
 5. README as the worked example: "subscribe to HockeyTrack from another
    project in one rule."
 
 ## 8. Open questions
 
-- Team colours: ship a 32-entry table in the reducer (hex), or omit and use
-  a fixed palette? (Proposal: ship the table; it is small and the panel is
-  the point.)
+- Team colours and logos: ship a 32-entry colour table in the reducer and
+  bundle logo PNGs with the device app? (Proposal: yes for colours; for logos,
+  confirm the NHL's asset terms first — the feed links to SVGs but that is
+  not a licence to redistribute them.)
 - Shootout display: one line of X/O per attempt, or just the score? (Proposal:
   score only in v1.)
 - Should the `today` topic include yesterday's unfinished games (late West
