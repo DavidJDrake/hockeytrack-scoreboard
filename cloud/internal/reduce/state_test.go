@@ -57,6 +57,18 @@ func TestGameTime(t *testing.T) {
 	}
 }
 
+func TestTeamColor(t *testing.T) {
+	if TeamColor("TBL") != "002868" || TeamColor("NYR") != "0038A8" || TeamColor("FLA") != "C8102E" {
+		t.Errorf("known colours wrong: %s %s %s", TeamColor("TBL"), TeamColor("NYR"), TeamColor("FLA"))
+	}
+	if TeamColor("XXX") != "888888" {
+		t.Errorf("unknown = %s", TeamColor("XXX"))
+	}
+	if len(teamColors) != 32 {
+		t.Errorf("table has %d teams, want 32", len(teamColors))
+	}
+}
+
 func TestStateJSONHidesInternals(t *testing.T) {
 	s := State{V: 1, GameID: 1, GameState: "LIVE", LastSeq: 99, Roster: map[int64]int{8478010: 86}, OTLen: 300, Penalties: []Penalty{}}
 	b, err := s.JSON()

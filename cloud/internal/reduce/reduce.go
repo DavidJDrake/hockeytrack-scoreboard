@@ -221,8 +221,7 @@ func (s *State) applyScore(score map[string]int) {
 	}
 }
 
-// applyPlay, tickPenalties and TeamColor are defined in Tasks 4-6; these are
+// applyPlay and tickPenalties are defined in Tasks 5-6; these are
 // temporary stubs so the package compiles until then.
 func (s State) applyPlay(e Event) (State, bool, error) { return s, false, nil }
 func (s *State) tickPenalties()                        {}
-func TeamColor(abbrev string) string                   { return "888888" }
