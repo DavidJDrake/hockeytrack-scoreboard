@@ -221,7 +221,53 @@ func (s *State) applyScore(score map[string]int) {
 	}
 }
 
-// applyPlay and tickPenalties are defined in Tasks 5-6; these are
-// temporary stubs so the package compiles until then.
-func (s State) applyPlay(e Event) (State, bool, error) { return s, false, nil }
-func (s *State) tickPenalties()                        {}
+// applyPlay dedupes on Seq (at-least-once delivery may repeat a play) and
+// folds the play types the panel cares about; anything else still advances
+// LastSeq so a later duplicate of it is recognised.
+func (s State) applyPlay(e Event) (State, bool, error) {
+	var d playDetail
+	if err := json.Unmarshal(e.Detail, &d); err != nil {
+		return s, false, fmt.Errorf("play: %w", err)
+	}
+	if d.Seq <= s.LastSeq {
+		return s, false, nil // at-least-once delivery: already folded
+	}
+	s.LastSeq = d.Seq
+	s.GameID = d.GameID
+	s.setTeams(d.AwayTeam, d.HomeTeam)
+	s.applyScore(d.Score)
+	stamp := func() { s.AsOf = e.Time.UTC().UnixMilli() }
+
+	switch d.PlayType {
+	case "goal":
+		team := d.ScoringTeam
+		s.LastGoal = &Goal{Team: team, Number: s.Roster[d.Raw.Details.ScoringPlayerID], AsOf: e.Time.UTC().UnixMilli()}
+		s.endMinorOnPowerPlayGoal(team)
+		stamp()
+		return s, true, nil
+	case "penalty":
+		s.addPenalty(d)
+		stamp()
+		return s, true, nil
+	case "period-start":
+		n, typ := d.Raw.PeriodDescriptor.Number, d.Raw.PeriodDescriptor.PeriodType
+		if n == 0 {
+			n = d.Period
+		}
+		s.Period = Period{Number: n, Type: typ, Label: PeriodLabel(n, typ)}
+		s.Clock.Intermission = false
+		stamp()
+		return s, true, nil
+	case "period-end":
+		s.Clock.Running = false
+		stamp()
+		return s, true, nil
+	}
+	return s, false, nil
+}
+
+// tickPenalties is defined in Task 6; addPenalty and endMinorOnPowerPlayGoal
+// are temporary stubs (removed in Task 6) so the package compiles until then.
+func (s *State) tickPenalties()                         {}
+func (s *State) addPenalty(d playDetail)                {}
+func (s *State) endMinorOnPowerPlayGoal(scoring string) {}

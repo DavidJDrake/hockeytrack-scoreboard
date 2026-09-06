@@ -98,6 +98,57 @@ func clockEvent(period int, periodType, code string, at time.Time) Event {
 	return Event{DetailType: "nhl.game.clock", Detail: json.RawMessage(body), Time: at}
 }
 
+func TestGoalUpdatesScoreAndLastGoalWithNumber(t *testing.T) {
+	s, _, _ := Reduce(State{}, load(t, "nhl.game.status", "status_live.json"))
+	s, _, _ = Reduce(s, load(t, "nhl.game.roster", "roster.json"))
+	s, changed, err := Reduce(s, load(t, "nhl.game.play", "goal_chi.json"))
+	if err != nil || !changed {
+		t.Fatalf("err=%v changed=%v", err, changed)
+	}
+	if s.Away.Abbrev != "CHI" || s.Home.Abbrev != "FLA" {
+		t.Errorf("play event must fix home/away: %+v %+v", s.Away, s.Home)
+	}
+	if s.Away.Score != 1 || s.Home.Score != 0 {
+		t.Errorf("score = %d-%d", s.Away.Score, s.Home.Score)
+	}
+	if s.LastGoal == nil || s.LastGoal.Team != "CHI" || s.LastGoal.Number != 91 || s.LastGoal.AsOf == 0 {
+		t.Errorf("lastGoal = %+v", s.LastGoal)
+	}
+	if s.LastSeq != 166 {
+		t.Errorf("lastSeq = %d", s.LastSeq)
+	}
+}
+
+func TestDuplicatePlayIsIgnored(t *testing.T) {
+	s, _, _ := Reduce(State{}, load(t, "nhl.game.status", "status_live.json"))
+	s, _, _ = Reduce(s, load(t, "nhl.game.play", "goal_chi.json"))
+	s2, changed, _ := Reduce(s, load(t, "nhl.game.play", "goal_chi.json"))
+	if changed || s2.Away.Score != 1 {
+		t.Errorf("duplicate applied: changed=%v score=%d", changed, s2.Away.Score)
+	}
+}
+
+func TestGoalWithoutRosterHasNumberZero(t *testing.T) {
+	s, _, _ := Reduce(State{}, load(t, "nhl.game.status", "status_live.json"))
+	s, _, _ = Reduce(s, load(t, "nhl.game.play", "goal_chi.json"))
+	if s.LastGoal == nil || s.LastGoal.Number != 0 {
+		t.Errorf("lastGoal = %+v, want number 0 when the roster is unknown", s.LastGoal)
+	}
+}
+
+func TestPeriodStartLearnsPeriodAndClearsIntermission(t *testing.T) {
+	s, _, _ := Reduce(State{}, load(t, "nhl.game.status", "status_live.json"))
+	s, _, _ = Reduce(s, load(t, "nhl.game.clock", "clock_intermission.json"))
+	ps := Event{DetailType: "nhl.game.play", Time: time.Now(), Detail: json.RawMessage(`{"schemaVersion":1,"gameId":2025020001,"seq":400,"playType":"period-start","homeTeam":"FLA","awayTeam":"CHI","period":2,"timeInPeriod":"00:00","score":{"CHI":1,"FLA":0},"raw":{"periodDescriptor":{"number":2,"periodType":"REG"},"typeDescKey":"period-start","details":{}}}`)}
+	s, changed, err := Reduce(s, ps)
+	if err != nil || !changed {
+		t.Fatalf("err=%v changed=%v", err, changed)
+	}
+	if s.Period.Number != 2 || s.Period.Label != "2" || s.Clock.Intermission {
+		t.Errorf("after period-start: %+v %+v", s.Period, s.Clock)
+	}
+}
+
 // A shootout's situation codes (0101, 1010) describe one skater against a
 // goalie with the other net empty, so they parse as a real empty net. Neither
 // the power-play nor the empty-net indicator means anything there, and an EN
