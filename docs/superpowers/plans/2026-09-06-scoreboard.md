@@ -1089,6 +1089,7 @@ git add cloud/internal/reduce && git commit -m "reduce: goal, roster and period 
 
 **Interfaces:**
 - Produces: `func (s *State) addPenalty(d playDetail)`, `func (s *State) tickPenalties()`, `func (s *State) endMinorOnPowerPlayGoal(scoringTeam string)`.
+- Ordering note from the HockeyTrack side (final review of the events branch): within one poll the poller publishes the clock heartbeat *before* the plays it found, and the heartbeat already carries the incremented score. So a goal reaches the reducer as: clock (score 2–1) → play goal (lastGoal). The folds above handle this naturally — the clock fold updates the score, the goal fold sets `lastGoal` and releases the minor — but the device's goal flash keys off `lastGoal.asOf`, not the score change, so there is no double flash. Do not add "score changed" detection to the clock fold.
 - Rules (spec §3.3): MIN and BEN are 2-minute (or `duration`) penalties that end early on a power-play goal against; MAJ (5) and MAT/MIS (10) do not; PS (penalty shot) and unknown types are not boxed. Bench minors use `servedByPlayerId` for the number. Remaining time is game time: `Duration − (nowT − StartT)`, where `nowT` comes from the latest clock heartbeat; penalties at or below 0 are dropped. Only the PP-side's oldest ending-on-goal penalty ends on a goal, and only when `s.Situation.PP == scoringTeam`.
 
 - [ ] **Step 1: Write the failing tests**
