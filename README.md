@@ -1,17 +1,19 @@
 # HockeyTrack Scoreboard
 
-A physical NHL scoreboard: a 4:1 bar display driven by a Raspberry Pi that
-follows one live game — clock, score, shots, penalties and the players serving
-them — pushed from [HockeyTrack](https://github.com/DavidJDrake/hockeytrack)
-within about a second of the play.
+A physical NHL scoreboard: a Raspberry Pi Zero 2 W driving a 4:1 HDMI bar
+display that follows one live game — clock, score, shots, penalties and the
+players serving them — pushed from
+[HockeyTrack](https://github.com/DavidJDrake/hockeytrack)'s EventBridge bus
+through AWS IoT Core within about a second of the play.
 
 It exists as much to be a worked example as a gadget. HockeyTrack publishes
 every game event to an EventBridge bus, and the point of this project is to
 show what consuming that looks like from the outside: one rule on someone
 else's bus, and nothing in the pipeline changes to accommodate you.
 
-**Status: design only.** No code yet. What is here is the design and the
-implementation plan:
+**Status: work in progress.** The repository scaffold exists (Go module,
+Python package, Makefile) but there is no reducer or device logic yet. See
+the design and the implementation plan:
 
 - [`docs/superpowers/specs/2026-09-06-scoreboard-design.md`](docs/superpowers/specs/2026-09-06-scoreboard-design.md)
   — the architecture, the hardware, the state document, the screen layout, and
