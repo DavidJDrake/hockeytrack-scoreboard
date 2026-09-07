@@ -32,7 +32,32 @@ if [ -z "$POLICY" ]; then
 fi
 
 mkdir -p "$OUT"
-trap 'rmdir "$OUT" 2>/dev/null || true' EXIT
+
+# CERT_ARN is set only once create-keys-and-certificate has succeeded, so
+# cleanup() below knows whether there is a live AWS credential to unwind.
+CERT_ARN=
+cleanup() {
+  # Runs on any non-zero exit (set -e + this EXIT trap) before the final
+  # `trap - EXIT` disarms it on success. The exists-check above means this
+  # invocation is always the one that created $OUT -- a pre-existing
+  # device/config/ makes the script exit before mkdir, so the trap is never
+  # even armed -- so it's safe to remove outright here.
+  rm -rf "$OUT"
+  if [ -n "$CERT_ARN" ]; then
+    echo "partial run: deactivating and deleting certificate $CERT_ARN..." >&2
+    local cert_id="${CERT_ARN##*/}"
+    # Best-effort and in dependency order: a cert can't be deleted while
+    # attached to a thing or (without --force-delete) a policy, and can't
+    # be deleted while still ACTIVE. Ignore failures here -- we're already
+    # on the failure path and want to get as much cleaned up as possible
+    # rather than bail on the first error.
+    aws iot detach-thing-principal --thing-name "$NAME" --principal "$CERT_ARN" --region "$REGION" 2>/dev/null || true
+    aws iot detach-policy --policy-name "$POLICY" --target "$CERT_ARN" --region "$REGION" 2>/dev/null || true
+    aws iot update-certificate --certificate-id "$cert_id" --new-status INACTIVE --region "$REGION" 2>/dev/null || true
+    aws iot delete-certificate --certificate-id "$cert_id" --force-delete --region "$REGION" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT
 
 aws iot create-thing --thing-name "$NAME" --region "$REGION" >/dev/null
 CERT_JSON=$(aws iot create-keys-and-certificate --set-as-active --region "$REGION" \

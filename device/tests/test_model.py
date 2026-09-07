@@ -43,6 +43,16 @@ def test_penalties_tick_and_expire():
     assert s.penalties_at(s.as_of_ms + 80_000) == ()
 
 
+def test_penalties_frozen_while_clock_is_stopped():
+    # A stoppage or intermission means clock.running=false in the state
+    # document; penalties must hold at their last value, not keep ticking
+    # down against the wall clock while play (and the penalty) is paused.
+    s = GameState.from_json((FIX / "state_live.json").read_text().replace('"running":true', '"running":false'))
+    assert s.penalties_at(s.as_of_ms)[0].seconds == 74
+    assert s.penalties_at(s.as_of_ms + 30_000)[0].seconds == 74
+    assert s.penalties_at(s.as_of_ms + 900_000)[0].seconds == 74
+
+
 def test_goal_flash_window():
     s = live()
     assert s.goal_flash(1791135690000 + 2_999)

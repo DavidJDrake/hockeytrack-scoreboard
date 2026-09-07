@@ -20,6 +20,22 @@ log = logging.getLogger("scoreboard")
 BLANK_AFTER_S = 30 * 60
 
 
+def should_blank(now: float, last_update: float, state: GameState | None, blank_after_s: float) -> bool:
+    """Decide whether the panel should go dark.
+
+    A game in progress (state "LIVE", which includes intermissions) never
+    blanks, even if updates stall briefly -- that's normal jitter, not
+    idleness. Anything else -- pre-game, final, or nothing selected --
+    blanks once ``blank_after_s`` has passed with no state update, which is
+    exactly the "board left up overnight" case that causes burn-in. The
+    caller is responsible for bumping ``last_update`` on the next update or
+    a button press, which is how the panel wakes back up.
+    """
+    if state is not None and state.state == "LIVE":
+        return False
+    return now - last_update >= blank_after_s
+
+
 def main() -> None:
     logging.basicConfig(level=os.environ.get("LOGLEVEL", "INFO"))
     fixture = os.environ.get("SCOREBOARD_FIXTURE")  # desktop preview: render a fixture, no broker
@@ -48,15 +64,15 @@ def main() -> None:
     following = cfg.load_game_id() if cfg else None
     link_ok = bool(fixture)
     brightness = cfg.brightness if cfg else 1.0
-    last_activity = time.time()
+    last_update = time.time()
     if fixture:
         with open(fixture, "rb") as f:
             current = GameState.from_json(f.read())
         following = current.game_id
 
     def select(game_id):
-        nonlocal following, current, last_activity
-        following, current, last_activity = game_id, None, time.time()
+        nonlocal following, current, last_update
+        following, current, last_update = game_id, None, time.time()
         if cfg:
             cfg.save_game_id(game_id)
         if link:
@@ -105,6 +121,7 @@ def main() -> None:
                 if kind == "state" and item[1] == following:
                     try:
                         current = GameState.from_json(item[2])
+                        last_update = time.time()
                     except ValueError as e:
                         log.warning("bad state doc: %s", e)
                 elif kind == "today":
@@ -116,8 +133,9 @@ def main() -> None:
                     select(item[1])
                 elif kind == "brightness":
                     brightness = {1.0: 0.6, 0.6: 0.3}.get(brightness, 1.0)
+                    last_update = time.time()  # a button press counts as activity too
             now_ms = int(time.time() * 1000)
-            if following is None and time.time() - last_activity > BLANK_AFTER_S:
+            if should_blank(time.time(), last_update, current, BLANK_AFTER_S):
                 frame.fill((0, 0, 0))
             else:
                 draw(frame, current, now_ms, assets, link_ok)

@@ -88,9 +88,15 @@ make deploy
    Copy the `device/config/` directory from step 1 onto the Pi at
    `hockeytrack-scoreboard/device/config/`, then:
    ```
+   sudo usermod -aG video,render pi
    sudo cp device/scoreboard.service /etc/systemd/system/
    sudo systemctl enable --now scoreboard
    ```
+   The `usermod` is a one-time step: `scoreboard.service` runs SDL's
+   `kmsdrm` backend directly against `/dev/dri`, with no X server to grant
+   access, so the service user needs to already be in the `video` and
+   `render` groups. Log out (or reboot) after running it so the new group
+   membership takes effect before the service starts.
 
 Real fonts are optional: drop `BarlowCondensed-Bold.ttf` and
 `BarlowCondensed-SemiBold.ttf` (available under the SIL Open Font Licence
