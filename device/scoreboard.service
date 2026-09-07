@@ -1,0 +1,39 @@
+[Unit]
+Description=HockeyTrack scoreboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/hockeytrack-scoreboard/device
+Environment=SDL_VIDEODRIVER=kmsdrm
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/pi/hockeytrack-scoreboard/device/.venv/bin/python -m scoreboard.main
+Restart=always
+RestartSec=3
+
+# --- Console access for kmsdrm ---
+# systemd starts this unit with no controlling terminal and no logind seat
+# (it's not a login session), so without a TTY attached SDL's kmsdrm
+# backend cannot become DRM master and the panel stays black on boot even
+# though the process is up and "running". Binding the unit to the physical
+# console fixes that; do not remove these thinking they're leftover cruft.
+TTYPath=/dev/tty1
+StandardInput=tty
+StandardOutput=journal
+StandardError=journal
+# Clear/reset the VT on each (re)start so a previous crash can't leave the
+# console in a state that blocks the next DRM-master grab.
+TTYReset=yes
+TTYVHangup=yes
+
+# Also requires the service user to be in the video and render groups, or
+# opening /dev/dri fails with a permission error (kmsdrm talks to the DRM
+# device directly -- there's no X server here to grant access instead).
+# This is one-time setup on the Pi itself; this unit cannot do it:
+#   sudo usermod -aG video,render pi
+# See the "Device" section of README.md.
+
+[Install]
+WantedBy=multi-user.target

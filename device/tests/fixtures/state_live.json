@@ -1,0 +1,9 @@
+{"v":1,"gameId":2026020001,"state":"LIVE","asOf":1791135723123,
+ "away":{"abbrev":"TBL","score":2,"sog":17,"color":"002868"},
+ "home":{"abbrev":"NYR","score":1,"sog":22,"color":"0038A8"},
+ "period":{"number":2,"type":"REG","label":"2"},
+ "clock":{"seconds":872,"running":true,"intermission":false},
+ "situation":{"code":"1451","pp":"TBL"},
+ "penalties":[{"team":"NYR","number":23,"seconds":74,"type":"MIN","endsOnGoal":true}],
+ "lastGoal":{"team":"TBL","number":86,"asOf":1791135690000},
+ "start":"2026-10-01T23:30:00Z"}

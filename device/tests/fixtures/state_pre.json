@@ -1,0 +1,6 @@
+{"v":1,"gameId":2026020001,"state":"PRE","asOf":1791100000000,
+ "away":{"abbrev":"TBL","score":0,"sog":0,"color":"002868"},
+ "home":{"abbrev":"NYR","score":0,"sog":0,"color":"0038A8"},
+ "period":{"number":0,"type":"","label":""},
+ "clock":{"seconds":0,"running":false,"intermission":false},
+ "situation":{"code":""},"penalties":[],"start":"2026-10-01T23:30:00Z"}

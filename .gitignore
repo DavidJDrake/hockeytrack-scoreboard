@@ -1,0 +1,16 @@
+.venv/
+build/
+device/config/
+device/.venv/
+.terraform/
+terraform/.terraform/
+terraform/*.tfvars
+terraform/*.tfplan
+terraform/*.tfstate
+terraform/*.tfstate.*
+.terraform.tfstate.lock.info
+*.pyc
+__pycache__/
+*.pem
+*.key
+.playwright-mcp/
