@@ -1,5 +1,18 @@
 REGION      ?= us-east-1
-export XDG_RUNTIME_DIR ?= $(HOME)/.cache/xdg-runtime
+
+# make runs recipes with /bin/sh, which does not read a login profile, so a
+# toolchain that is only on PATH interactively is invisible here. Append the
+# known Go location; if go is already on PATH the earlier entry wins, so this
+# is a no-op where it is installed system-wide.
+export PATH := $(PATH):$(HOME)/.local/share/go/bin
+
+# Terraform ships as a snap and refuses to run without a *writable*
+# XDG_RUNTIME_DIR. A login shell usually points it at /run/user/$(shell id -u),
+# which systemd-logind may never have created and the user often cannot create
+# either -- so `?=` is not enough: an already-set but unusable value has to be
+# replaced, not deferred to.
+export XDG_RUNTIME_DIR := $(shell test -w "$${XDG_RUNTIME_DIR}" 2>/dev/null && echo "$${XDG_RUNTIME_DIR}" || (mkdir -p "$(HOME)/.cache/xdg-runtime" && chmod 700 "$(HOME)/.cache/xdg-runtime" && echo "$(HOME)/.cache/xdg-runtime"))
+
 GO          := go
 PY          := .venv/bin/python
 PYTEST      := .venv/bin/pytest
