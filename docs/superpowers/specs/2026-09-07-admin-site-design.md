@@ -172,8 +172,17 @@ Static page on S3 behind CloudFront with an ACM certificate, in **this**
 repository's Terraform. HockeyTrack's `terraform/site.tf` is the pattern to
 copy — same idiom, separate stack, separate state.
 
-Subdomain to be decided; `scoreboard.davidjdrake.com` is the obvious
-candidate.
+**Decided: `scoreboard.davidjdrake.com`.** Verified available — the
+`davidjdrake.com` hosted zone is `Z04202891HM5X7HAEVE8H` and holds no
+`scoreboard` record today.
+
+Note the one cross-project touchpoint this creates: both stacks write into
+that shared hosted zone. HockeyTrack's stack owns the `hockeytrack` A record
+and its ACM validation CNAME; this stack will own the `scoreboard` equivalents.
+Different record names in one zone is fine for Terraform, and neither stack
+manages the zone itself, so neither can destroy the other's records — but it
+is worth knowing that the zone is the single resource the two projects share,
+and that a `terraform destroy` here would remove DNS for this subdomain only.
 
 The page is plain HTML and JavaScript. It has one job — list devices, list
 games, set a game — and does not merit a framework or a build step. The
@@ -201,9 +210,6 @@ a reasonable v2 and none blocks the first version.
 
 ## 8. Open questions
 
-- **Subdomain and certificate.** `scoreboard.davidjdrake.com`, or a path on
-  the existing site? A separate distribution keeps the projects independent,
-  which has been the rule so far.
 - **Does the pairing code survive a re-provision?** If a device is re-flashed
   it gets a new thing and a new code, and the old row is orphaned. Probably
   fine — the owner unbinds and re-claims — but worth deciding rather than
