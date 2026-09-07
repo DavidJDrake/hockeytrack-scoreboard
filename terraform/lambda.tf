@@ -14,6 +14,24 @@ data "archive_file" "today" {
   output_path = "${path.module}/../build/today.zip"
 }
 
+# The log groups' names are literals, not interpolated from the Lambda
+# resources below: if they instead read aws_lambda_function.*.function_name,
+# Terraform would create each function first and the log group second. On a
+# first apply that leaves a window where the function could be invoked (and
+# so auto-create AWS's own default, un-retained log group) before Terraform
+# creates its explicit one, which then fails to create because the name is
+# already taken. depends_on below inverts the order explicitly so the log
+# group always exists before its function can run.
+resource "aws_cloudwatch_log_group" "reducer" {
+  name              = "/aws/lambda/scoreboard-reducer"
+  retention_in_days = 30
+}
+
+resource "aws_cloudwatch_log_group" "today" {
+  name              = "/aws/lambda/scoreboard-today"
+  retention_in_days = 30
+}
+
 resource "aws_lambda_function" "reducer" {
   function_name    = "scoreboard-reducer"
   role             = aws_iam_role.reducer.arn
@@ -33,6 +51,7 @@ resource "aws_lambda_function" "reducer" {
   dead_letter_config {
     target_arn = aws_sqs_queue.dlq.arn
   }
+  depends_on = [aws_cloudwatch_log_group.reducer]
 }
 
 resource "aws_lambda_function" "today" {
@@ -52,14 +71,5 @@ resource "aws_lambda_function" "today" {
       SCHEDULE_URL = var.schedule_url
     }
   }
-}
-
-resource "aws_cloudwatch_log_group" "reducer" {
-  name              = "/aws/lambda/${aws_lambda_function.reducer.function_name}"
-  retention_in_days = 30
-}
-
-resource "aws_cloudwatch_log_group" "today" {
-  name              = "/aws/lambda/${aws_lambda_function.today.function_name}"
-  retention_in_days = 30
+  depends_on = [aws_cloudwatch_log_group.today]
 }
