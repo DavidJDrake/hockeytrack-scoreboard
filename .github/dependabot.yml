@@ -30,3 +30,14 @@ updates:
     open-pull-requests-limit: 3
     commit-message:
       prefix: "deps"
+
+  # Terraform providers are a dependency like any other. The AWS provider is
+  # pinned in .terraform.lock.hcl and nothing else here would ever move it.
+  - package-ecosystem: terraform
+    directory: /terraform
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "deps"
