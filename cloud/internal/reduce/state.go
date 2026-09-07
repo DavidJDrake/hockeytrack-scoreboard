@@ -41,9 +41,10 @@ type Penalty struct {
 }
 
 type Goal struct {
-	Team   string `json:"team" dynamodbav:"team"`
-	Number int    `json:"number" dynamodbav:"number"`
-	AsOf   int64  `json:"asOf" dynamodbav:"asOf"`
+	Team     string `json:"team" dynamodbav:"team"`
+	Number   int    `json:"number" dynamodbav:"number"`
+	AsOf     int64  `json:"asOf" dynamodbav:"asOf"`
+	PlayerID int64  `json:"-" dynamodbav:"playerId"` // bookkeeping: lets the roster fold backfill Number if it arrives late
 }
 
 // State is the document devices render. Fields tagged json:"-" are

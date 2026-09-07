@@ -92,7 +92,6 @@ func Reduce(s State, e Event) (State, bool, error) {
 	if s.Penalties == nil {
 		s.Penalties = []Penalty{}
 	}
-	stamp := func() { s.AsOf = e.Time.UTC().UnixMilli() }
 
 	switch e.DetailType {
 	case "nhl.game.status":
@@ -100,16 +99,28 @@ func Reduce(s State, e Event) (State, bool, error) {
 		if err := json.Unmarshal(e.Detail, &d); err != nil {
 			return s, false, fmt.Errorf("status: %w", err)
 		}
+		newState := mapGameState(d.GameState)
+		if stateOrdinal(newState) < stateOrdinal(s.GameState) {
+			// EventBridge delivers at least once: a replayed, stale status
+			// must never move the game backwards through PRE -> LIVE -> FINAL.
+			return s, false, nil
+		}
 		s.GameID = d.GameID
-		s.GameState = mapGameState(d.GameState)
+		s.GameState = newState
 		// The status event carries no home/away; the score map's key order
 		// is not stable, so only fill abbreviations if we have none yet and
 		// let the clock/play events (which do carry them) correct it.
-		s.applyScore(d.Score)
+		// applyScoreNoRegress also guards against a stale replay lowering a
+		// score a later goal already raised.
+		s.applyScoreNoRegress(d.Score)
 		if s.GameState == "PRE" {
 			s.Penalties = []Penalty{}
 		}
-		stamp()
+		// AsOf is only ever set by the clock heartbeat: it is anchored to
+		// Clock.Seconds, and a device derives the live clock from the pair
+		// together. Any other fold restamping it without also re-anchoring
+		// Clock.Seconds would make the device compute the clock from a
+		// fresh timestamp against a stale seconds value.
 		return s, true, nil
 
 	case "nhl.game.clock":
@@ -142,7 +153,11 @@ func Reduce(s State, e Event) (State, bool, error) {
 			s.Situation.PP, s.Situation.EmptyNet = "", ""
 		}
 		s.tickPenalties()
-		stamp()
+		// The clock heartbeat is the only fold that may set AsOf, because it
+		// is the only one that also sets Clock.Seconds: the device derives
+		// the live clock as Clock.Seconds - (now - AsOf), so the two must
+		// always be anchored to the same moment.
+		s.AsOf = e.Time.UTC().UnixMilli()
 		return s, true, nil
 
 	case "nhl.game.play":
@@ -158,7 +173,19 @@ func Reduce(s State, e Event) (State, bool, error) {
 		for _, p := range d.Players {
 			s.Roster[p.PlayerID] = p.Number
 		}
-		return s, false, nil // roster alone changes nothing visible
+		changed := false
+		// A goal scored before the roster arrived recorded jersey number 0;
+		// backfill it now that the scorer's number is known so the panel
+		// does not show "#0" for the rest of the game.
+		if s.LastGoal != nil && s.LastGoal.Number == 0 {
+			if num, ok := s.Roster[s.LastGoal.PlayerID]; ok && num != 0 {
+				g := *s.LastGoal
+				g.Number = num
+				s.LastGoal = &g
+				changed = true
+			}
+		}
+		return s, changed, nil
 
 	case "nhl.game.final":
 		var d finalDetail
@@ -172,7 +199,6 @@ func Reduce(s State, e Event) (State, bool, error) {
 		s.Clock.Running = false
 		s.Penalties = []Penalty{}
 		s.Situation = Situation{Code: s.Situation.Code}
-		stamp()
 		return s, true, nil
 	}
 	return s, false, nil
@@ -187,6 +213,19 @@ func mapGameState(nhl string) string {
 		return "FINAL"
 	default:
 		return "PRE"
+	}
+}
+
+// stateOrdinal orders the panel's three game states so a fold can refuse to
+// move backwards through them on a replayed event.
+func stateOrdinal(state string) int {
+	switch state {
+	case "LIVE":
+		return 1
+	case "FINAL":
+		return 2
+	default: // PRE
+		return 0
 	}
 }
 
@@ -221,6 +260,28 @@ func (s *State) applyScore(score map[string]int) {
 	}
 }
 
+// applyScoreNoRegress is applyScore for folds whose source may redeliver a
+// stale event (EventBridge is at-least-once): it fills in the first-sight
+// team assignment the same way, but never lets a value move a known team's
+// score backwards, so a replayed status event can't undo a goal a later
+// event already recorded.
+func (s *State) applyScoreNoRegress(score map[string]int) {
+	if s.Away.Abbrev == "" && s.Home.Abbrev == "" && len(score) == 2 {
+		keys := make([]string, 0, 2)
+		for k := range score {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		s.setTeams(keys[0], keys[1])
+	}
+	if v, ok := score[s.Away.Abbrev]; ok && v > s.Away.Score {
+		s.Away.Score = v
+	}
+	if v, ok := score[s.Home.Abbrev]; ok && v > s.Home.Score {
+		s.Home.Score = v
+	}
+}
+
 // applyPlay dedupes on Seq (at-least-once delivery may repeat a play) and
 // folds the play types the panel cares about; anything else still advances
 // LastSeq so a later duplicate of it is recognised.
@@ -236,18 +297,21 @@ func (s State) applyPlay(e Event) (State, bool, error) {
 	s.GameID = d.GameID
 	s.setTeams(d.AwayTeam, d.HomeTeam)
 	s.applyScore(d.Score)
-	stamp := func() { s.AsOf = e.Time.UTC().UnixMilli() }
+	// Play events (goal, penalty, period-start, period-end) never restamp
+	// AsOf: only the clock heartbeat does, because only it also re-anchors
+	// Clock.Seconds. Restamping here without a fresh Clock.Seconds would
+	// make the device compute the live clock from a stale seconds value
+	// against a fresh timestamp, jumping the displayed clock forward.
 
 	switch d.PlayType {
 	case "goal":
 		team := d.ScoringTeam
-		s.LastGoal = &Goal{Team: team, Number: s.Roster[d.Raw.Details.ScoringPlayerID], AsOf: e.Time.UTC().UnixMilli()}
+		pid := d.Raw.Details.ScoringPlayerID
+		s.LastGoal = &Goal{Team: team, Number: s.Roster[pid], PlayerID: pid, AsOf: e.Time.UTC().UnixMilli()}
 		s.endMinorOnPowerPlayGoal(team)
-		stamp()
 		return s, true, nil
 	case "penalty":
 		s.addPenalty(d)
-		stamp()
 		return s, true, nil
 	case "period-start":
 		n, typ := d.Raw.PeriodDescriptor.Number, d.Raw.PeriodDescriptor.PeriodType
@@ -256,11 +320,9 @@ func (s State) applyPlay(e Event) (State, bool, error) {
 		}
 		s.Period = Period{Number: n, Type: typ, Label: PeriodLabel(n, typ)}
 		s.Clock.Intermission = false
-		stamp()
 		return s, true, nil
 	case "period-end":
 		s.Clock.Running = false
-		stamp()
 		return s, true, nil
 	}
 	return s, false, nil

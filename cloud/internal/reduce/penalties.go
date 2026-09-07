@@ -65,7 +65,12 @@ func (s *State) addPenalty(d playDetail) {
 // drops anything that has expired.
 func (s *State) tickPenalties() {
 	now := s.nowT()
-	kept := s.Penalties[:0]
+	// Build a new backing array rather than filtering in place: filtering
+	// in place aliases the caller's slice, which is safe in production
+	// (the caller discards its copy) but a trap for tests using the fake
+	// store, where a previously-observed State can still be holding a
+	// reference to this same array.
+	kept := make([]Penalty, 0, len(s.Penalties))
 	for _, p := range s.Penalties {
 		remaining := p.Duration - (now - p.StartT)
 		if remaining > p.Duration {
