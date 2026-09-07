@@ -6,8 +6,10 @@ players serving them — pushed from
 [HockeyTrack](https://github.com/DavidJDrake/hockeytrack)'s EventBridge bus
 through AWS IoT Core within about a second of the play.
 
-![the scoreboard mid-game](docs/photo-placeholder.png)
-*(photo of the assembled panel goes here)*
+> **Status:** the cloud side and the device software are written and tested;
+> the hardware has not been built yet, so there is no photo here and the
+> end-to-end path has not been run against real hardware. The Terraform is
+> validated but not applied.
 
 It exists as much to be a worked example as a gadget. HockeyTrack publishes
 every game event to an EventBridge bus, and the point of this project is to
