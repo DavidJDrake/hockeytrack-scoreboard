@@ -28,7 +28,12 @@ data "aws_iam_policy_document" "reducer" {
     resources = [aws_dynamodb_table.games.arn]
   }
   statement {
-    actions   = ["iot:Publish"]
+    # RetainPublish is a separate permission from Publish, and every message
+    # this function sends is retained -- that is what lets a device that was
+    # unplugged get the current state the moment it reconnects. Without it
+    # the publish fails with a bare 403 ForbiddenException that names
+    # neither the topic nor the missing action.
+    actions   = ["iot:Publish", "iot:RetainPublish"]
     resources = ["${local.topic_arn_prefix}/*"]
   }
   statement {
@@ -57,7 +62,10 @@ data "aws_iam_policy_document" "today" {
     resources = [aws_dynamodb_table.games.arn]
   }
   statement {
-    actions   = ["iot:Publish"]
+    # Retained for the same reason as the state documents: a device that
+    # subscribes gets the day's games at once rather than waiting up to ten
+    # minutes for the next run.
+    actions   = ["iot:Publish", "iot:RetainPublish"]
     resources = ["${local.topic_arn_prefix}/today"]
   }
 }
