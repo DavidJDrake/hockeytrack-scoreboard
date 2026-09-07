@@ -10,6 +10,18 @@ set -euo pipefail
 NAME=${1:?usage: provision.sh <thing-name>}
 REGION=${REGION:-us-east-1}
 
+# Terraform ships as a snap and refuses to run without a *writable*
+# XDG_RUNTIME_DIR. A login shell usually points it at /run/user/$(id -u),
+# which systemd-logind may never have created and which the user often cannot
+# create either. The Makefile fixes this for its own recipes, but this script
+# is meant to be runnable directly, so it has to fix it for itself.
+if ! [ -w "${XDG_RUNTIME_DIR:-/nonexistent}" ]; then
+  XDG_RUNTIME_DIR="$HOME/.cache/xdg-runtime"
+  mkdir -p "$XDG_RUNTIME_DIR"
+  chmod 700 "$XDG_RUNTIME_DIR"
+  export XDG_RUNTIME_DIR
+fi
+
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 OUT="$ROOT/device/config"
 TF_DIR="$ROOT/terraform"
@@ -20,16 +32,26 @@ if [ -e "$OUT" ]; then
   exit 1
 fi
 
+tf_err=$(mktemp)
 tf_output() {
-  terraform -chdir="$TF_DIR" output -raw "$1" 2>/dev/null
+  terraform -chdir="$TF_DIR" output -raw "$1" 2>"$tf_err"
 }
 
 POLICY=$(tf_output device_policy_name || true)
 if [ -z "$POLICY" ]; then
   echo "error: couldn't read 'device_policy_name' from terraform output in $TF_DIR." >&2
-  echo "the cloud stack doesn't look deployed yet -- run 'make deploy' first." >&2
+  if [ -s "$tf_err" ]; then
+    # Terraform itself failed. Show why rather than guessing -- telling
+    # someone "not deployed yet" when they just deployed it wastes an hour.
+    echo "terraform said:" >&2
+    sed 's/^/  /' "$tf_err" >&2
+  else
+    echo "the cloud stack doesn't look deployed yet -- run 'make deploy' first." >&2
+  fi
+  rm -f "$tf_err"
   exit 1
 fi
+rm -f "$tf_err"
 
 mkdir -p "$OUT"
 
