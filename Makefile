@@ -17,9 +17,26 @@ GO          := go
 PY          := .venv/bin/python
 PYTEST      := .venv/bin/pytest
 
-.PHONY: test test-go test-py build deploy provision fmt
+.PHONY: test test-go test-py vuln vuln-go vuln-py build deploy provision fmt
 
-test: test-go test-py
+test: vuln test-go test-py
+
+# Fails on any known vulnerability. govulncheck checks reachability, not just
+# version numbers, so it only fires on something this code can actually
+# reach. pip-audit has no equivalent notion and reports on installed versions.
+vuln: vuln-go vuln-py
+
+vuln-go:
+	cd cloud && go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+# Audits what is installed in .venv rather than resolving requirements.txt,
+# because resolving a requirements file makes pip-audit build its own
+# throwaway virtualenv, which fails on this machine (python3-venv is not
+# installed and needs root). Auditing the real environment is closer to the
+# truth anyway -- it is what actually runs.
+vuln-py:
+	@test -x .venv/bin/pip-audit || { echo "pip-audit missing: .venv/bin/python -m pip install -r device/requirements-dev.txt"; exit 1; }
+	.venv/bin/pip-audit --progress-spinner off
 
 test-go:
 	cd cloud && $(GO) vet ./... && $(GO) test ./...

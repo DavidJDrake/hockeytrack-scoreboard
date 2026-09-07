@@ -1,0 +1,32 @@
+# Dependency updates. Alerts and automated security fixes are enabled in the
+# repository settings; this file adds routine version bumps on top of those.
+#
+# Two ecosystems in two directories: the Go Lambdas under cloud/, and the
+# device's Python packages under device/. The Python ones matter more than
+# their number suggests -- they are installed fresh onto the Pi rather than
+# built here, so whatever is current on install day is what runs on the
+# hardware.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /cloud
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"
+    groups:
+      aws-sdk:
+        patterns:
+          - "github.com/aws/aws-sdk-go-v2*"
+          - "github.com/aws/aws-lambda-go"
+
+  - package-ecosystem: pip
+    directory: /device
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "deps"
