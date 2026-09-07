@@ -141,3 +141,24 @@ def parse_today(data: bytes | str) -> list[TodayGame]:
 def fmt_clock(seconds: int) -> str:
     seconds = max(0, int(seconds))
     return f"{seconds // 60}:{seconds % 60:02d}"
+
+
+def parse_config(payload: bytes) -> int | None:
+    """Read a game id out of an admin-site config message.
+
+    Returns None for anything malformed rather than raising: this arrives
+    from the network, and a bad message must leave the panel showing what it
+    was showing rather than crash the service. A null gameId is meaningful —
+    it means "follow nothing" — but is returned as None too, and the caller
+    treats both the same way.
+    """
+    try:
+        d = json.loads(payload)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(d, dict):
+        return None
+    gid = d.get("gameId")
+    if isinstance(gid, bool) or not isinstance(gid, int):
+        return None
+    return gid

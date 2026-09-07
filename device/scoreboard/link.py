@@ -1,8 +1,10 @@
 """MQTT connection to AWS IoT Core: TLS with the device certificate,
-auto-reconnect, and routing of the two topics to callbacks.
+auto-reconnect, and routing of the three subscribed topics to callbacks.
 
 The device's IoT policy only allows Connect, Subscribe and Receive --
-this module must never publish."""
+this module must never publish. That holds even for the config topic, which
+is inbound only: the admin site tells the device what to follow, and the
+device never answers."""
 from __future__ import annotations
 
 import logging
@@ -15,9 +17,19 @@ log = logging.getLogger(__name__)
 TODAY = "hockeytrack/games/today"
 
 
+def config_topic(thing_name: str) -> str:
+    """The device's own config topic. Scoped to one thing, and the IoT policy
+    pins it to that thing via iot:Connection.Thing.ThingName, so a device
+    cannot subscribe to anybody else's."""
+    return f"scoreboard/{thing_name}/config"
+
+
 class Link:
-    def __init__(self, endpoint: str, client_id: str, cert: Path, key: Path, ca: Path, on_state, on_today, on_link) -> None:
+    def __init__(self, endpoint: str, client_id: str, cert: Path, key: Path, ca: Path,
+                 on_state, on_today, on_link, on_config=None) -> None:
         self.on_state, self.on_today, self.on_link = on_state, on_today, on_link
+        self.on_config = on_config
+        self._config_topic = config_topic(client_id)
         self._game: int | None = None
         self._client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id, protocol=mqtt.MQTTv311)
         self._client.tls_set(ca_certs=str(ca), certfile=str(cert), keyfile=str(key), tls_version=ssl.PROTOCOL_TLS_CLIENT)
@@ -47,6 +59,9 @@ class Link:
     def _on_connect(self, client, userdata, flags, reason_code, properties=None):
         log.info("connected: %s", reason_code)
         client.subscribe(TODAY, qos=1)
+        # Retained, so a device that was unplugged when the game changed is
+        # handed the current choice the moment it subscribes.
+        client.subscribe(self._config_topic, qos=1)
         if self._game is not None:
             client.subscribe(self._state_topic(self._game), qos=1)
         self.on_link(True)
@@ -56,12 +71,22 @@ class Link:
         self.on_link(False)
 
     def _on_message(self, client, userdata, msg):
-        self.route(msg.topic, msg.payload, self.on_state, self.on_today)
+        self.route(msg.topic, msg.payload, self.on_state, self.on_today,
+                   self.on_config, self._config_topic)
 
     @staticmethod
-    def route(topic: str, payload: bytes, on_state, on_today) -> None:
+    def route(topic: str, payload: bytes, on_state, on_today,
+              on_config=None, config_topic_=None) -> None:
         if topic == TODAY:
             on_today(payload)
+            return
+        # Exact match rather than a pattern: the broker already guarantees we
+        # only receive our own config, but matching the one topic we asked for
+        # means a policy mistake cannot turn into someone else retargeting
+        # this panel.
+        if config_topic_ is not None and topic == config_topic_:
+            if on_config is not None:
+                on_config(payload)
             return
         parts = topic.split("/")
         if len(parts) == 4 and parts[:2] == ["hockeytrack", "games"] and parts[3] == "state" and parts[2].isdigit():

@@ -13,7 +13,7 @@ from . import buttons
 from .assets import Assets
 from .config import Config
 from .link import Link
-from .model import GameState, parse_today
+from .model import GameState, parse_today, parse_config
 from .render import H, W, draw
 
 log = logging.getLogger("scoreboard")
@@ -52,7 +52,8 @@ def main() -> None:
         link = Link(cfg.endpoint, cfg.client_id, cfg.cert, cfg.key, cfg.ca,
                     on_state=lambda gid, b: events.put(("state", gid, b)),
                     on_today=lambda b: events.put(("today", b)),
-                    on_link=lambda ok: events.put(("link", ok)))
+                    on_link=lambda ok: events.put(("link", ok)),
+                    on_config=lambda b: events.put(("config", b)))
     pygame.init()
     pygame.mouse.set_visible(False)
     screen = pygame.display.set_mode((W, H), pygame.FULLSCREEN if os.environ.get("DISPLAY") is None else 0)
@@ -124,6 +125,13 @@ def main() -> None:
                         last_update = time.time()
                     except ValueError as e:
                         log.warning("bad state doc: %s", e)
+                elif kind == "config":
+                    gid = parse_config(item[1])
+                    if gid is None:
+                        log.warning("ignoring unreadable config message")
+                    elif gid != following:
+                        log.info("admin site selected game %s", gid)
+                        select(gid)
                 elif kind == "today":
                     today = parse_today(item[1])
                     pregame_from_today()

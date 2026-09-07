@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from scoreboard.model import GameState, fmt_clock, parse_today
+from scoreboard.model import GameState, fmt_clock, parse_today, parse_config
 
 FIX = Path(__file__).parent / "fixtures"
 
@@ -89,3 +89,16 @@ def test_fmt_clock(secs, text):
 def test_rejects_wrong_version():
     with pytest.raises(ValueError):
         GameState.from_json('{"v":2,"gameId":1}')
+
+
+def test_parse_config_reads_a_game_id():
+    assert parse_config(b'{"gameId":2026020001}') == 2026020001
+
+
+def test_parse_config_rejects_anything_malformed():
+    """This arrives from the network. A bad message must leave the panel
+    showing what it was showing, not crash the service."""
+    for bad in [b"", b"not json", b"[]", b'"a string"', b"null",
+                b'{"gameId":"2026020001"}', b'{"gameId":null}',
+                b'{"gameId":true}', b'{"other":1}']:
+        assert parse_config(bad) is None, bad
