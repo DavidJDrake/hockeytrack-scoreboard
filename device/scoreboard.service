@@ -1,3 +1,7 @@
+# A template: tools/pi-setup.sh fills in the service user and the checkout
+# path, then installs the result. Raspberry Pi OS has had no default "pi"
+# account since 2022, so neither can be hardcoded here.
+
 [Unit]
 Description=HockeyTrack scoreboard
 After=network-online.target
@@ -5,13 +9,17 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=pi
-WorkingDirectory=/home/pi/hockeytrack-scoreboard/device
+User=@USER@
+WorkingDirectory=@DEVICE_DIR@
 Environment=SDL_VIDEODRIVER=kmsdrm
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/home/pi/hockeytrack-scoreboard/device/.venv/bin/python -m scoreboard.main
+ExecStart=@DEVICE_DIR@/.venv/bin/python -m scoreboard.main
 Restart=always
 RestartSec=3
+# 78 is EX_CONFIG, which the service exits with when a restart cannot help --
+# chiefly a pygame whose SDL has no kmsdrm driver. Stop and leave the reason
+# at the bottom of `journalctl -u scoreboard` instead of looping every 3 s.
+RestartPreventExitStatus=78
 
 # --- Console access for kmsdrm ---
 # systemd starts this unit with no controlling terminal and no logind seat
@@ -31,9 +39,7 @@ TTYVHangup=yes
 # Also requires the service user to be in the video and render groups, or
 # opening /dev/dri fails with a permission error (kmsdrm talks to the DRM
 # device directly -- there's no X server here to grant access instead).
-# This is one-time setup on the Pi itself; this unit cannot do it:
-#   sudo usermod -aG video,render pi
-# See the "Device" section of README.md.
+# tools/pi-setup.sh adds them.
 
 [Install]
 WantedBy=multi-user.target

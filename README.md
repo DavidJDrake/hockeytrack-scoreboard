@@ -6,10 +6,10 @@ players serving them — pushed from
 [HockeyTrack](https://github.com/DavidJDrake/hockeytrack)'s EventBridge bus
 through AWS IoT Core within about a second of the play.
 
-> **Status:** the cloud side and the device software are written and tested;
-> the hardware has not been built yet, so there is no photo here and the
-> end-to-end path has not been run against real hardware. The Terraform is
-> validated but not applied.
+> **Status:** the cloud stack is deployed and the first device certificate is
+> provisioned; the device software is written and tested. The hardware has
+> not arrived yet, so there is no photo here and the end-to-end path has not
+> been run against a real panel.
 
 It exists as much to be a worked example as a gadget. HockeyTrack publishes
 every game event to an EventBridge bus, and the point of this project is to
@@ -50,6 +50,13 @@ HockeyTrack bus ──rule──▶ scoreboard reducer (Lambda) ──publish─
 | Power | 5 V / 3 A supply (or two 5 V/2 A) | Zero 2 W ≈ 0.5 A, the monitor ≈ 1 A at full brightness |
 | Buttons | Two momentary buttons on GPIO (optional) | Game select and brightness; the v2 web selector makes them optional |
 
+Bar panels like these report themselves over HDMI as **480×1920 portrait**,
+not landscape. Under KMS neither the firmware's `display_rotate` nor SDL will
+turn the picture, so the device software does: it always draws a 1920×480
+frame, then turns and scales it to whatever the display reports. The same
+code letterboxes it on an ordinary TV, which is how the device can be
+bench-tested before the panel exists.
+
 ## Setup
 
 ### Cloud
@@ -72,43 +79,52 @@ make deploy
    ```
    This creates an IoT thing and X.509 certificate and writes
    `device/config/device.json`, `device.pem.crt`, `private.pem.key` and
-   `AmazonRootCA1.pem`. None of it is committed — copy the whole
-   `device/config/` directory to the Pi and treat the private key like a
-   password.
-2. Flash Raspberry Pi OS Lite (64-bit) to an SD card and boot it with Wi-Fi
-   credentials configured.
+   `AmazonRootCA1.pem`. None of it is committed — treat the private key like
+   a password.
+2. Flash **Raspberry Pi OS Lite (64-bit), Trixie or later**, with Wi-Fi and
+   a user of your choosing configured in Raspberry Pi Imager.
+
+   Not Bookworm. The panel is driven through SDL's `kmsdrm` driver, and every
+   pygame wheel on PyPI is built without it; only the distribution's
+   `python3-pygame` has it. Bookworm's is 2.1.2, which fails
+   `requirements.txt`, so pip would quietly replace it with a wheel and the
+   panel would stay black. The service detects this and says so, but it is
+   better not to get there.
 3. On the Pi:
    ```
-   sudo apt install python3-pygame libsdl2-2.0-0
+   sudo apt install -y git
    git clone https://github.com/DavidJDrake/hockeytrack-scoreboard.git
-   cd hockeytrack-scoreboard/device
-   python3 -m venv --system-site-packages .venv
-   .venv/bin/pip install -r requirements.txt
    ```
-   Copy the `device/config/` directory from step 1 onto the Pi at
+   Copy the `device/config/` directory from step 1 into
    `hockeytrack-scoreboard/device/config/`, then:
    ```
-   sudo usermod -aG video,render pi
-   sudo cp device/scoreboard.service /etc/systemd/system/
-   sudo systemctl enable --now scoreboard
+   hockeytrack-scoreboard/tools/pi-setup.sh
    ```
-   The `usermod` is a one-time step: `scoreboard.service` runs SDL's
-   `kmsdrm` backend directly against `/dev/dri`, with no X server to grant
-   access, so the service user needs to already be in the `video` and
-   `render` groups. Log out (or reboot) after running it so the new group
-   membership takes effect before the service starts.
+   Run it as the user the service should run as; it uses `sudo` itself. It
+   refuses to start on Bookworm or with a missing or world-readable key,
+   installs `python3-pygame` from apt, builds the venv with
+   `--system-site-packages` and confirms pygame came from the system,
+   adds you to the `video` and `render` groups (kmsdrm opens `/dev/dri`
+   directly, with no X server to grant access), and installs, enables and
+   starts `scoreboard.service` for your user and checkout path.
+   `tools/pi-setup.sh --preflight` runs only the checks.
 
-Real fonts are optional: drop `BarlowCondensed-Bold.ttf` and
-`BarlowCondensed-SemiBold.ttf` (available under the SIL Open Font Licence
-from [Google Fonts](https://fonts.google.com/specimen/Barlow+Condensed))
-into `device/scoreboard/fonts/`. Without them the renderer falls back to a
-system condensed sans, or pygame's built-in default font, so nothing is
-required for the display to work.
+The first line the service logs (`journalctl -u scoreboard -f`) names the
+video driver, the display size and the rotation it chose. If the picture is
+upside down or turned the wrong way, add `"rotate"` to `device.json` — `90`,
+`180` or `270` degrees clockwise, or `"auto"` (the default, which turns a
+landscape frame a quarter turn on a portrait display) — and restart.
+
+The display font, Barlow Condensed, is bundled in `device/scoreboard/fonts/`
+under the SIL Open Font Licence.
 
 ### Choosing a game
 
 Press button A (if fitted) to cycle through today's games; button B toggles
-brightness. Without buttons, follow a game directly by writing its id to the
+brightness. The device also follows a game id published, retained, to its own
+`scoreboard/<thingName>/config` topic, which is how the planned
+[admin site](docs/superpowers/specs/2026-09-07-admin-site-design.md) will
+set it. Without either, follow a game directly by writing its id to the
 state file:
 
 ```
@@ -184,7 +200,9 @@ SCOREBOARD_FIXTURE=tests/fixtures/state_live.json .venv/bin/python -m scoreboard
 ```
 
 This opens a 1920×480 window with the clock ticking from the fixture; Esc
-quits, and the A/B keys stand in for the physical buttons.
+quits, and the A/B keys stand in for the physical buttons. Add
+`SCOREBOARD_WINDOW=240x960` to preview a portrait panel at quarter size, and
+`SCOREBOARD_ROTATE=270` to try the other mounting.
 
 `tools/bus_fixture.sh` drives the *real* deployed bus with the reducer's own
 fixture events (game `2025020001`, CHI @ FLA, an id no real poller will ever

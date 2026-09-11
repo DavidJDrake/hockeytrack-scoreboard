@@ -1,2 +1,5 @@
+# On the Pi, pygame must be the distribution's python3-pygame, seen through a
+# venv made with --system-site-packages: its SDL has the kmsdrm driver the
+# panel needs, and no pygame wheel on PyPI does. tools/pi-setup.sh arranges it.
 paho-mqtt>=2.1,<3
 pygame>=2.5,<3

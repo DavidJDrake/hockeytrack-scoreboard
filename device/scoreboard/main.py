@@ -11,7 +11,8 @@ import pygame
 
 from . import buttons
 from .assets import Assets
-from .config import Config
+from .config import Config, parse_rotate
+from .display import display_failure, parse_size, placement, present
 from .link import Link
 from .model import GameState, parse_today, parse_config
 from .render import H, W, draw
@@ -54,9 +55,33 @@ def main() -> None:
                     on_today=lambda b: events.put(("today", b)),
                     on_link=lambda ok: events.put(("link", ok)),
                     on_config=lambda b: events.put(("config", b)))
+    rotate = cfg.rotate if cfg else None
+    if "SCOREBOARD_ROTATE" in os.environ:  # desktop preview: simulate a mounting
+        rotate = parse_rotate(os.environ["SCOREBOARD_ROTATE"])
     pygame.init()
+    # Open the display before anything else touches it. pygame.init() swallows
+    # a display failure, and a call such as mouse.set_visible would then fail
+    # with only "video system not initialized"; set_mode reports SDL's real
+    # reason, e.g. "kmsdrm not available".
+    try:
+        if os.environ.get("DISPLAY") is None:
+            # (0, 0): the display's own mode. A bar panel offers 480x1920, not
+            # the 1920x480 we draw, and a bench TV offers neither.
+            screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+        else:
+            # SCOREBOARD_WINDOW=240x960 previews a portrait panel at quarter size.
+            screen = pygame.display.set_mode(parse_size(os.environ.get("SCOREBOARD_WINDOW")) or (W, H))
+    except pygame.error as e:
+        code, hint = display_failure(os.environ.get("SDL_VIDEODRIVER"), str(e))
+        log.error("cannot open the display: %s", e)
+        if hint:
+            log.error("%s", hint)
+        sys.exit(code)
     pygame.mouse.set_visible(False)
-    screen = pygame.display.set_mode((W, H), pygame.FULLSCREEN if os.environ.get("DISPLAY") is None else 0)
+    place = placement((W, H), screen.get_size(), rotate)
+    log.info("pygame %s, SDL %s, %s driver, display %dx%d; frame turned %d° and drawn at %dx%d",
+             pygame.version.ver, pygame.version.SDL, pygame.display.get_driver(),
+             *screen.get_size(), place.rotation, *place.size)
     assets = Assets()
     frame = pygame.Surface((W, H))
 
@@ -152,7 +177,7 @@ def main() -> None:
                 dim.fill((0, 0, 0))
                 dim.set_alpha(int(255 * (1 - brightness)))
                 frame.blit(dim, (0, 0))
-            screen.blit(frame, (0, 0))
+            present(screen, frame, place)
             pygame.display.flip()
             clock.tick(10)
     finally:
