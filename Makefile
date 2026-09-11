@@ -26,8 +26,11 @@ test: vuln test-go test-py
 # reach. pip-audit has no equivalent notion and reports on installed versions.
 vuln: vuln-go vuln-py
 
+# govulncheck is a pinned tool dependency (see cloud/go.mod's `tool` line
+# and cloud/go.sum), not @latest, so this and CI run the identical version
+# and Dependabot's gomod updates cover it like any other dependency.
 vuln-go:
-	cd cloud && go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+	cd cloud && $(GO) tool govulncheck ./...
 
 # Audits what is installed in .venv rather than resolving requirements.txt,
 # because resolving a requirements file makes pip-audit build its own

@@ -1,0 +1,110 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  go:
+    name: Go (cloud)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: cloud/go.mod
+          # The module lives in cloud/, so the cache key has to point there;
+          # the default looks for a go.sum at the root and never finds one.
+          cache-dependency-path: cloud/go.sum
+
+      - name: gofmt
+        run: make fmt
+
+      - name: go vet
+        run: cd cloud && go vet ./...
+
+      - name: go test
+        run: cd cloud && go test ./...
+
+      # Pinned as a go.mod tool dependency (see cloud/go.mod's `tool` line),
+      # not `@latest`, so this run is reproducible and Dependabot's gomod
+      # updates cover the version like any other dependency.
+      - name: govulncheck
+        run: cd cloud && go tool govulncheck ./...
+
+  python:
+    name: Python (device)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # 3.13, because the Pi runs Raspberry Pi OS Trixie's Python 3.13.
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      # The Makefile's test-py/vuln-py targets shell out to .venv/bin/*, so
+      # the venv has to exist at the repo root under that name.
+      - name: Create venv and install dependencies
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -r device/requirements-dev.txt
+
+      - name: Run tests (headless)
+        run: make test-py
+
+      - name: Vulnerability scan
+        run: make vuln-py
+
+  terraform:
+    name: Terraform
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Matches the aws provider pinned in .terraform.lock.hcl and the
+      # required_version constraint in providers.tf (>= 1.10).
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: "1.16.2"
+          terraform_wrapper: false
+
+      - name: terraform fmt
+        run: terraform fmt -check -recursive
+
+      # No backend, no credentials: this only validates syntax and provider
+      # schemas, it never touches real state.
+      - name: terraform init
+        run: terraform init -backend=false
+
+      - name: terraform validate
+        run: terraform validate

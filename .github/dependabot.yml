@@ -1,11 +1,16 @@
 # Dependency updates. Alerts and automated security fixes are enabled in the
 # repository settings; this file adds routine version bumps on top of those.
 #
-# Two ecosystems in two directories: the Go Lambdas under cloud/, and the
-# device's Python packages under device/. The Python ones matter more than
-# their number suggests -- they are installed fresh onto the Pi rather than
-# built here, so whatever is current on install day is what runs on the
-# hardware.
+# Four ecosystems: the Go Lambdas under cloud/, the device's Python packages
+# under device/, the Terraform providers, and the CI workflow's own actions.
+# The Python ones matter more than their number suggests -- they are
+# installed fresh onto the Pi rather than built here, so whatever is current
+# on install day is what runs on the hardware.
+#
+# Every ecosystem also holds a new release for 7 days before proposing it, so
+# a version yanked or found malicious in its first days (a real supply-chain
+# pattern) never reaches a pull request here. Cooldown applies to version
+# updates only; security updates still arrive immediately.
 version: 2
 updates:
   - package-ecosystem: gomod
@@ -21,6 +26,8 @@ updates:
         patterns:
           - "github.com/aws/aws-sdk-go-v2*"
           - "github.com/aws/aws-lambda-go"
+    cooldown:
+      default-days: 7
 
   - package-ecosystem: pip
     directory: /device
@@ -30,6 +37,8 @@ updates:
     open-pull-requests-limit: 3
     commit-message:
       prefix: "deps"
+    cooldown:
+      default-days: 7
 
   # Terraform providers are a dependency like any other. The AWS provider is
   # pinned in .terraform.lock.hcl and nothing else here would ever move it.
@@ -41,3 +50,20 @@ updates:
     open-pull-requests-limit: 3
     commit-message:
       prefix: "deps"
+    cooldown:
+      default-days: 7
+
+  # ci.yml pins every action by commit SHA, which is what stops a compromised
+  # tag from silently running in this repo -- but a SHA pin never moves on
+  # its own, so without this it would quietly rot. This is what actually
+  # bumps those pins.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "deps"
+    cooldown:
+      default-days: 7
