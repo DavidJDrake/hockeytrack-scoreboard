@@ -133,10 +133,14 @@ resource "aws_cloudwatch_metric_alarm" "iot_connection_authn_error" {
 # --- Authorization failures: logged at ERROR in AWSIotLogsV2 -------------
 #
 # None of these four carry ok_actions. Each fires on a single failed
-# datapoint with a 60-second period and notBreaching missing data, so a
-# transient probe clears itself on the very next evaluation -- an OK
-# notification would just be a second page a minute after the first for no
-# new information. PublishRetained.AuthError below is different (ongoing
+# datapoint with a 60-second period and notBreaching missing data, and clears
+# by itself -- but not on the next evaluation. With the default sliding
+# window, CloudWatch keeps re-reading the last real datapoint while it is
+# inside the evaluation range, so a one-off failure holds the alarm in ALARM
+# for five minutes: measured 2026-09-11, 03:38:10Z to 03:43:10Z. An OK page
+# would say nothing new. The cost worth knowing: an alarm only acts when its
+# state changes, so a second failure inside those five minutes does not page
+# again. The first page has already started the investigation. PublishRetained.AuthError below is different (ongoing
 # operational breakage, not a momentary probe), and does get one.
 
 resource "aws_cloudwatch_metric_alarm" "iot_connect_auth_error" {
