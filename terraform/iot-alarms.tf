@@ -71,6 +71,13 @@
 # a Metrics Insights query charge that at one device's metric volume is small
 # -- check Cost Explorer after the first bill rather than trust an estimate.
 
+# These alarm names are load-bearing outside this repository. HockeyTrack's
+# hockeytrack-sec-alerting-modification rule pages when a security alarm is
+# rewritten rather than deleted, and it finds this stack's alarms by the
+# "scoreboard-iot-" prefix, because they publish to its security topic.
+# Renaming them here silently drops that coverage: nothing fails, no plan
+# shows a difference, and the alarms simply stop being watched. Rename them
+# only alongside that rule.
 variable "security_alerts_topic_name" {
   type        = string
   default     = "hockeytrack-security-alerts"
