@@ -1,7 +1,8 @@
-# AWS IoT Core logging (V2). Without this, a device that fails to connect or
-# gets an authorization denial leaves no record anywhere -- the reducer and
-# today Lambdas only see traffic that already made it onto the bus, so a
-# rejected device is invisible to everything else in this stack.
+# AWS IoT Core logging (V2). Without this, a device that gets an authorization
+# denial leaves no record anywhere -- the reducer and today Lambdas only see
+# traffic that already made it onto the bus, so a rejected device is invisible
+# to everything else in this stack. A device that fails *authentication* at
+# connect is still not logged: see the note on the log level below.
 #
 # `aws iot get-v2-logging-options` returned NotConfiguredException before
 # this change: logging has never been turned on for this account.
@@ -82,9 +83,18 @@ resource "aws_iam_role_policy" "iot_logging" {
 # The actual switch: this is what calls SetV2LoggingOptions. Default level
 # is ERROR, the lowest of the five that still captures what this change
 # exists for -- AWS's log-level docs define ERROR as "any error that causes
-# an operation to fail," with a failed device authentication given as the
-# example, and a failed Connect/Subscribe/Publish authorization is the same
-# shape of event. INFO is one level up and would additionally log a line for
+# an operation to fail", and a denied Connect/Subscribe/Publish authorization
+# is that shape of event.
+#
+# What ERROR does NOT capture, found on the first apply: AWS applies
+# event-level overrides by default, and get-v2-logging-options came back with
+# `Connection.AuthNError: DISABLED`. AWS's log-format docs: "Connection.AuthNError
+# log entries are opt-in and disabled by default." So a client that fails
+# *authentication* at connect -- a revoked or forged certificate -- leaves no
+# log line. This resource cannot turn it on: neither the pinned provider nor
+# the provider's main branch exposes eventConfigurations. The
+# Connection.AuthNError CloudWatch metric is emitted regardless, which is why
+# alarming on it (SCO-18) is the detection control for failed authentication. INFO is one level up and would additionally log a line for
 # every successful connect, subscribe and publish -- given every reducer
 # invocation publishes a retained message, that's a log line per game event,
 # all noise for this goal. At this scale (one device, a handful of games a
