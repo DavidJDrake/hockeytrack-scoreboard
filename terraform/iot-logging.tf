@@ -28,6 +28,9 @@ resource "aws_cloudwatch_log_group" "iot" {
 # this uses the same account-wildcard form AWS's own general example does
 # (arn:aws:iot:<region>:<account>:*), which still confines the assumption
 # to IoT acting on behalf of this account, just not one narrower resource.
+# AWS notes that some integrations ignore these keys and fail closed. This one
+# was checked on the first apply: a deliberately forbidden subscribe was
+# logged within two seconds, so IoT assumes the role with both conditions.
 data "aws_iam_policy_document" "iot_logging_trust" {
   statement {
     actions = ["sts:AssumeRole"]
