@@ -100,9 +100,14 @@ def test_appliance_unit_can_write_its_identity_directory(checkout):
     assert "ReadWritePaths=/var/lib/scoreboard" in out
 
 
-def test_appliance_unit_grants_the_input_group(checkout):
+def test_appliance_unit_does_not_declare_supplementary_groups(checkout):
+    # Group membership belongs to install_appliance now, not the unit: the
+    # two used to list the same four groups and disagree about which were
+    # optional, and systemd fails a unit outright (216/GROUP) if a name it's
+    # told to resolve does not exist. Removing it here means the unit can no
+    # longer make a promise the installer might not keep.
     out = run(checkout, "--appliance", "--print-unit").stdout
-    assert "input" in out.split("SupplementaryGroups=")[1].splitlines()[0]
+    assert "SupplementaryGroups" not in unit(out)
 
 
 def test_appliance_preflight_does_not_demand_a_device_identity(checkout, tmp_path):
@@ -124,3 +129,31 @@ def test_appliance_still_refuses_bookworm(checkout):
     done = run(checkout, "--appliance", "--preflight", codename="bookworm")
     assert done.returncode != 0
     assert "kmsdrm" in done.stderr
+
+
+# The two checks below read the script's source rather than running
+# install_appliance, which needs root, apt-get, useradd and usermod -- none
+# of which this suite is allowed to invoke. They are weaker than an
+# end-to-end run, but install_appliance can only be exercised on real
+# hardware or inside pi-gen (see docs/hardware-checks.md).
+
+def test_appliance_apt_packages_use_polkitd_not_policykit1(checkout):
+    # policykit-1 was a transitional package that Debian dropped after
+    # Bookworm; Trixie, the only release preflight accepts, has only
+    # polkitd. Without this, --appliance fails at apt-get on every release
+    # the script supports.
+    text = (checkout / "tools" / "pi-setup.sh").read_text()
+    assert "policykit-1" not in text
+    assert "polkitd" in text
+
+
+def test_appliance_installer_requires_video_render_input_but_not_gpio(checkout):
+    # The unit no longer declares SupplementaryGroups=, so the installer is
+    # the only place group membership comes from. video, render and input
+    # must resolve or the panel cannot open /dev/dri or the input devices at
+    # all; gpio stays optional, since the buttons it gates are optional
+    # hardware that already degrades cleanly without it.
+    text = (checkout / "tools" / "pi-setup.sh").read_text()
+    assert 'for g in video render input; do' in text
+    assert 'die "required group' in text
+    assert 'getent group gpio >/dev/null && usermod -aG gpio' in text

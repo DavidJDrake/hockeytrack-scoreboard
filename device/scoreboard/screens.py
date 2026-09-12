@@ -16,6 +16,7 @@ from .render import W, H, BG, INK, MUTED
 
 SCOREBOARD, UNREGISTERED, OFFLINE = "scoreboard", "unregistered", "offline"
 BUILD_FILE = Path("/etc/scoreboard-build")
+NETWORK_WINDOW = 5  # rows of the network list shown at once on the settings screen
 
 
 def screen_for(has_identity: bool, has_network: bool) -> str:
@@ -26,6 +27,13 @@ def screen_for(has_identity: bool, has_network: bool) -> str:
     if not has_network:
         return OFFLINE
     return SCOREBOARD
+
+
+def _network_window_start(index: int, count: int, size: int = NETWORK_WINDOW) -> int:
+    """First index of the slice of ``count`` networks to show, ``size`` at a
+    time, keeping ``index`` visible. Centred on the selection where there's
+    room; pinned to the start or end of the list otherwise."""
+    return max(0, min(index - size // 2, count - size))
 
 
 def build_identity(path: Path = BUILD_FILE) -> str:
@@ -100,7 +108,14 @@ def draw_settings(surface, assets: Assets, settings, status, build: str) -> None
     heading = assets.font(64, True).render(f"Wi-Fi - {where} - {address}", True, INK)
     surface.blit(heading, heading.get_rect(midtop=(W // 2, 24)))
     y = 120
-    for i, network in enumerate(settings.networks[:5]):
+    # Windowed around the selection rather than sliced from zero: with more
+    # than NETWORK_WINDOW access points -- the common case, not the edge --
+    # slicing from zero would let the selection scroll off the bottom with
+    # no cursor drawn anywhere, leaving a stuck user with no way to tell
+    # whether the keyboard is even working.
+    start = _network_window_start(settings.index, len(settings.networks))
+    for offset, network in enumerate(settings.networks[start:start + NETWORK_WINDOW]):
+        i = start + offset
         colour = INK if i == settings.index else MUTED
         label = f"{'>' if i == settings.index else ' '} {network.ssid}  {network.signal}%"
         if not network.secured:

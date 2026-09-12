@@ -99,14 +99,22 @@ install_appliance() {
   preflight
   echo "==> apt packages"
   apt-get update
-  apt-get install -y python3-pygame python3-gpiozero python3-venv network-manager policykit-1
+  apt-get install -y python3-pygame python3-gpiozero python3-venv network-manager polkitd
 
   echo "==> service account"
   getent passwd "$SERVICE_USER" >/dev/null || \
     useradd --system --home-dir "$STATE_DIR" --create-home --shell /usr/sbin/nologin "$SERVICE_USER"
-  for g in video render input gpio; do
-    getent group "$g" >/dev/null && usermod -aG "$g" "$SERVICE_USER"
+  # video, render and input must resolve, or opening /dev/dri and the input
+  # devices fails outright; the unit no longer declares SupplementaryGroups=
+  # itself, so this loop is the only place membership comes from. gpio stays
+  # optional: it is created by raspberrypi-sys-mods rather than base Debian,
+  # and the buttons it gates are already optional hardware (buttons.py
+  # no-ops without gpiozero or without the wiring).
+  for g in video render input; do
+    getent group "$g" >/dev/null || die "required group '$g' does not exist on this image"
+    usermod -aG "$g" "$SERVICE_USER"
   done
+  getent group gpio >/dev/null && usermod -aG gpio "$SERVICE_USER"
   install -d -o "$SERVICE_USER" -g "$SERVICE_USER" -m 700 "$STATE_DIR"
 
   echo "==> application"
@@ -123,7 +131,11 @@ install_appliance() {
   chown -R root:root "$APP_DIR"
 
   echo "==> units and polkit"
-  render_unit > /etc/systemd/system/scoreboard.service
+  # Rendered before tee opens the target, so a failure cannot leave an empty
+  # unit behind -- see the checkout install() above for why this matters.
+  local unit
+  unit="$(render_unit)"
+  printf '%s\n' "$unit" | tee /etc/systemd/system/scoreboard.service >/dev/null
   cp "$DEVICE/scoreboard-netcfg.service" /etc/systemd/system/scoreboard-netcfg.service
   install -D -m 644 "$DEVICE/polkit/10-scoreboard-network.rules" \
     /etc/polkit-1/rules.d/10-scoreboard-network.rules

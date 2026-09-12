@@ -46,13 +46,14 @@ def carry_out(panel: Settings, nm, cfg) -> Status | None:
     caller can update what the list screen's header shows; None otherwise.
     """
     what, payload = panel.pending
+    connected = False
     try:
         if what == "scan":
             panel.replace(nm.scan())
         elif what == "apply":
             nm.apply(payload)
             panel.done(f"Connected to {payload.ssid}")
-            return nm.status()
+            connected = True
         elif what == "reset":
             factory_reset(cfg.state_file.parent if cfg else default_config_dir(), nm)
             panel.done("Panel erased. Reboot to start again.")
@@ -60,7 +61,17 @@ def carry_out(panel: Settings, nm, cfg) -> Status | None:
         panel.done(str(e))
     except Exception:
         log.exception("settings action (%s) failed", what)
-        panel.done(SAFE_ERRORS[what])
+        panel.done(SAFE_ERRORS.get(what, "Something went wrong"))
+        return None
+    if connected:
+        # A separate try: nm.status() making three more nmcli calls can fail
+        # on its own, and that failure must not retract the "Connected to
+        # ..." message already on the panel -- the connect succeeded, and
+        # the panel must not lie about the one thing it exists to report.
+        try:
+            return nm.status()
+        except Exception as e:
+            log.warning("connected, but could not refresh status: %s", e)
     return None
 
 
@@ -216,7 +227,7 @@ def main() -> None:
                     panel.done(str(e))
                 except Exception:
                     log.exception("factory reset (button hold) failed")
-                    panel.done(SAFE_ERRORS["reset"])
+                    panel.done(SAFE_ERRORS.get("reset", "Something went wrong"))
             while True:
                 try:
                     item = events.get_nowait()

@@ -68,7 +68,7 @@ def test_the_password_is_masked_and_can_be_revealed():
     s.key("return")
     for ch in "supersecret":
         s.key("character", ch)
-    assert s.masked == "\u2022" * 11
+    assert s.masked == "*" * 11
     s.key("tab")
     assert s.masked == "supersecret"
 

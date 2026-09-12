@@ -15,7 +15,14 @@ Wants=network-online.target
 Type=simple
 User=scoreboard
 Group=scoreboard
-SupplementaryGroups=video render input gpio
+# No SupplementaryGroups= here: systemd applies User='s own /etc/group
+# memberships via initgroups without being told to, and tools/pi-setup.sh's
+# install_appliance is what puts scoreboard into video, render, input and
+# (if present) gpio. Declaring the same groups here too would let this file
+# and the installer disagree about which ones are optional -- as they used
+# to -- and systemd fails a unit outright (216/GROUP) if a name it's told to
+# resolve does not exist, which is a worse failure than the installer simply
+# not adding a group that isn't there.
 WorkingDirectory=/opt/scoreboard
 Environment=SDL_VIDEODRIVER=kmsdrm
 Environment=PYTHONUNBUFFERED=1

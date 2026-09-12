@@ -3,6 +3,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from scoreboard import main as main_module
 from scoreboard.display import EX_CONFIG
 from scoreboard.main import carry_out, should_blank
 from scoreboard.model import GameState
@@ -89,6 +90,64 @@ def test_a_connect_timeout_never_shows_the_password():
     carry_out(panel, TimesOut(), cfg=None)
 
     assert secret not in panel.message
+    assert panel.mode == RESULT
+
+
+def test_a_failed_status_refresh_does_not_overwrite_a_successful_connect():
+    # nm.status() makes three more nmcli calls after a successful apply(). If
+    # any of them fails, the panel must still say "Connected to ...", not a
+    # failure message contradicting a connect that actually succeeded.
+    class ConnectsButStatusFails:
+        def apply(self, settings):
+            pass
+
+        def status(self):
+            raise subprocess.TimeoutExpired(["nmcli", "-t", "-f", "STATE", "general"], 10)
+
+    panel = Settings(networks=[])
+    panel.pending = ("apply", WifiSettings(ssid="HomeNet", psk="supersecret"))
+
+    result = carry_out(panel, ConnectsButStatusFails(), cfg=None)
+
+    assert result is None
+    assert panel.message == "Connected to HomeNet"
+    assert panel.mode == RESULT
+
+
+def test_a_successful_status_refresh_is_still_returned():
+    class ConnectsAndReportsStatus:
+        def apply(self, settings):
+            pass
+
+        def status(self):
+            return "fresh status"
+
+    panel = Settings(networks=[])
+    panel.pending = ("apply", WifiSettings(ssid="HomeNet"))
+
+    assert carry_out(panel, ConnectsAndReportsStatus(), cfg=None) == "fresh status"
+    assert panel.message == "Connected to HomeNet"
+
+
+def test_an_unrecognised_pending_action_gets_a_generic_message_not_a_crash(monkeypatch):
+    # SAFE_ERRORS[what] used to be a subscript inside the except handler
+    # itself -- an uncaught KeyError there would escape the render loop's
+    # only error handler for any `what` the dict doesn't cover. Today the
+    # state machine only ever sets the three keys already in SAFE_ERRORS, so
+    # this is simulated by removing one, standing in for a future pending
+    # kind nobody remembered to add to the dict.
+    monkeypatch.setattr(main_module, "SAFE_ERRORS", {})
+
+    class Boom:
+        def apply(self, settings):
+            raise RuntimeError("unexpected")
+
+    panel = Settings(networks=[])
+    panel.pending = ("apply", WifiSettings(ssid="HomeNet"))
+
+    carry_out(panel, Boom(), cfg=None)
+
+    assert panel.message == "Something went wrong"
     assert panel.mode == RESULT
 
 

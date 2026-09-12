@@ -148,14 +148,25 @@ def split_terse(line: str) -> list[str]:
 def _run_nmcli(args: list[str]) -> str:
     # A list, never a string, and never shell=True: an SSID is attacker-chosen
     # text from the air, and a password is whatever the user typed.
-    result = subprocess.run(["nmcli", *args], capture_output=True, text=True, timeout=30)
+    try:
+        result = subprocess.run(["nmcli", *args], capture_output=True, text=True, timeout=10)
+    except subprocess.TimeoutExpired:
+        # Caught here rather than left to the caller: TimeoutExpired's str()
+        # embeds the whole argv, and apply()'s argv can hold the Wi-Fi
+        # password. "from None" drops the original from __context__ too, so
+        # it cannot resurface through a traceback that log.exception prints
+        # further up the call chain.
+        raise NetworkError("nmcli timed out") from None
     if result.returncode != 0:
         raise NetworkError((result.stderr or result.stdout).strip() or "nmcli failed")
     return result.stdout
 
 
 def _run_raspi_config(args: list[str]) -> str:
-    result = subprocess.run(["raspi-config", *args], capture_output=True, text=True, timeout=30)
+    try:
+        result = subprocess.run(["raspi-config", *args], capture_output=True, text=True, timeout=10)
+    except subprocess.TimeoutExpired:
+        raise NetworkError("raspi-config timed out") from None
     if result.returncode != 0:
         raise NetworkError((result.stderr or result.stdout).strip() or "raspi-config failed")
     return result.stdout
@@ -246,7 +257,17 @@ def apply_boot_file(path: Path = BOOT_FILE, nm: "NetworkManager | None" = None, 
         set_country(settings.country)
     manager.apply(settings)
     stamp = now() if now is not None else datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    consume(path, stamp)
+    try:
+        consume(path, stamp)
+    except OSError:
+        # The connect succeeded, but the file could not be rewritten -- most
+        # realistically a /boot/firmware remounted read-only after an unclean
+        # power cut. Say so distinctly: silence here would mean a cleartext
+        # Wi-Fi password stays on the boot partition with nothing anywhere
+        # to say so.
+        log.warning(
+            "applied Wi-Fi settings from %s, but the file could not be "
+            "cleared -- your password is still on the boot partition", path)
     return True
 
 
@@ -263,6 +284,14 @@ def main(argv=None) -> int:
         return 0
     except NetworkError as e:
         log.error("could not apply %s: %s", BOOT_FILE, e)
+        return 0
+    except Exception:
+        # Anything else -- a timed-out nmcli call that slipped past the guard
+        # above, an out-of-memory read of a hostile file -- must not stop the
+        # panel booting either, and a bare exception could carry anything
+        # (see the TimeoutExpired case this guards against), so a fixed
+        # message goes to the journal rather than str(e) or a traceback.
+        log.error("could not apply %s -- unexpected error", BOOT_FILE)
         return 0
 
 

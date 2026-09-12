@@ -1,4 +1,8 @@
+import subprocess
+import traceback
+
 import pytest
+from scoreboard import netcfg
 from scoreboard.netcfg import WifiSettings, parse_wifi_file, consume
 
 
@@ -208,3 +212,68 @@ def test_apply_boot_file_leaves_the_file_when_nmcli_fails(tmp_path):
     with pytest.raises(NetworkError):
         apply_boot_file(path, nm=nm)
     assert "psk=supersecret" in path.read_text()
+
+
+def test_run_nmcli_timeout_does_not_leak_the_password(monkeypatch):
+    # subprocess.TimeoutExpired's str() embeds its whole argv, and apply()'s
+    # argv can hold the Wi-Fi password. _run_nmcli must catch the timeout at
+    # the source and re-raise something that carries none of it -- in the
+    # exception itself, and (via "from None") in its __context__ too, so a
+    # traceback printed further up the call chain can't resurrect it either.
+    secret = "hunter2hunter2"
+    argv = ["nmcli", "device", "wifi", "connect", "HomeNet", "password", secret]
+
+    def fake_run(*args, **kwargs):
+        raise subprocess.TimeoutExpired(argv, 10)
+
+    monkeypatch.setattr(netcfg.subprocess, "run", fake_run)
+
+    with pytest.raises(NetworkError) as excinfo:
+        netcfg._run_nmcli(["device", "wifi", "connect", "HomeNet", "password", secret])
+
+    assert secret not in str(excinfo.value)
+    rendered = "".join(traceback.format_exception(
+        type(excinfo.value), excinfo.value, excinfo.value.__traceback__))
+    assert secret not in rendered
+
+
+def test_run_raspi_config_timeout_raises_network_error(monkeypatch):
+    def fake_run(*args, **kwargs):
+        raise subprocess.TimeoutExpired(["raspi-config", "nonint", "do_wifi_country", "US"], 10)
+
+    monkeypatch.setattr(netcfg.subprocess, "run", fake_run)
+
+    with pytest.raises(NetworkError):
+        netcfg._run_raspi_config(["nonint", "do_wifi_country", "US"])
+
+
+def test_apply_boot_file_warns_but_still_succeeds_when_the_file_cannot_be_cleared(
+        tmp_path, monkeypatch, caplog):
+    # The connect went through; only the rewrite of the FAT file failed --
+    # realistically a /boot/firmware remounted read-only after an unclean
+    # power cut. Silence here would mean a cleartext password stays on the
+    # partition with nothing anywhere saying so.
+    path = tmp_path / "scoreboard-wifi.txt"
+    path.write_text("ssid=HomeNet\npsk=supersecret\n")
+
+    def consume_that_fails(_path, _when):
+        raise OSError("Read-only file system")
+
+    monkeypatch.setattr(netcfg, "consume", consume_that_fails)
+    with caplog.at_level("WARNING"):
+        assert apply_boot_file(path, nm=NetworkManager(run=FakeNmcli())) is True
+    assert "still on the boot partition" in caplog.text
+
+
+def test_main_survives_an_unexpected_exception(monkeypatch, caplog):
+    # subprocess.TimeoutExpired and MemoryError both used to escape main()
+    # uncaught, as root, at boot. Anything unexpected must be swallowed with
+    # a fixed message rather than str(e), which could carry anything.
+    def boom():
+        raise MemoryError("out of memory reading a hostile file")
+
+    monkeypatch.setattr(netcfg, "apply_boot_file", boom)
+    with caplog.at_level("ERROR"):
+        assert netcfg.main() == 0
+    assert "unexpected error" in caplog.text
+    assert "out of memory" not in caplog.text

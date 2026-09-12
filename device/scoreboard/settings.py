@@ -33,7 +33,7 @@ class Settings:
 
     @property
     def masked(self) -> str:
-        return self._entry if self.reveal else "\u2022" * len(self._entry)
+        return self._entry if self.reveal else "*" * len(self._entry)
 
     @property
     def selected(self) -> Network | None:
