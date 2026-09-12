@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"testing"
+
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
 
 func TestClaimBindsAnUnclaimedDeviceExactlyOnce(t *testing.T) {
@@ -134,5 +136,15 @@ func TestAnUnclaimedDeviceMarshalsWithoutAnOwnerAttribute(t *testing.T) {
 	}
 	if _, ok := item["owner"]; ok {
 		t.Error("unclaimed device wrote an owner attribute; the claim condition depends on its absence")
+	}
+}
+
+func TestCondFailureDistinguishesMissingFromPresentByTheReturnedItem(t *testing.T) {
+	if err := condFailure(nil, ErrNotFound, ErrAlreadyClaimed); !errors.Is(err, ErrNotFound) {
+		t.Errorf("nil item err = %v, want ErrNotFound", err)
+	}
+	item := map[string]types.AttributeValue{"thingName": &types.AttributeValueMemberS{Value: "scoreboard-01"}}
+	if err := condFailure(item, ErrNotFound, ErrAlreadyClaimed); !errors.Is(err, ErrAlreadyClaimed) {
+		t.Errorf("present item err = %v, want ErrAlreadyClaimed", err)
 	}
 }

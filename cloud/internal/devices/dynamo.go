@@ -97,6 +97,19 @@ func attrN(item map[string]types.AttributeValue, key string) (int64, error) {
 	return strconv.ParseInt(n.Value, 10, 64)
 }
 
+// condFailure turns a failed condition expression into the right sentinel: a
+// conditional UpdateItem fails identically whether the item doesn't exist or
+// it exists but fails the condition (wrong or missing owner), so the two
+// cases are told apart by whether DynamoDB returned the item that failed the
+// check. Callers request that via ReturnValuesOnConditionCheckFailure:
+// ALL_OLD on the UpdateItem call, then pass the exception's Item here.
+func condFailure(item map[string]types.AttributeValue, missing, present error) error {
+	if item == nil {
+		return missing
+	}
+	return present
+}
+
 func (x *Dynamo) Get(ctx context.Context, thingName string) (Device, bool, error) {
 	out, err := x.client.GetItem(ctx, &dynamodb.GetItemInput{
 		TableName: aws.String(x.table),
@@ -178,21 +191,19 @@ func (x *Dynamo) Register(ctx context.Context, thingName, code string) error {
 
 func (x *Dynamo) Claim(ctx context.Context, thingName, owner string) error {
 	_, err := x.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
-		TableName:                 aws.String(x.table),
-		Key:                       map[string]types.AttributeValue{"thingName": &types.AttributeValueMemberS{Value: thingName}},
-		UpdateExpression:          aws.String("SET #o = :o"),
-		ConditionExpression:       aws.String("attribute_exists(thingName) AND attribute_not_exists(#o)"),
-		ExpressionAttributeNames:  map[string]string{"#o": "owner"},
-		ExpressionAttributeValues: map[string]types.AttributeValue{":o": &types.AttributeValueMemberS{Value: owner}},
+		TableName:                           aws.String(x.table),
+		Key:                                 map[string]types.AttributeValue{"thingName": &types.AttributeValueMemberS{Value: thingName}},
+		UpdateExpression:                    aws.String("SET #o = :o"),
+		ConditionExpression:                 aws.String("attribute_exists(thingName) AND attribute_not_exists(#o)"),
+		ExpressionAttributeNames:            map[string]string{"#o": "owner"},
+		ExpressionAttributeValues:           map[string]types.AttributeValue{":o": &types.AttributeValueMemberS{Value: owner}},
+		ReturnValuesOnConditionCheckFailure: types.ReturnValuesOnConditionCheckFailureAllOld,
 	})
 	var cond *types.ConditionalCheckFailedException
 	if errors.As(err, &cond) {
-		// The condition also fails for a thingName that doesn't exist at
-		// all; Store's contract distinguishes that case as ErrNotFound, but
-		// telling the two apart needs a second read, and callers that Claim
-		// only ever do so for a device they just registered or looked up.
-		// ErrAlreadyClaimed is the case that matters in practice.
-		return ErrAlreadyClaimed
+		// The condition fails identically whether thingName doesn't exist or
+		// it exists but already has an owner; ALL_OLD tells them apart.
+		return condFailure(cond.Item, ErrNotFound, ErrAlreadyClaimed)
 	}
 	return err
 }
@@ -209,10 +220,13 @@ func (x *Dynamo) Update(ctx context.Context, d Device) error {
 			":g": &types.AttributeValueMemberN{Value: strconv.FormatInt(d.GameID, 10)},
 			":o": &types.AttributeValueMemberS{Value: d.Owner},
 		},
+		ReturnValuesOnConditionCheckFailure: types.ReturnValuesOnConditionCheckFailureAllOld,
 	})
 	var cond *types.ConditionalCheckFailedException
 	if errors.As(err, &cond) {
-		return ErrNotOwner
+		// The condition fails identically whether thingName doesn't exist or
+		// it exists with a different owner; ALL_OLD tells them apart.
+		return condFailure(cond.Item, ErrNotFound, ErrNotOwner)
 	}
 	return err
 }
@@ -233,10 +247,13 @@ func (x *Dynamo) Unbind(ctx context.Context, thingName, owner string) error {
 			":empty": &types.AttributeValueMemberS{Value: ""},
 			":zero":  &types.AttributeValueMemberN{Value: "0"},
 		},
+		ReturnValuesOnConditionCheckFailure: types.ReturnValuesOnConditionCheckFailureAllOld,
 	})
 	var cond *types.ConditionalCheckFailedException
 	if errors.As(err, &cond) {
-		return ErrNotOwner
+		// The condition fails identically whether thingName doesn't exist or
+		// it exists with a different owner; ALL_OLD tells them apart.
+		return condFailure(cond.Item, ErrNotFound, ErrNotOwner)
 	}
 	return err
 }
