@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -50,6 +51,17 @@ func subject(req events.APIGatewayV2HTTPRequest) string {
 	return req.RequestContext.Authorizer.JWT.Claims["sub"]
 }
 
+// decodeBody returns the request body, base64-decoding it first if API
+// Gateway marked it as encoded. Unmarshalling req.Body directly would fail
+// silently in that case, surfacing as a confusing 400 rather than the real
+// cause.
+func decodeBody(req events.APIGatewayV2HTTPRequest) ([]byte, error) {
+	if !req.IsBase64Encoded {
+		return []byte(req.Body), nil
+	}
+	return base64.StdEncoding.DecodeString(req.Body)
+}
+
 // owned returns the device if the caller owns it, or false. Callers must
 // treat false as 404.
 func (h *Handler) owned(ctx context.Context, thing, sub string) (devices.Device, bool, error) {
@@ -72,6 +84,10 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 		route = req.RouteKey
 	}
 	thing := req.PathParameters["thing"]
+	rawBody, err := decodeBody(req)
+	if err != nil {
+		return fail(400, "invalid request body")
+	}
 
 	switch route {
 	case "GET /api/devices":
@@ -89,7 +105,7 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 		var body struct {
 			Code string `json:"code"`
 		}
-		if err := json.Unmarshal([]byte(req.Body), &body); err != nil || body.Code == "" {
+		if err := json.Unmarshal(rawBody, &body); err != nil || body.Code == "" {
 			return fail(400, "a code is required")
 		}
 		d, found, err := h.Store.ByCode(ctx, body.Code)
@@ -111,7 +127,7 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 		var body struct {
 			GameID int64 `json:"gameId"`
 		}
-		if err := json.Unmarshal([]byte(req.Body), &body); err != nil || body.GameID == 0 {
+		if err := json.Unmarshal(rawBody, &body); err != nil || body.GameID == 0 {
 			return fail(400, "a gameId is required")
 		}
 		d, ok, err := h.owned(ctx, thing, sub)
@@ -126,6 +142,13 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 			return fail(500, "encode failed")
 		}
 		topic := fmt.Sprintf("scoreboard/%s/config", d.ThingName)
+		// Publish before persisting. If Update then fails, the panel is
+		// already showing the new game while the stored record still shows
+		// the old one. The reverse order trades that for a worse mismatch —
+		// a record claiming a change the panel never received, when the
+		// panel is the thing the owner is actually looking at. The retained
+		// publish is idempotent, so a retry (or the next successful change)
+		// converges the record either way.
 		if err := h.Pub.Publish(ctx, topic, payload, true); err != nil {
 			return fail(502, "publish failed")
 		}
@@ -139,7 +162,7 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 		var body struct {
 			Name string `json:"name"`
 		}
-		if err := json.Unmarshal([]byte(req.Body), &body); err != nil || body.Name == "" {
+		if err := json.Unmarshal(rawBody, &body); err != nil || body.Name == "" {
 			return fail(400, "a name is required")
 		}
 		d, ok, err := h.owned(ctx, thing, sub)
@@ -156,7 +179,11 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 		return respond(200, deviceView{ThingName: d.ThingName, Name: d.Name, GameID: d.GameID})
 
 	case "DELETE /api/devices/{thing}":
-		if _, ok, err := h.owned(ctx, thing, sub); err != nil || !ok {
+		_, ok, err := h.owned(ctx, thing, sub)
+		if err != nil {
+			return fail(500, "lookup failed")
+		}
+		if !ok {
 			return fail(404, "no such device")
 		}
 		if err := h.Store.Unbind(ctx, thing, sub); err != nil {

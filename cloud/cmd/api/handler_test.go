@@ -117,6 +117,44 @@ func TestListReturnsOnlyTheCallersDevices(t *testing.T) {
 	}
 }
 
+func TestAStrangerCannotRenameAnotherOwnersDevice(t *testing.T) {
+	h, st, _ := handlerWith(t)
+	ctx := context.Background()
+	_ = st.Claim(ctx, "scoreboard-7qf2", "sub-a")
+
+	res, err := h.Handle(ctx, req("PATCH", "PATCH /api/devices/{thing}", "sub-b",
+		`{"name":"Not yours"}`, map[string]string{"thing": "scoreboard-7qf2"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.StatusCode != 404 {
+		t.Errorf("status = %d, want 404 — 403 would confirm the device exists", res.StatusCode)
+	}
+	d, _, _ := st.Get(ctx, "scoreboard-7qf2")
+	if d.Name != "" {
+		t.Errorf("stranger's rename mutated the device: name = %q", d.Name)
+	}
+}
+
+func TestAStrangerCannotUnbindAnotherOwnersDevice(t *testing.T) {
+	h, st, _ := handlerWith(t)
+	ctx := context.Background()
+	_ = st.Claim(ctx, "scoreboard-7qf2", "sub-a")
+
+	res, err := h.Handle(ctx, req("DELETE", "DELETE /api/devices/{thing}", "sub-b",
+		"", map[string]string{"thing": "scoreboard-7qf2"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.StatusCode != 404 {
+		t.Errorf("status = %d, want 404 — 403 would confirm the device exists", res.StatusCode)
+	}
+	d, found, _ := st.Get(ctx, "scoreboard-7qf2")
+	if !found || d.Owner != "sub-a" {
+		t.Errorf("stranger's delete changed ownership: found=%v owner=%q, want sub-a", found, d.Owner)
+	}
+}
+
 func TestAnUnauthenticatedRequestIsRejectedWithoutTouchingTheStore(t *testing.T) {
 	h, _, pub := handlerWith(t)
 	res, err := h.Handle(context.Background(), req("GET", "GET /api/devices", "", "", nil))
