@@ -132,6 +132,17 @@ echo '{"gameId": 2026020001}' > device/config/state.json
 sudo systemctl restart scoreboard
 ```
 
+### Admin API
+
+The backend for the [admin site](docs/superpowers/specs/2026-09-07-admin-site-design.md)
+mentioned above exists — a Lambda behind API Gateway, with a Cognito-signed-in
+owner able to retarget a panel to a different game over MQTT — but the site
+itself does not yet. Retargeting doesn't change what the device does: it
+still only subscribes and renders, the buttons still work exactly as above,
+and `device/config/state.json` is still the fallback when neither a button
+nor a retained config message has set a game. See
+[`docs/admin-api.md`](docs/admin-api.md) for the routes.
+
 ## How it works
 
 The reducer folds bus events into one compact JSON document per game and
