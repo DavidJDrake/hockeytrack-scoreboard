@@ -95,6 +95,20 @@ resource "aws_cognito_user_pool_client" "site" {
   allowed_oauth_scopes                 = ["openid", "email"]
   supported_identity_providers         = ["COGNITO"]
 
+  # SRP proves a password without sending it, and refresh keeps a session
+  # alive between the two; nothing here needs USER_PASSWORD_AUTH, which
+  # would let a caller submit a password straight to Cognito for guessing.
+  explicit_auth_flows = ["ALLOW_USER_SRP_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"]
+
+  # Without this, AWS defaults new clients to LEGACY, which makes sign-in
+  # error messages tell an unauthenticated caller whether a given email has
+  # an account -- the same disclosure the API itself avoids by returning 404
+  # rather than 403 (see admin-api.md).
+  prevent_user_existence_errors = "ENABLED"
+
+  # localhost:8000 is deliberate, not a leftover: it's the redirect_uri the
+  # docs' curl walkthrough (docs/admin-api.md) uses to complete the PKCE
+  # exchange from a human's browser without a hosted site to redirect to.
   callback_urls = ["https://${var.admin_site_origin}/", "http://localhost:8000/"]
   logout_urls   = ["https://${var.admin_site_origin}/"]
 
@@ -134,12 +148,20 @@ data "aws_iam_policy_document" "api" {
     actions   = local.logs
     resources = ["${aws_cloudwatch_log_group.api.arn}:*"]
   }
+  # No PutItem: the only PutItem this package ever makes is Register, which
+  # nothing in handler.go calls (registration is still by hand). PutItem
+  # would also let a caller rewrite a row wholesale, voiding the
+  # attribute_not_exists(owner) condition that makes Claim one-time -- so it
+  # stays out even once Register gets a caller, in favor of a narrower grant.
   statement {
-    actions = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:Query"]
-    resources = [
-      aws_dynamodb_table.devices.arn,
-      "${aws_dynamodb_table.devices.arn}/index/*",
-    ]
+    actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
+    resources = [aws_dynamodb_table.devices.arn]
+  }
+  # Every Query in dynamo.go (ByCode, ListByOwner) names an index, never the
+  # table itself.
+  statement {
+    actions   = ["dynamodb:Query"]
+    resources = ["${aws_dynamodb_table.devices.arn}/index/*"]
   }
   # The one identity in this account allowed to publish a device's config, and
   # only to that topic shape. It cannot touch hockeytrack/games/*, which the
@@ -228,6 +250,17 @@ resource "aws_apigatewayv2_stage" "default" {
   api_id      = aws_apigatewayv2_api.admin.id
   name        = "$default"
   auto_deploy = true
+
+  # Without stage-level limits, this API inherits the account-wide API
+  # Gateway quota -- shared with two unrelated projects in this account -- so
+  # one looping caller here would degrade both of them too. 20 rps / 40 burst
+  # is generous for a handful of owners retargeting panels by hand and still
+  # far below the account default.
+  default_route_settings {
+    throttling_rate_limit  = 20
+    throttling_burst_limit = 40
+  }
+
   access_log_settings {
     destination_arn = aws_cloudwatch_log_group.api_access.arn
     format = jsonencode({
