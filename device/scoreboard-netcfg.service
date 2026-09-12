@@ -1,0 +1,24 @@
+# Applies device/config-free Wi-Fi settings left on the boot partition, then
+# removes them from it. Runs on every boot, not just the first: this is the
+# only way to change a panel's network from a Windows or Mac machine, because
+# NetworkManager keeps its connections on the ext4 root partition that neither
+# can read.
+
+[Unit]
+Description=Apply scoreboard Wi-Fi settings from the boot partition
+After=NetworkManager.service
+Wants=NetworkManager.service
+Before=scoreboard.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+WorkingDirectory=/opt/scoreboard
+ExecStart=/opt/scoreboard/.venv/bin/python -m scoreboard.netcfg
+# Runs as root: it writes a NetworkManager system connection and rewrites a
+# file on the boot partition. It is a few seconds at boot, not a resident
+# service, and it exits 0 even when the file is wrong so a typo cannot stop
+# the panel starting.
+
+[Install]
+WantedBy=multi-user.target
