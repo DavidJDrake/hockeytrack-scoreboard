@@ -10,11 +10,13 @@ import time
 import pygame
 
 from . import buttons
+from . import screens
 from .assets import Assets
-from .config import Config, parse_rotate
+from .config import Config, NotProvisioned, parse_rotate
 from .display import display_failure, parse_size, placement, present
 from .link import Link
 from .model import GameState, parse_today, parse_config
+from .netcfg import NetworkManager
 from .render import H, W, draw
 
 log = logging.getLogger("scoreboard")
@@ -44,7 +46,11 @@ def main() -> None:
     if not fixture:
         try:
             cfg = Config.load()
+        except NotProvisioned as e:
+            # The normal state of a freshly flashed panel, not a failure.
+            log.info("%s", e)
         except RuntimeError as e:
+            # A corrupt or incomplete identity. Restarting cannot help.
             log.error("%s", e)
             sys.exit(1)
     events: queue.Queue = queue.Queue()
@@ -84,6 +90,11 @@ def main() -> None:
              *screen.get_size(), place.rotation, *place.size)
     assets = Assets()
     frame = pygame.Surface((W, H))
+    build = screens.build_identity()
+    nm = NetworkManager()
+    net_ok = False
+    last_net_check = 0.0
+    NET_POLL_S = 10
 
     current: GameState | None = None
     today = []
@@ -168,7 +179,24 @@ def main() -> None:
                     brightness = {1.0: 0.6, 0.6: 0.3}.get(brightness, 1.0)
                     last_update = time.time()  # a button press counts as activity too
             now_ms = int(time.time() * 1000)
-            if should_blank(time.time(), last_update, current, BLANK_AFTER_S):
+            # While MQTT is connected there is demonstrably a network, so the
+            # scoreboard path costs no nmcli calls at all. Only a panel that
+            # isn't working asks the radio, and then only every 10 seconds.
+            if link_ok:
+                net_ok, last_net_check = True, time.time()
+            elif time.time() - last_net_check >= NET_POLL_S:
+                last_net_check = time.time()
+                try:
+                    net_ok = nm.status().online
+                except Exception as e:  # nmcli absent on a desktop, or failing
+                    log.debug("network status unavailable: %s", e)
+                    net_ok = False
+            showing = screens.screen_for(cfg is not None or bool(fixture), net_ok or bool(fixture))
+            if showing == screens.UNREGISTERED:
+                screens.draw_unregistered(frame, assets, build)
+            elif showing == screens.OFFLINE:
+                screens.draw_offline(frame, assets, build)
+            elif should_blank(time.time(), last_update, current, BLANK_AFTER_S):
                 frame.fill((0, 0, 0))
             else:
                 draw(frame, current, now_ms, assets, link_ok)

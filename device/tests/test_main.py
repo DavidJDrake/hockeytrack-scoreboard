@@ -58,3 +58,18 @@ def test_a_video_driver_missing_from_the_build_stops_the_service_for_good():
     r = subprocess.run([sys.executable, "-m", "scoreboard.main"], cwd=DEVICE, env=env,
                        capture_output=True, text=True, timeout=30)
     assert r.returncode == EX_CONFIG, r.stderr
+
+
+def test_an_unregistered_panel_reaches_the_display_instead_of_exiting(tmp_path):
+    # Before this change main exited 1 on a missing device.json, never reaching
+    # the display. Now it must get past config and fail on the bogus driver
+    # instead -- which is how we prove config no longer short-circuits boot.
+    env = dict(os.environ,
+               SCOREBOARD_CONFIG_DIR=str(tmp_path),
+               SDL_VIDEODRIVER="definitelynotadriver")
+    env.pop("DISPLAY", None)
+    env.pop("SCOREBOARD_FIXTURE", None)
+    done = subprocess.run([sys.executable, "-m", "scoreboard.main"],
+                          cwd=Path(__file__).resolve().parents[1],
+                          env=env, capture_output=True, text=True, timeout=60)
+    assert done.returncode == EX_CONFIG
