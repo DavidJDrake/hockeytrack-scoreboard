@@ -1,6 +1,6 @@
 # Scoreboard admin site — design
 
-*2026-09-07. Status: draft for review. Ticket: SCO-10, epic SCO-9.*
+*2026-09-07. Status: **accepted 2026-09-12** by the owner. Ticket: SCO-10, epic SCO-9.*
 
 A website where the owner of a scoreboard chooses which game it follows, and
 where more than one person can own a scoreboard.
@@ -33,6 +33,9 @@ that plainly is worth a paragraph, because the instinct on hearing
 be pure cost.
 
 ## 2. Decision: build for multiple users now
+
+*Accepted 2026-09-12. The alternative — a single-owner page, an afternoon's work —
+was offered and declined, on the grounds below.*
 
 The alternative — a single-owner page with access controlled by not sharing
 the URL — is genuinely cheaper and would work today. It is rejected because
@@ -237,15 +240,24 @@ between several users; device health or "last seen"; any notion of an
 organisation or household; sign-up open to the public; a mobile app. Each is
 a reasonable v2 and none blocks the first version.
 
-## 8. Open questions
+## 8. Questions settled
 
-- **Does the pairing code survive a re-provision?** If a device is re-flashed
-  it gets a new thing and a new code, and the old row is orphaned. Probably
-  fine — the owner unbinds and re-claims — but worth deciding rather than
-  discovering.
-- **Should the site show what the panel is showing?** It could subscribe to
-  the same state document and mirror the board in the browser. Appealing, and
-  entirely unnecessary for v1.
-- **Invite mechanics.** Creating users by hand in the Cognito console is fine
-  for family. It stops being fine at some size that this project may never
-  reach.
+These were open in the draft. Settled 2026-09-12, before planning.
+
+**A re-flashed panel is a new device.** Re-provisioning gives it a new thing
+name and therefore a new pairing code; the previous ownership row is orphaned.
+The owner unbinds the old entry and claims the new one. Rejected the tidier
+alternative of having provisioning clear the binding itself: that would give
+the provisioning path the right to delete ownership records, which is a write
+worth not having.
+
+**The site does not mirror what the panel is showing.** It could — the state
+document is public and the browser could render it. It is declined for v1
+because it is a second renderer to keep in step with the first, for no
+functional gain: the panel is in the room, and the site already shows which
+game each panel is set to.
+
+**Invites are manual.** Users are created by hand in the Cognito console,
+which is right for a handful of family members and needs no code. It stops
+being right at some size this project may never reach; revisit it then rather
+than build for it now.
