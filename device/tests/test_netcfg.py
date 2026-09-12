@@ -15,7 +15,7 @@ def test_crlf_line_endings():
 def test_utf8_bom():
     # Notepad again: it prefixes a BOM that would otherwise become part of
     # the first key, so "ssid" would never match.
-    assert parse_wifi_file("﻿ssid=HomeNet\npsk=supersecret\n").ssid == "HomeNet"
+    assert parse_wifi_file("\ufeffssid=HomeNet\npsk=supersecret\n").ssid == "HomeNet"
 
 
 def test_whitespace_and_key_case():

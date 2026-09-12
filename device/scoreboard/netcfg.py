@@ -37,7 +37,7 @@ def parse_wifi_file(text: str) -> WifiSettings | None:
     ignored, keys are case-insensitive, and only the first '=' separates so
     a password may contain more.
     """
-    if text.startswith("﻿"):
+    if text.startswith("\ufeff"):
         text = text[1:]
     values: dict[str, str] = {}
     for raw in text.splitlines():
