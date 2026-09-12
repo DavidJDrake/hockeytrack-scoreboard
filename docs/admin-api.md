@@ -87,6 +87,10 @@ window — read it before assuming a 500 here means nothing happened.
   device.
 - **400** `{"error": "a gameId is required"}` — missing, zero, or a body that
   doesn't parse.
+- **500** `{"error": "lookup failed"}` — the ownership check itself failed
+  (`Store.Get` returned an error), before the API could determine whether the
+  caller owns `{thing}`. Distinct from the 404 below: this means the check
+  didn't complete, not that it completed and said "not yours."
 - **404** `{"error": "no such device"}` — caller doesn't own `{thing}` (or it
   doesn't exist).
 - **502** `{"error": "publish failed"}` — the retained MQTT publish to
@@ -115,6 +119,9 @@ anything the device itself knows about.
 - **200** — the updated device, same shape as above.
 - **400** `{"error": "a name is required"}` — missing, empty, or unparseable
   body.
+- **500** `{"error": "lookup failed"}` — the ownership check itself failed
+  (`Store.Get` returned an error), same as on `PUT .../game` above — distinct
+  from the 404 below.
 - **404** `{"error": "no such device"}` — caller doesn't own `{thing}`.
 - **500** `{"error": "save failed"}` — store write failed.
 
@@ -126,6 +133,9 @@ subscribes to nothing new — it just goes on following whatever game it was
 last told to, until someone claims it again and changes that).
 
 - **200** — `{"thingName": "scoreboard-01"}`
+- **500** `{"error": "lookup failed"}` — the ownership check itself failed
+  (`Store.Get` returned an error), same as on `PUT .../game` above — distinct
+  from the 404 below.
 - **404** `{"error": "no such device"}` — caller doesn't own `{thing}`.
 - **500** `{"error": "unbind failed"}` — store write failed.
 
@@ -163,6 +173,13 @@ requires the same JWT as every other route.
 - **400** `{"error": "invalid request body"}` — API Gateway marked the body
   base64-encoded and it didn't decode. Rare, and generally not something a
   hand-written client will trigger.
+
+One more response is in the code but not reachable through this deployment:
+if the route key doesn't match any of the six above, the handler falls
+through to `404 {"error": "no such route"}`. `terraform/admin.tf` wires API
+Gateway to forward exactly these six route keys and nothing else, so this is
+a safety net in the handler's own switch, not something a real request can
+trigger.
 
 ## Getting a token and calling the API
 
