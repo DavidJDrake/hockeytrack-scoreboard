@@ -188,6 +188,35 @@ The page is plain HTML and JavaScript. It has one job — list devices, list
 games, set a game — and does not merit a framework or a build step. The
 existing site is written the same way and is the house style.
 
+### 5.1 It looks like HockeyTrack, because it is the same project
+
+**Decided: reuse the existing site's design rather than invent one.**
+`hockeytrack.davidjdrake.com` already has a house style, and a scoreboard admin
+site that looked like something else would read as a different product.
+
+What that means concretely, from `site/assets/site.css` in the HockeyTrack
+repository: the same custom properties (`--ice`, `--ink`, `--muted`, `--rule`,
+`--blue #0033A0`, `--red #C8102E`, `--crease`), the same three families
+(Barlow Condensed for display and controls, IBM Plex Sans for body, IBM Plex
+Mono for figures), the same uppercase condensed buttons and 2px-bordered
+panels, and the same plain HTML with no build step. Fonts are self-hosted
+woff2 subsets, preloaded.
+
+**Copy the assets; do not hotlink them.** This site is a separate origin, and
+HockeyTrack's distribution serves no CORS headers (verified 2026-09-06, §3.5),
+so cross-origin font and stylesheet loads would need a change over there —
+coupling two projects for the sake of one file. `site.css` and the five woff2
+subsets are a few kilobytes; vendor them, and note in both repositories that
+they are a copy, so a later redesign is a deliberate two-repository change
+rather than a silent drift.
+
+**The countdown is already built.** `site/assets/countdown.js` is a documented,
+embeddable component — `data-start`, `data-away`, `data-home`, or a `next()`
+callback that rolls on to the following game — and it has the accessibility
+work already done: the ticking digits are `aria-hidden`, a screen-reader
+summary refreshes once a minute, and there is a pause control for WCAG 2.2.2.
+Reuse it rather than writing a second clock, here and in SCO-19.
+
 ## 6. Security
 
 - The browser holds a JWT and never AWS credentials.
