@@ -16,9 +16,18 @@ CONFIG="$DEVICE/config"
 OS_RELEASE="${OS_RELEASE:-/etc/os-release}"
 USER_NAME="$(id -un)"
 
+APPLIANCE=0
+SERVICE_USER=scoreboard
+APP_DIR=/opt/scoreboard
+STATE_DIR=/var/lib/scoreboard
+
 die() { echo "pi-setup: $*" >&2; exit 1; }
 
 render_unit() {
+  if [ "$APPLIANCE" -eq 1 ]; then
+    cat "$DEVICE/scoreboard-appliance.service"
+    return
+  fi
   case "$USER_NAME$DEVICE" in
     *'|'* | *'&'* | *\\*) die "cannot template a user or path containing | & or \\: $USER_NAME $DEVICE" ;;
   esac
@@ -32,6 +41,9 @@ preflight() {
     buster | bullseye | bookworm)
       die "Raspberry Pi OS $codename is too old. Its python3-pygame fails device/requirements.txt, so pip would install a PyPI wheel instead, and those are built without the kmsdrm driver the panel needs. Flash Raspberry Pi OS Lite (64-bit), Trixie or later." ;;
   esac
+  # An image is built before any device has an identity, so there is nothing
+  # to check for here; the identity arrives when the panel is registered.
+  [ "$APPLIANCE" -eq 1 ] && return 0
   for f in device.json device.pem.crt private.pem.key AmazonRootCA1.pem; do
     [ -f "$CONFIG/$f" ] || die "missing $CONFIG/$f -- copy device/config/ over from the machine that ran make provision"
   done
@@ -63,7 +75,7 @@ install() {
   esac
 
   echo "==> groups"
-  local groups=video,render
+  local groups=video,render,input
   if getent group gpio >/dev/null; then groups="$groups,gpio"; fi
   # systemd resolves the user's groups each time it starts the unit, so the
   # service gets these without a re-login; interactive shells need one.
@@ -83,9 +95,64 @@ install() {
   echo "Its first line names the video driver, the display size and the rotation chosen."
 }
 
-case "${1:-}" in
+install_appliance() {
+  preflight
+  echo "==> apt packages"
+  apt-get update
+  apt-get install -y python3-pygame python3-gpiozero python3-venv network-manager policykit-1
+
+  echo "==> service account"
+  getent passwd "$SERVICE_USER" >/dev/null || \
+    useradd --system --home-dir "$STATE_DIR" --create-home --shell /usr/sbin/nologin "$SERVICE_USER"
+  for g in video render input gpio; do
+    getent group "$g" >/dev/null && usermod -aG "$g" "$SERVICE_USER"
+  done
+  install -d -o "$SERVICE_USER" -g "$SERVICE_USER" -m 700 "$STATE_DIR"
+
+  echo "==> application"
+  mkdir -p "$APP_DIR"
+  cp -a "$DEVICE/scoreboard" "$DEVICE/requirements.txt" "$APP_DIR/"
+  python3 -m venv --system-site-packages "$APP_DIR/.venv"
+  "$APP_DIR/.venv/bin/pip" install -r "$APP_DIR/requirements.txt"
+  local where
+  where="$(PYGAME_HIDE_SUPPORT_PROMPT=1 "$APP_DIR/.venv/bin/python" -c 'import os, pygame; print(os.path.dirname(pygame.__file__))')"
+  case "$where" in
+    /usr/lib/python3/dist-packages/*) ;;
+    *) die "the venv is using pygame from $where, not the system package, so it has no kmsdrm driver." ;;
+  esac
+  chown -R root:root "$APP_DIR"
+
+  echo "==> units and polkit"
+  render_unit > /etc/systemd/system/scoreboard.service
+  cp "$DEVICE/scoreboard-netcfg.service" /etc/systemd/system/scoreboard-netcfg.service
+  install -D -m 644 "$DEVICE/polkit/10-scoreboard-network.rules" \
+    /etc/polkit-1/rules.d/10-scoreboard-network.rules
+  # Enabled by symlink rather than `systemctl enable`: this also runs inside a
+  # pi-gen chroot, where there is no running systemd to talk to.
+  mkdir -p /etc/systemd/system/multi-user.target.wants
+  ln -sf /etc/systemd/system/scoreboard.service \
+    /etc/systemd/system/multi-user.target.wants/scoreboard.service
+  ln -sf /etc/systemd/system/scoreboard-netcfg.service \
+    /etc/systemd/system/multi-user.target.wants/scoreboard-netcfg.service
+  echo "Appliance installed. It starts on the next boot."
+}
+
+for arg in "$@"; do
+  case "$arg" in
+    --appliance) APPLIANCE=1 ;;
+    --print-unit | --preflight) ACTION="$arg" ;;
+    *) echo "usage: $0 [--appliance] [--preflight | --print-unit]" >&2; exit 2 ;;
+  esac
+done
+
+case "${ACTION:-}" in
   --print-unit) render_unit ;;
   --preflight) preflight && echo "preflight ok" ;;
-  "") install ;;
-  *) echo "usage: $0 [--preflight | --print-unit]" >&2; exit 2 ;;
+  "")
+    if [ "$APPLIANCE" -eq 1 ]; then
+      [ "$(id -u)" -eq 0 ] || die "--appliance installs system-wide; run it as root"
+      install_appliance
+    else
+      install
+    fi ;;
 esac
