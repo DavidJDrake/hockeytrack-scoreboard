@@ -107,7 +107,25 @@ make deploy
    adds you to the `video` and `render` groups (kmsdrm opens `/dev/dri`
    directly, with no X server to grant access), and installs, enables and
    starts `scoreboard.service` for your user and checkout path.
-   `tools/pi-setup.sh --preflight` runs only the checks.
+   `tools/pi-setup.sh --preflight` runs only the checks. To install the
+   system-wide layout used by the image rather than a checkout in your
+   home directory, pass `--appliance`.
+
+### Changing the Wi-Fi later
+
+The panel's settings screen opens with `S` on a USB keyboard: pick a network,
+type the password, press Enter. `R` there offers a factory reset, which clears
+this panel's identity and saved networks — it does not stop the old certificate
+working, so also remove the device from your account.
+
+If you cannot get a keyboard to it, write a file called `scoreboard-wifi.txt`
+on the card's boot partition — the one Windows and macOS can see — containing:
+
+    ssid=YourNetworkName
+    psk=YourWiFiPassword
+
+and reboot. The panel applies it on every boot, then replaces the file with a
+note so your password is not left sitting on a partition any computer can read.
 
 The first line the service logs (`journalctl -u scoreboard -f`) names the
 video driver, the display size and the rotation it chose. If the picture is
