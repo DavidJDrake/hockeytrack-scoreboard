@@ -6,6 +6,7 @@ package devices
 import (
 	"context"
 	"errors"
+	"regexp"
 	"sync"
 )
 
@@ -17,7 +18,30 @@ var (
 	ErrAlreadyClaimed = errors.New("devices: already claimed")
 	// ErrNotOwner is returned when the caller is not the device's owner.
 	ErrNotOwner = errors.New("devices: not the owner")
+	// ErrInvalidThingName is returned by Register for a name that is empty
+	// or contains a character outside validThingName's set.
+	ErrInvalidThingName = errors.New("devices: invalid thing name")
+	// ErrDuplicateCode is returned by ByCode when more than one unclaimed
+	// device shares a code. code is a GSI partition key, not a unique
+	// constraint, so this can happen if two rows are ever registered with
+	// the same code; binding whichever came back first would be a coin
+	// flip, so this is treated as a store error instead.
+	ErrDuplicateCode = errors.New("devices: code matches more than one unclaimed device")
 )
+
+// thingNameRE bounds what Register accepts as a thing name. AWS IoT itself
+// is looser -- CreateThing's thingName pattern is `[a-zA-Z0-9:_-]+` -- but
+// handler.go interpolates ThingName directly into the MQTT topic
+// "scoreboard/<name>/config", and IAM's "*" in that topic's ARN matches "/"
+// too. A name holding a stray "/" would publish to a topic nothing
+// subscribes to, silently. This set is a strict subset of AWS's own -- it
+// additionally excludes ':', which AWS allows but nothing here needs -- so
+// every name Register accepts is also guaranteed valid to AWS.
+var thingNameRE = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+func validThingName(name string) bool {
+	return thingNameRE.MatchString(name)
+}
 
 // Device is one panel and its ownership.
 type Device struct {
@@ -35,13 +59,15 @@ type Store interface {
 	Get(ctx context.Context, thingName string) (Device, bool, error)
 	// ByCode returns an unclaimed device matching code, or found=false if none
 	// exists or if the device is already claimed. A claimed device's code stops
-	// resolving; codes are one-time tokens for pairing only.
+	// resolving; codes are one-time tokens for pairing only. Returns
+	// ErrDuplicateCode if more than one unclaimed device shares the code.
 	ByCode(ctx context.Context, code string) (Device, bool, error)
 	// ListByOwner returns all devices claimed by owner.
 	ListByOwner(ctx context.Context, owner string) ([]Device, error)
 	// Register provisions a new device with its pairing code. Registering the
 	// same thingName twice is idempotent and does not overwrite the original code,
-	// for provisioning workflows that may retry.
+	// for provisioning workflows that may retry. Returns ErrInvalidThingName if
+	// thingName is empty or contains a character outside validThingName's set.
 	Register(ctx context.Context, thingName, code string) error
 	// Claim binds a device to an owner. A device must have been registered and
 	// must be unclaimed (Owner empty). Returns ErrNotFound if the device does
@@ -75,12 +101,17 @@ func (f *Fake) Get(_ context.Context, thingName string) (Device, bool, error) {
 func (f *Fake) ByCode(_ context.Context, code string) (Device, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	var match Device
+	found := false
 	for _, d := range f.items {
 		if d.Code == code && d.Owner == "" {
-			return d, true, nil
+			if found {
+				return Device{}, false, ErrDuplicateCode
+			}
+			match, found = d, true
 		}
 	}
-	return Device{}, false, nil
+	return match, found, nil
 }
 
 func (f *Fake) ListByOwner(_ context.Context, owner string) ([]Device, error) {
@@ -96,6 +127,9 @@ func (f *Fake) ListByOwner(_ context.Context, owner string) ([]Device, error) {
 }
 
 func (f *Fake) Register(_ context.Context, thingName, code string) error {
+	if !validThingName(thingName) {
+		return ErrInvalidThingName
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if _, ok := f.items[thingName]; ok {

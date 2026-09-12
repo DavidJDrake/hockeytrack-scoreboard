@@ -139,6 +139,43 @@ func TestAnUnclaimedDeviceMarshalsWithoutAnOwnerAttribute(t *testing.T) {
 	}
 }
 
+func TestRegisterRejectsInvalidThingNames(t *testing.T) {
+	st, ctx := NewFake(), context.Background()
+	for _, name := range []string{"", "has space", "slash/here", "semi;colon", "colon:not-allowed", "dot.not-allowed", "hash#wild", "plus+wild"} {
+		if err := st.Register(ctx, name, "01"); !errors.Is(err, ErrInvalidThingName) {
+			t.Errorf("Register(%q) err = %v, want ErrInvalidThingName", name, err)
+		}
+	}
+	if _, found, _ := st.Get(ctx, ""); found {
+		t.Error("an invalid thing name must not be stored")
+	}
+	for _, name := range []string{"scoreboard-01", "scoreboard_01", "ABC123"} {
+		if err := st.Register(ctx, name, "01"); err != nil {
+			t.Errorf("Register(%q) with a valid name: %v", name, err)
+		}
+	}
+}
+
+func TestByCodeErrorsOnDuplicateUnclaimedCodes(t *testing.T) {
+	st, ctx := NewFake(), context.Background()
+	_ = st.Register(ctx, "scoreboard-01", "DUPE")
+	_ = st.Register(ctx, "scoreboard-02", "DUPE")
+	if _, _, err := st.ByCode(ctx, "DUPE"); !errors.Is(err, ErrDuplicateCode) {
+		t.Errorf("ByCode with two unclaimed rows sharing a code err = %v, want ErrDuplicateCode", err)
+	}
+}
+
+func TestByCodeIgnoresClaimedDuplicatesWhenOnlyOneIsUnclaimed(t *testing.T) {
+	st, ctx := NewFake(), context.Background()
+	_ = st.Register(ctx, "scoreboard-01", "DUPE")
+	_ = st.Register(ctx, "scoreboard-02", "DUPE")
+	_ = st.Claim(ctx, "scoreboard-01", "user-a")
+	d, found, err := st.ByCode(ctx, "DUPE")
+	if err != nil || !found || d.ThingName != "scoreboard-02" {
+		t.Fatalf("ByCode = %+v, found=%v, err=%v; want scoreboard-02/true/nil", d, found, err)
+	}
+}
+
 func TestCondFailureDistinguishesMissingFromPresentByTheReturnedItem(t *testing.T) {
 	if err := condFailure(nil, ErrNotFound, ErrAlreadyClaimed); !errors.Is(err, ErrNotFound) {
 		t.Errorf("nil item err = %v, want ErrNotFound", err)

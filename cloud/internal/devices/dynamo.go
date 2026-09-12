@@ -138,16 +138,25 @@ func (x *Dynamo) ByCode(ctx context.Context, code string) (Device, bool, error) 
 	if err != nil {
 		return Device{}, false, err
 	}
+	var match Device
+	found := false
 	for _, item := range out.Items {
 		d, err := unmarshalDevice(item)
 		if err != nil {
 			return Device{}, false, err
 		}
-		if d.Owner == "" { // a claimed code must stop resolving
-			return d, true, nil
+		if d.Owner != "" { // a claimed code must stop resolving
+			continue
 		}
+		if found {
+			// code is a GSI partition key, not a uniqueness constraint; two
+			// unclaimed rows sharing a code would otherwise bind whichever
+			// Query happened to return first.
+			return Device{}, false, ErrDuplicateCode
+		}
+		match, found = d, true
 	}
-	return Device{}, false, nil
+	return match, found, nil
 }
 
 func (x *Dynamo) ListByOwner(ctx context.Context, owner string) ([]Device, error) {
@@ -173,6 +182,9 @@ func (x *Dynamo) ListByOwner(ctx context.Context, owner string) ([]Device, error
 }
 
 func (x *Dynamo) Register(ctx context.Context, thingName, code string) error {
+	if !validThingName(thingName) {
+		return ErrInvalidThingName
+	}
 	item, err := marshalDevice(Device{ThingName: thingName, Code: code})
 	if err != nil {
 		return err
