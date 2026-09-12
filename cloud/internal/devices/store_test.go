@@ -77,3 +77,32 @@ func TestByCodeFindsOnlyUnclaimedDevices(t *testing.T) {
 		t.Error("ByCode found a claimed device; a used code must stop resolving")
 	}
 }
+
+func TestUpdateEnforcesOwnershipAndImmutability(t *testing.T) {
+	st, ctx := NewFake(), context.Background()
+	_ = st.Register(ctx, "scoreboard-01", "7QF2")
+	_ = st.Claim(ctx, "scoreboard-01", "user-a")
+
+	// Non-owner cannot update.
+	if err := st.Update(ctx, Device{ThingName: "scoreboard-01", Owner: "user-b", Name: "New Name"}); !errors.Is(err, ErrNotOwner) {
+		t.Errorf("update by non-owner err = %v, want ErrNotOwner", err)
+	}
+
+	// Owner can update Name and GameID.
+	if err := st.Update(ctx, Device{ThingName: "scoreboard-01", Owner: "user-a", Name: "Living Room", GameID: 2025020123}); err != nil {
+		t.Fatalf("update by owner: %v", err)
+	}
+	d, _, _ := st.Get(ctx, "scoreboard-01")
+	if d.Name != "Living Room" || d.GameID != 2025020123 {
+		t.Errorf("after update: Name=%q GameID=%d, want Living Room/2025020123", d.Name, d.GameID)
+	}
+
+	// Code and ThingName must remain immutable: attempting to change them has no effect.
+	if err := st.Update(ctx, Device{ThingName: "scoreboard-01", Owner: "user-a", Code: "XXXX"}); err != nil {
+		t.Fatalf("update with different Code: %v", err)
+	}
+	d, _, _ = st.Get(ctx, "scoreboard-01")
+	if d.Code != "7QF2" {
+		t.Errorf("Code was mutated to %q, want 7QF2 (immutable)", d.Code)
+	}
+}

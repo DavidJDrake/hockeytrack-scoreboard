@@ -31,12 +31,28 @@ type Device struct {
 // Store persists Devices. Claim is the only operation that may bind an owner,
 // and it must fail rather than overwrite an existing one.
 type Store interface {
+	// Get returns the device for thingName, or found=false if none exists.
 	Get(ctx context.Context, thingName string) (Device, bool, error)
+	// ByCode returns an unclaimed device matching code, or found=false if none
+	// exists or if the device is already claimed. A claimed device's code stops
+	// resolving; codes are one-time tokens for pairing only.
 	ByCode(ctx context.Context, code string) (Device, bool, error)
+	// ListByOwner returns all devices claimed by owner.
 	ListByOwner(ctx context.Context, owner string) ([]Device, error)
+	// Register provisions a new device with its pairing code. Registering the
+	// same thingName twice is idempotent and does not overwrite the original code,
+	// for provisioning workflows that may retry.
 	Register(ctx context.Context, thingName, code string) error
+	// Claim binds a device to an owner. A device must have been registered and
+	// must be unclaimed (Owner empty). Returns ErrNotFound if the device does
+	// not exist or ErrAlreadyClaimed if it already has an owner.
 	Claim(ctx context.Context, thingName, owner string) error
+	// Update changes the mutable fields (Name, GameID) of a claimed device.
+	// Code, ThingName, and Owner are immutable; Update checks that d.Owner
+	// matches the stored owner and returns ErrNotOwner if not.
 	Update(ctx context.Context, d Device) error
+	// Unbind removes the owner from a device, leaving it claimable again.
+	// Returns ErrNotOwner if the caller is not the current owner.
 	Unbind(ctx context.Context, thingName, owner string) error
 }
 
@@ -114,6 +130,7 @@ func (f *Fake) Update(_ context.Context, in Device) error {
 	if d.Owner != in.Owner {
 		return ErrNotOwner
 	}
+	// Only Name and GameID are mutable; Code and ThingName are immutable.
 	d.Name, d.GameID = in.Name, in.GameID
 	f.items[in.ThingName] = d
 	return nil
