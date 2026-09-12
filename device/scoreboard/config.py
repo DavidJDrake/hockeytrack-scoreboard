@@ -5,12 +5,31 @@ being followed across restarts."""
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent  # device/
-CONFIG_DIR = ROOT / "config"
 ROTATIONS = (0, 90, 180, 270)
+
+
+def default_config_dir() -> Path:
+    """Where this device's identity lives.
+
+    A checkout keeps it in device/config/. An appliance image has no
+    checkout, and cannot know what the owner will call their user account,
+    so its unit points this at /var/lib/scoreboard instead.
+    """
+    override = os.environ.get("SCOREBOARD_CONFIG_DIR")
+    return Path(override) if override else ROOT / "config"
+
+
+class NotProvisioned(RuntimeError):
+    """This panel has no identity yet.
+
+    Not a failure to exit on: it is the state every freshly flashed device
+    starts in. The panel shows its setup screen until someone registers it.
+    """
 
 
 def parse_rotate(value) -> int | None:
@@ -40,24 +59,35 @@ class Config:
     rotate: int | None = None
 
     @classmethod
-    def load(cls, config_dir: Path = CONFIG_DIR) -> "Config":
-        device_json = config_dir / "device.json"
+    def load(cls, config_dir: Path | None = None) -> "Config":
+        directory = default_config_dir() if config_dir is None else config_dir
+        device_json = directory / "device.json"
         try:
-            d = json.loads(device_json.read_text())
+            text = device_json.read_text()
         except OSError as e:
-            raise RuntimeError(
-                f"missing device config at {device_json}; provision device/config/ "
-                "with device.json, device.pem.crt, private.pem.key and AmazonRootCA1.pem "
-                "before starting the scoreboard service"
+            raise NotProvisioned(
+                f"no device identity at {device_json}; this panel is not registered yet"
             ) from e
+        try:
+            d = json.loads(text)
+        except ValueError as e:
+            # A corrupt file is not an unregistered device. Refusing to start is
+            # right: showing the setup screen for a panel that is already claimed
+            # would invite someone to register it a second time.
+            raise RuntimeError(f"{device_json}: not valid JSON: {e}") from e
+        try:
+            endpoint, client_id = d["endpoint"], d["thingName"]
+        except (KeyError, TypeError) as e:
+            raise RuntimeError(f"{device_json}: missing or malformed {e}") from e
         try:
             rotate = parse_rotate(d.get("rotate"))
         except ValueError as e:
             raise RuntimeError(f"{device_json}: {e}") from e
         return cls(
-            endpoint=d["endpoint"], client_id=d["thingName"],
-            cert=config_dir / "device.pem.crt", key=config_dir / "private.pem.key", ca=config_dir / "AmazonRootCA1.pem",
-            state_file=config_dir / "state.json", brightness=float(d.get("brightness", 1.0)), rotate=rotate,
+            endpoint=endpoint, client_id=client_id,
+            cert=directory / "device.pem.crt", key=directory / "private.pem.key",
+            ca=directory / "AmazonRootCA1.pem", state_file=directory / "state.json",
+            brightness=float(d.get("brightness", 1.0)), rotate=rotate,
         )
 
     def load_game_id(self) -> int | None:
