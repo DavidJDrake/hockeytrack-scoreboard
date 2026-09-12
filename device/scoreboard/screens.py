@@ -80,7 +80,7 @@ def draw_settings(surface, assets: Assets, settings, status, build: str) -> None
         ])
         return
     if settings.mode == WORKING:
-        draw_message(surface, assets, "Working…", ["Talking to the network."])
+        draw_message(surface, assets, "Working...", ["Talking to the network."])
         return
     if settings.mode == RESULT:
         draw_message(surface, assets, settings.message, ["Press any key."])
@@ -97,7 +97,7 @@ def draw_settings(surface, assets: Assets, settings, status, build: str) -> None
     surface.fill(BG)
     where = status.ssid if status and status.ssid else "not connected"
     address = status.ip if status and status.ip else "no address"
-    heading = assets.font(64, True).render(f"Wi-Fi — {where} — {address}", True, INK)
+    heading = assets.font(64, True).render(f"Wi-Fi - {where} - {address}", True, INK)
     surface.blit(heading, heading.get_rect(midtop=(W // 2, 24)))
     y = 120
     for i, network in enumerate(settings.networks[:5]):
@@ -108,6 +108,6 @@ def draw_settings(surface, assets: Assets, settings, status, build: str) -> None
         img = assets.font(48, i == settings.index).render(label, True, colour)
         surface.blit(img, img.get_rect(topleft=(W // 2 - 420, y)))
         y += 56
-    footer = "Enter to join · F5 rescan · R factory reset · S or Esc to close · " + build
+    footer = "Enter to join | F5 rescan | R factory reset | S or Esc to close | " + build
     img = assets.font(32, False).render(footer, True, MUTED)
     surface.blit(img, img.get_rect(midbottom=(W // 2, H - 18)))

@@ -4,8 +4,10 @@ import sys
 from pathlib import Path
 
 from scoreboard.display import EX_CONFIG
-from scoreboard.main import should_blank
+from scoreboard.main import carry_out, should_blank
 from scoreboard.model import GameState
+from scoreboard.netcfg import WifiSettings
+from scoreboard.settings import RESULT, Settings
 
 FIX = Path(__file__).parent / "fixtures"
 DEVICE = Path(__file__).resolve().parent.parent
@@ -58,6 +60,36 @@ def test_a_video_driver_missing_from_the_build_stops_the_service_for_good():
     r = subprocess.run([sys.executable, "-m", "scoreboard.main"], cwd=DEVICE, env=env,
                        capture_output=True, text=True, timeout=30)
     assert r.returncode == EX_CONFIG, r.stderr
+
+
+def test_a_connect_timeout_never_shows_the_password():
+    # nmcli's own argv -- including the password -- ends up inside
+    # subprocess.TimeoutExpired's str(), and apply() is the one call in
+    # this codebase whose argv can hold a secret. An ordinary, unexotic
+    # timeout must not put that secret on a wall-mounted screen.
+    secret = "hunter2hunter2"
+
+    class TimesOut:
+        def scan(self):
+            raise AssertionError("not called")
+
+        def apply(self, settings):
+            raise subprocess.TimeoutExpired(
+                ["nmcli", "device", "wifi", "connect", settings.ssid, "password", settings.psk], 30)
+
+        def status(self):
+            raise AssertionError("not called")
+
+        def forget_all(self):
+            raise AssertionError("not called")
+
+    panel = Settings(networks=[])
+    panel.pending = ("apply", WifiSettings(ssid="HomeNet", psk=secret))
+
+    carry_out(panel, TimesOut(), cfg=None)
+
+    assert secret not in panel.message
+    assert panel.mode == RESULT
 
 
 def test_an_unregistered_panel_reaches_the_display_instead_of_exiting(tmp_path):

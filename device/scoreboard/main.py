@@ -16,13 +16,52 @@ from .config import Config, NotProvisioned, default_config_dir, parse_rotate
 from .display import display_failure, parse_size, placement, present
 from .link import Link
 from .model import GameState, parse_today, parse_config
-from .netcfg import NetworkManager
+from .netcfg import NetworkError, NetworkManager, Status
 from .render import H, W, draw
 from .reset import factory_reset
 from .settings import Settings
 
 log = logging.getLogger("scoreboard")
 BLANK_AFTER_S = 30 * 60
+
+# What to show for a pending settings action that raised something other than
+# NetworkError. Never the exception's own text: subprocess.TimeoutExpired's
+# str() embeds its whole argv, and apply()'s argv can contain the Wi-Fi
+# password a person just typed. The real reason still reaches the journal
+# via log.exception -- that's where an operator should look anyway.
+SAFE_ERRORS = {
+    "scan": "Could not scan for networks",
+    "apply": "Could not connect",
+    "reset": "Could not erase panel",
+}
+
+
+def carry_out(panel: Settings, nm, cfg) -> Status | None:
+    """Do whatever the settings screen's ``pending`` request asked for.
+
+    Only NetworkError's text is safe to put on the screen: netcfg builds it
+    from nmcli's own stderr, never from an argv that might hold a secret.
+    Anything else becomes a fixed message from SAFE_ERRORS instead of its
+    own text. Returns a fresh Status after a successful connect, so the
+    caller can update what the list screen's header shows; None otherwise.
+    """
+    what, payload = panel.pending
+    try:
+        if what == "scan":
+            panel.replace(nm.scan())
+        elif what == "apply":
+            nm.apply(payload)
+            panel.done(f"Connected to {payload.ssid}")
+            return nm.status()
+        elif what == "reset":
+            factory_reset(cfg.state_file.parent if cfg else default_config_dir(), nm)
+            panel.done("Panel erased. Reboot to start again.")
+    except NetworkError as e:
+        panel.done(str(e))
+    except Exception:
+        log.exception("settings action (%s) failed", what)
+        panel.done(SAFE_ERRORS[what])
+    return None
 
 
 def should_blank(now: float, last_update: float, state: GameState | None, blank_after_s: float) -> bool:
@@ -173,8 +212,11 @@ def main() -> None:
                 try:
                     factory_reset(cfg.state_file.parent if cfg else default_config_dir(), nm)
                     panel.done("Panel erased. Reboot to start again.")
-                except Exception as e:
+                except NetworkError as e:
                     panel.done(str(e))
+                except Exception:
+                    log.exception("factory reset (button hold) failed")
+                    panel.done(SAFE_ERRORS["reset"])
             while True:
                 try:
                     item = events.get_nowait()
@@ -218,19 +260,9 @@ def main() -> None:
                     log.debug("network status unavailable: %s", e)
                     net_ok = False
             if panel is not None and panel.pending is not None:
-                what, payload = panel.pending
-                try:
-                    if what == "scan":
-                        panel.replace(nm.scan())
-                    elif what == "apply":
-                        nm.apply(payload)
-                        status = nm.status()
-                        panel.done(f"Connected to {payload.ssid}")
-                    elif what == "reset":
-                        factory_reset(cfg.state_file.parent if cfg else default_config_dir(), nm)
-                        panel.done("Panel erased. Reboot to start again.")
-                except Exception as e:
-                    panel.done(str(e))
+                new_status = carry_out(panel, nm, cfg)
+                if new_status is not None:
+                    status = new_status
             if panel is not None:
                 screens.draw_settings(frame, assets, panel, status, build)
             else:
