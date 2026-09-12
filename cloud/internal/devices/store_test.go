@@ -106,3 +106,33 @@ func TestUpdateEnforcesOwnershipAndImmutability(t *testing.T) {
 		t.Errorf("Code was mutated to %q, want 7QF2 (immutable)", d.Code)
 	}
 }
+
+func TestItemRoundTripsThroughDynamoAttributes(t *testing.T) {
+	in := Device{ThingName: "scoreboard-7qf2", Owner: "sub-123", Name: "Living room", GameID: 2026020001, Code: "7QF2"}
+	item, err := marshalDevice(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"thingName", "owner", "name", "gameId", "code"} {
+		if _, ok := item[key]; !ok {
+			t.Errorf("marshalled item is missing %q", key)
+		}
+	}
+	out, err := unmarshalDevice(item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != in {
+		t.Errorf("round trip = %+v, want %+v", out, in)
+	}
+}
+
+func TestAnUnclaimedDeviceMarshalsWithoutAnOwnerAttribute(t *testing.T) {
+	item, err := marshalDevice(Device{ThingName: "scoreboard-7qf2", Code: "7QF2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := item["owner"]; ok {
+		t.Error("unclaimed device wrote an owner attribute; the claim condition depends on its absence")
+	}
+}
