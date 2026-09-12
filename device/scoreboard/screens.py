@@ -66,3 +66,48 @@ def draw_offline(surface: pygame.Surface, assets: Assets, build: str) -> None:
         "Press S for network settings.",
         build,
     ])
+
+
+def draw_settings(surface, assets: Assets, settings, status, build: str) -> None:
+    """The settings screen. ``status`` is a netcfg.Status, or None."""
+    from .settings import LIST, PASSWORD, WORKING, RESULT, CONFIRM_RESET, CONFIRM_WORD
+
+    if settings.mode == PASSWORD:
+        network = settings.selected
+        draw_message(surface, assets, f"Password for {network.ssid if network else ''}", [
+            settings.masked or "(type the Wi-Fi password)",
+            "Enter to connect, Tab to show it, Esc to go back",
+        ])
+        return
+    if settings.mode == WORKING:
+        draw_message(surface, assets, "Working…", ["Talking to the network."])
+        return
+    if settings.mode == RESULT:
+        draw_message(surface, assets, settings.message, ["Press any key."])
+        return
+    if settings.mode == CONFIRM_RESET:
+        draw_message(surface, assets, "Erase this panel?", [
+            f"Type {CONFIRM_WORD} and press Enter. Esc cancels.",
+            settings.typed,
+            "This clears the panel. To stop it connecting, also remove",
+            "the device from your account on the website.",
+        ])
+        return
+
+    surface.fill(BG)
+    where = status.ssid if status and status.ssid else "not connected"
+    address = status.ip if status and status.ip else "no address"
+    heading = assets.font(64, True).render(f"Wi-Fi — {where} — {address}", True, INK)
+    surface.blit(heading, heading.get_rect(midtop=(W // 2, 24)))
+    y = 120
+    for i, network in enumerate(settings.networks[:5]):
+        colour = INK if i == settings.index else MUTED
+        label = f"{'>' if i == settings.index else ' '} {network.ssid}  {network.signal}%"
+        if not network.secured:
+            label += "  (open)"
+        img = assets.font(48, i == settings.index).render(label, True, colour)
+        surface.blit(img, img.get_rect(topleft=(W // 2 - 420, y)))
+        y += 56
+    footer = "Enter to join · F5 rescan · R factory reset · S or Esc to close · " + build
+    img = assets.font(32, False).render(footer, True, MUTED)
+    surface.blit(img, img.get_rect(midbottom=(W // 2, H - 18)))

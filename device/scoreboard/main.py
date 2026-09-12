@@ -12,12 +12,14 @@ import pygame
 from . import buttons
 from . import screens
 from .assets import Assets
-from .config import Config, NotProvisioned, parse_rotate
+from .config import Config, NotProvisioned, default_config_dir, parse_rotate
 from .display import display_failure, parse_size, placement, present
 from .link import Link
 from .model import GameState, parse_today, parse_config
 from .netcfg import NetworkManager
 from .render import H, W, draw
+from .reset import factory_reset
+from .settings import Settings
 
 log = logging.getLogger("scoreboard")
 BLANK_AFTER_S = 30 * 60
@@ -139,16 +141,40 @@ def main() -> None:
     if link:
         link.follow(following)
         link.start()
+    panel: Settings | None = None   # not None while the settings screen is open
+    status = None
+    holds = buttons.HoldWatcher()
     clock = pygame.time.Clock()
     try:
         while True:
             for ev in pygame.event.get():
-                if ev.type == pygame.QUIT or (ev.type == pygame.KEYDOWN and ev.key == pygame.K_ESCAPE):
+                if ev.type == pygame.QUIT:
                     return
+                if ev.type == pygame.KEYDOWN and panel is not None:
+                    panel.key(pygame.key.name(ev.key), ev.unicode)
+                    if panel.closed:
+                        panel = None
+                    continue
+                if ev.type == pygame.KEYDOWN and ev.key == pygame.K_ESCAPE:
+                    return
+                if ev.type == pygame.KEYDOWN and ev.key == pygame.K_s:
+                    try:
+                        panel, status = Settings(nm.scan()), nm.status()
+                    except Exception as e:
+                        log.warning("cannot open settings: %s", e)
                 if ev.type == pygame.KEYDOWN and ev.key == pygame.K_a:
                     on_a()
                 if ev.type == pygame.KEYDOWN and ev.key == pygame.K_b:
                     on_b()
+            if holds.update(*buttons.pressed(), time.time()):
+                log.warning("both buttons held: factory reset")
+                if panel is None:
+                    panel = Settings()
+                try:
+                    factory_reset(cfg.state_file.parent if cfg else default_config_dir(), nm)
+                    panel.done("Panel erased. Reboot to start again.")
+                except Exception as e:
+                    panel.done(str(e))
             while True:
                 try:
                     item = events.get_nowait()
@@ -191,15 +217,32 @@ def main() -> None:
                 except Exception as e:  # nmcli absent on a desktop, or failing
                     log.debug("network status unavailable: %s", e)
                     net_ok = False
-            showing = screens.screen_for(cfg is not None or bool(fixture), net_ok or bool(fixture))
-            if showing == screens.UNREGISTERED:
-                screens.draw_unregistered(frame, assets, build)
-            elif showing == screens.OFFLINE:
-                screens.draw_offline(frame, assets, build)
-            elif should_blank(time.time(), last_update, current, BLANK_AFTER_S):
-                frame.fill((0, 0, 0))
+            if panel is not None and panel.pending is not None:
+                what, payload = panel.pending
+                try:
+                    if what == "scan":
+                        panel.replace(nm.scan())
+                    elif what == "apply":
+                        nm.apply(payload)
+                        status = nm.status()
+                        panel.done(f"Connected to {payload.ssid}")
+                    elif what == "reset":
+                        factory_reset(cfg.state_file.parent if cfg else default_config_dir(), nm)
+                        panel.done("Panel erased. Reboot to start again.")
+                except Exception as e:
+                    panel.done(str(e))
+            if panel is not None:
+                screens.draw_settings(frame, assets, panel, status, build)
             else:
-                draw(frame, current, now_ms, assets, link_ok)
+                showing = screens.screen_for(cfg is not None or bool(fixture), net_ok or bool(fixture))
+                if showing == screens.UNREGISTERED:
+                    screens.draw_unregistered(frame, assets, build)
+                elif showing == screens.OFFLINE:
+                    screens.draw_offline(frame, assets, build)
+                elif should_blank(time.time(), last_update, current, BLANK_AFTER_S):
+                    frame.fill((0, 0, 0))
+                else:
+                    draw(frame, current, now_ms, assets, link_ok)
             if brightness < 1.0:
                 dim = pygame.Surface((W, H))
                 dim.fill((0, 0, 0))
