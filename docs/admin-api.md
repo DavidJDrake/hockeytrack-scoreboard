@@ -141,12 +141,21 @@ last told to, until someone claims it again and changes that).
 
 ### `GET /api/games`
 
-Today's games — built the same way the device's own `hockeytrack/games/today`
-document is, from the public HockeyTrack schedule (`internal/today.Build`),
-not fetched by the browser directly (that schedule serves no CORS headers).
-This is the one route with no ownership check — anyone with a valid session
-can call it, because the schedule isn't owned by anyone — but it still
-requires the same JWT as every other route.
+Today's scheduled games, from the public HockeyTrack schedule
+(`internal/today.Build`), not fetched by the browser directly (that schedule
+serves no CORS headers). This is the one route with no ownership check —
+anyone with a valid session can call it, because the schedule isn't owned by
+anyone — but it still requires the same JWT as every other route.
+
+This is *not* built the same way the device's own `hockeytrack/games/today`
+document is, despite calling the same `today.Build`. `cmd/api/main.go` passes
+it an empty states map, where `cmd/today/main.go` passes the real per-game
+states from `gamestore.ListActive`. `today.Build`'s carry-over rule only keeps
+a game from yesterday if it's `tracked` in that map, and an empty map never
+satisfies that — so a game that started yesterday and is still in progress
+after midnight ET shows up on the panel's own list but not in this endpoint's.
+This is a known gap in what the endpoint lists, not a bug in how it's built;
+fixing it is a separate ticket.
 
 - **200**:
   ```json
@@ -235,3 +244,12 @@ one existing panel (`scoreboard-01`, pairing code `01`) is registered in
 DynamoDB by hand, and rate-limiting on claim attempts — called for in the
 design doc — doesn't exist, because with one hand-registered device and
 invite-only sign-up it isn't yet load-bearing.
+
+This API also has no alarms of its own. Nothing pages on a spike of 401s
+(someone hammering `POST /api/devices/claim` with guessed codes, say) or of
+5XXs (the store or the IoT publish failing under normal use). That's a real
+gap, not a deliberate one — the IoT surface of this same project has six
+alarms (see `terraform/iot-alarms.tf`), and this API has none. It's a
+reasonable next addition once this route sees real traffic; until then, the
+access log (`aws_cloudwatch_log_group.api_access`) is the only record of what
+this API has been asked to do.
