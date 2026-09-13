@@ -54,21 +54,50 @@ def test_network_window_start(index, count, want):
     assert screens._network_window_start(index, count) == want
 
 
-def test_draw_settings_keeps_the_selection_in_the_visible_window():
-    # Regression: draw_settings used to slice networks[:5] while the
-    # selection index could reach len(networks) - 1, so past the fifth
-    # network the cursor was drawn nowhere on the panel at all -- with more
-    # than five access points the common case, not the edge.
+class RecordingAssets(Assets):
+    """Assets that remember every string drawn through them.
+
+    The panel is pixels, so asserting "something was drawn" cannot tell a
+    correct network list from a wrong one. Recording the text lets a test say
+    which rows actually reached the screen.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.drawn: list[str] = []
+
+    def font(self, px: int, bold: bool = True):
+        real, drawn = super().font(px, bold), self.drawn
+
+        class Spy:
+            def render(self, text, antialias, colour):
+                drawn.append(text)
+                return real.render(text, antialias, colour)
+
+            def size(self, text):
+                return real.size(text)
+
+        return Spy()
+
+
+def test_draw_settings_draws_the_selected_network():
+    # Regression: draw_settings sliced networks[:5] while the selection index
+    # could reach len(networks) - 1, so past the fifth network the cursor was
+    # drawn nowhere on the panel at all -- and more than five access points is
+    # the common case, not the edge.
+    #
+    # This asserts on the rows that reach the screen, so it fails if
+    # draw_settings goes back to slicing from zero. An earlier version of this
+    # test checked the window helper directly and then only that the surface
+    # was not blank, which passed just as happily with the bug reinstated.
     pygame.init()
     networks = [Network(ssid=f"Net{i}", signal=50, secured=True) for i in range(8)]
     panel = Settings(networks=networks)
-    panel.index = 7  # would be outside a bare networks[:5] slice
+    panel.index = 7  # outside a bare networks[:5] slice
+    assets = RecordingAssets()
 
-    start = screens._network_window_start(panel.index, len(networks))
-    assert start <= panel.index < start + screens.NETWORK_WINDOW
+    screens.draw_settings(pygame.Surface((W, H)), assets, panel, None, "development build")
 
-    surface = pygame.Surface((W, H))
-    screens.draw_settings(surface, Assets(), panel, None, "development build")
-    blank = pygame.Surface((W, H))
-    blank.fill(BG)
-    assert pygame.image.tostring(surface, "RGB") != pygame.image.tostring(blank, "RGB")
+    rows = [text for text in assets.drawn if text.lstrip().startswith(("Net", "> Net"))]
+    assert any(text.startswith("> Net7") for text in rows), rows
+    assert len(rows) == screens.NETWORK_WINDOW, rows

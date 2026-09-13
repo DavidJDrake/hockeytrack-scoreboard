@@ -22,6 +22,13 @@ as soon as this plan is installed on a Pi.
 
     sudo systemctl restart scoreboard && journalctl -u scoreboard -f
 
+First confirm the service account actually has the groups it needs, since the
+unit no longer declares them and so no longer fails loudly when one is missing:
+
+    id scoreboard
+
+Expect `video`, `render` and `input`. `gpio` only if the buttons are fitted.
+
 Pass: the panel renders. Fail: it stays black, or the journal shows a
 permission error opening `/dev/dri/card0` or `/dev/input/event*`.
 

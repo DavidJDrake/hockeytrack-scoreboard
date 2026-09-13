@@ -106,7 +106,7 @@ class FakeNmcli:
         self.fail_on = fail_on
         self.calls = []
 
-    def __call__(self, args):
+    def __call__(self, args, timeout=None):
         self.calls.append(list(args))
         if self.fail_on is not None and self.fail_on in args:
             raise NetworkError("nmcli said no")
@@ -277,3 +277,45 @@ def test_main_survives_an_unexpected_exception(monkeypatch, caplog):
         assert netcfg.main() == 0
     assert "unexpected error" in caplog.text
     assert "out of memory" not in caplog.text
+
+
+def test_a_timeout_leaves_the_password_nowhere_in_the_exception_chain(monkeypatch):
+    # subprocess.TimeoutExpired's str() embeds the whole argv, and a connect's
+    # argv holds the Wi-Fi password. Suppressing the context is not enough --
+    # "raise ... from None" only stops a traceback printing the original, which
+    # stays reachable on __context__ for anything that walks the chain. This
+    # asserts the secret is absent from every part of it.
+    secret = "hunter2hunter2"
+
+    def timing_out(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, kwargs.get("timeout", 10))
+
+    monkeypatch.setattr(netcfg.subprocess, "run", timing_out)
+    with pytest.raises(NetworkError) as caught:
+        netcfg._run_nmcli(["device", "wifi", "connect", "HomeNet", "password", secret])
+
+    error = caught.value
+    rendered = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+    assert error.__context__ is None
+    assert error.__cause__ is None
+    for place in (str(error), repr(error.args), str(error.__context__), rendered):
+        assert secret not in place
+
+
+def test_connecting_gets_a_longer_timeout_than_a_query():
+    # A connect is association plus DHCP. Killing the nmcli client at the query
+    # timeout leaves NetworkManager still activating, so the panel would report
+    # a timeout for a connect that went on to succeed -- and on the boot path a
+    # timeout skips consume(), stranding the cleartext password on the card.
+    seen = {}
+
+    def record(args, timeout=None):
+        seen[args[0] if args else ""] = timeout
+        return ""
+
+    manager = NetworkManager(run=record)
+    manager.apply(WifiSettings(ssid="HomeNet", psk="supersecret"))
+    manager.scan()
+    assert seen["device"] == netcfg.CONNECT_TIMEOUT_S
+    assert seen["-t"] is None  # scan leaves the runner's own default in place
+    assert netcfg.CONNECT_TIMEOUT_S > netcfg.QUERY_TIMEOUT_S

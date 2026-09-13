@@ -145,28 +145,47 @@ def split_terse(line: str) -> list[str]:
     return fields
 
 
-def _run_nmcli(args: list[str]) -> str:
+# Most nmcli calls are a query and answer back in well under a second, so a
+# short timeout keeps a hung binary from freezing the render loop. Connecting
+# is the exception: it is association plus DHCP, and killing the client early
+# leaves NetworkManager still activating, so the panel would report a timeout
+# for a connect that went on to succeed.
+QUERY_TIMEOUT_S = 10
+CONNECT_TIMEOUT_S = 45
+
+
+def _run_nmcli(args: list[str], timeout: float = QUERY_TIMEOUT_S) -> str:
     # A list, never a string, and never shell=True: an SSID is attacker-chosen
     # text from the air, and a password is whatever the user typed.
+    timed_out = False
     try:
-        result = subprocess.run(["nmcli", *args], capture_output=True, text=True, timeout=10)
+        result = subprocess.run(["nmcli", *args], capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
-        # Caught here rather than left to the caller: TimeoutExpired's str()
-        # embeds the whole argv, and apply()'s argv can hold the Wi-Fi
-        # password. "from None" drops the original from __context__ too, so
-        # it cannot resurface through a traceback that log.exception prints
-        # further up the call chain.
-        raise NetworkError("nmcli timed out") from None
+        # TimeoutExpired's str() embeds the whole argv, and apply()'s argv holds
+        # the Wi-Fi password, so this must never reach a caller that logs it.
+        # Note that "raise ... from None" would NOT be enough on its own: that
+        # sets __suppress_context__, which only stops a traceback *printing* the
+        # original -- the TimeoutExpired, password and all, stays reachable on
+        # __context__ for anything that walks the chain. Raising outside the
+        # handler is what leaves nothing attached at all.
+        timed_out = True
+    if timed_out:
+        raise NetworkError("nmcli timed out")
     if result.returncode != 0:
         raise NetworkError((result.stderr or result.stdout).strip() or "nmcli failed")
     return result.stdout
 
 
-def _run_raspi_config(args: list[str]) -> str:
+def _run_raspi_config(args: list[str], timeout: float = QUERY_TIMEOUT_S) -> str:
+    # Same shape as _run_nmcli: raise outside the handler so no argv-bearing
+    # exception is left on __context__.
+    timed_out = False
     try:
-        result = subprocess.run(["raspi-config", *args], capture_output=True, text=True, timeout=10)
+        result = subprocess.run(["raspi-config", *args], capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
-        raise NetworkError("raspi-config timed out") from None
+        timed_out = True
+    if timed_out:
+        raise NetworkError("raspi-config timed out")
     if result.returncode != 0:
         raise NetworkError((result.stderr or result.stdout).strip() or "raspi-config failed")
     return result.stdout
@@ -210,7 +229,7 @@ class NetworkManager:
             args += ["password", settings.psk]
         if settings.hidden:
             args += ["hidden", "yes"]
-        self._run(args)
+        self._run(args, timeout=CONNECT_TIMEOUT_S)
 
     def forget_all(self) -> None:
         out = self._run(["-t", "-f", "UUID,TYPE", "connection", "show"])

@@ -26,9 +26,14 @@ BLANK_AFTER_S = 30 * 60
 
 # What to show for a pending settings action that raised something other than
 # NetworkError. Never the exception's own text: subprocess.TimeoutExpired's
-# str() embeds its whole argv, and apply()'s argv can contain the Wi-Fi
-# password a person just typed. The real reason still reaches the journal
-# via log.exception -- that's where an operator should look anyway.
+# str() embeds its whole argv, and apply()'s argv contains the Wi-Fi password a
+# person just typed.
+#
+# This is the second layer, not the only one. The first is in netcfg, where
+# _run_nmcli converts a timeout into an argv-free NetworkError before it can
+# reach any caller -- so what log.exception writes to the journal below has
+# already had the secret removed at the source. Keeping both means neither has
+# to be perfect on its own.
 SAFE_ERRORS = {
     "scan": "Could not scan for networks",
     "apply": "Could not connect",
