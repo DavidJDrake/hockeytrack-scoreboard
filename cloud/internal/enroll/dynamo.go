@@ -70,6 +70,14 @@ func conditionFailed(err error) bool {
 	return false
 }
 
+// reasonFailed reports whether the CancellationReason at index i is a
+// ConditionalCheckFailed, without panicking if AWS returned fewer reasons
+// than TransactItems -- it is not obliged to return one per item in every
+// error shape.
+func reasonFailed(reasons []types.CancellationReason, i int) bool {
+	return i < len(reasons) && aws.ToString(reasons[i].Code) == "ConditionalCheckFailed"
+}
+
 func (x *Dynamo) Create(ctx context.Context, p Pending) error {
 	if p.ExpiresAt == 0 {
 		return errors.New("enroll: an enrollment needs an expiry")
@@ -107,15 +115,26 @@ func (x *Dynamo) RotateCode(ctx context.Context, tokenHash, newCodeHash string, 
 	}
 	_, err = x.client.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{
 		TransactItems: []types.TransactWriteItem{
+			// Index 0: delete the old reservation. Unconditioned -- it cannot
+			// fail a condition check, and the indices below rely on that.
 			{Delete: &types.Delete{
 				TableName: aws.String(x.table),
 				Key:       map[string]types.AttributeValue{"pk": s(codeKey(current.CodeHash))},
 			}},
+			// Index 1: claim the new reservation. Failing here means the new
+			// code collided with someone else's -- the caller generates
+			// another and retries.
 			{Put: &types.Put{
 				TableName:           aws.String(x.table),
 				Item:                x.reservation(newCodeHash, tokenHash, expiresAt),
 				ConditionExpression: aws.String("attribute_not_exists(pk)"),
 			}},
+			// Index 2: point the enrollment at the new code, only while it is
+			// still pending. Failing here means somebody already claimed this
+			// enrollment -- rotating the code would not help, so this must
+			// come back as a different error than index 1's, or a caller that
+			// retries specifically on ErrCodeTaken (the handler's rotate
+			// helper does, five times) would burn attempts for nothing.
 			{Update: &types.Update{
 				TableName:                aws.String(x.table),
 				Key:                      map[string]types.AttributeValue{"pk": s(tokenHash)},
@@ -130,7 +149,24 @@ func (x *Dynamo) RotateCode(ctx context.Context, tokenHash, newCodeHash string, 
 			}},
 		},
 	})
-	if err != nil && conditionFailed(err) {
+	if err == nil {
+		return nil
+	}
+	// TransactWriteItems reports failures as TransactionCanceledException
+	// with one CancellationReason per TransactItem, in submission order.
+	// Check index 2 (already claimed) before index 1 (code taken): if both
+	// somehow failed at once, "stop, there is nothing to rotate" is the more
+	// correct answer than "try another code."
+	var canceled *types.TransactionCanceledException
+	if errors.As(err, &canceled) {
+		if reasonFailed(canceled.CancellationReasons, 2) {
+			return ErrAlreadyClaimed
+		}
+		if reasonFailed(canceled.CancellationReasons, 1) {
+			return ErrCodeTaken
+		}
+	}
+	if conditionFailed(err) {
 		return ErrCodeTaken
 	}
 	return err
@@ -208,17 +244,22 @@ func (x *Dynamo) Reserve(ctx context.Context, tokenHash, owner string) error {
 	return err
 }
 
-// SetCertificate completes what Reserve began.
+// SetCertificate completes what Reserve began. The condition requires
+// status = claiming, the same way Reserve requires status = pending: an
+// enrollment can only reach ready by way of claiming, so the three-state
+// machine is something the database enforces rather than something that
+// holds only while callers happen to call Reserve first.
 func (x *Dynamo) SetCertificate(ctx context.Context, tokenHash, certPEM string) error {
 	_, err := x.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName:                aws.String(x.table),
 		Key:                      map[string]types.AttributeValue{"pk": s(tokenHash)},
 		UpdateExpression:         aws.String("SET #s = :ready, certPem = :cert"),
-		ConditionExpression:      aws.String("attribute_exists(pk)"),
+		ConditionExpression:      aws.String("#s = :claiming"),
 		ExpressionAttributeNames: map[string]string{"#s": "status"},
 		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":ready": s(StatusReady),
-			":cert":  s(certPEM),
+			":claiming": s(StatusClaiming),
+			":ready":    s(StatusReady),
+			":cert":     s(certPEM),
 		},
 	})
 	return err
