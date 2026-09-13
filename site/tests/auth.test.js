@@ -193,3 +193,49 @@ test("signing out returns to this site", () => {
   assert.equal(u.searchParams.get("client_id"), "client123");
   assert.equal(u.searchParams.get("logout_uri"), "https://scoreboard.example/");
 });
+
+test("each sign-in draws a fresh, full-length state and verifier from the CSPRNG", async () => {
+  const draws = [];
+  const cryptoImpl = {
+    getRandomValues: (bytes) => { draws.push(bytes.length); return globalThis.crypto.getRandomValues(bytes); },
+    subtle: globalThis.crypto.subtle,
+  };
+  const pendings = [];
+  for (let i = 0; i < 2; i += 1) {
+    const storage = memoryStorage();
+    await auth.beginSignIn(cfg, { origin: ORIGIN, storage, navigate: () => {}, cryptoImpl });
+    pendings.push(JSON.parse(storage.getItem("scoreboard.signin")));
+  }
+  // A constant or guessable state leaves login-CSRF protection resting on a
+  // Cognito behavior RFC 7636 does not specify.
+  assert.notEqual(pendings[0].state, pendings[1].state);
+  assert.notEqual(pendings[0].verifier, pendings[1].verifier);
+  for (const { state, verifier } of pendings) {
+    assert.ok(state.length >= 22, `state is only ${state.length} characters`);
+    // Cognito rejects a verifier shorter than RFC 7636's 43 characters.
+    assert.ok(verifier.length >= 43, `verifier is only ${verifier.length} characters`);
+  }
+  // Two draws per sign-in, verifier then state, both from the CSPRNG.
+  assert.deepEqual(draws, [32, 16, 32, 16]);
+});
+
+test("the re-authentication guard survives a page load", async () => {
+  const storage = memoryStorage();
+  assert.equal(auth.mayReauth(storage, 1_000_000), true);
+  // Every redirect reloads the page, and with it this module. A guard kept in
+  // module memory would reset here and let a rejected token loop forever;
+  // importing under a new URL gives a genuinely fresh module instance.
+  const reloaded = await import(`../assets/auth.js?reload=${Date.now()}`);
+  assert.equal(reloaded.mayReauth(storage, 1_030_000), false);
+});
+
+test("claims decode when the payload's encoding uses both base64url substitutions", () => {
+  const token = jwt({ email: "friend@example.com", note: "???~~~" });
+  const payload = token.split(".")[1];
+  // The older claims test's payload happens to contain "-" but no "_", so it
+  // never exercised the underscore substitution its name claims to cover.
+  assert.ok(payload.includes("-") && payload.includes("_"), `payload ${payload} does not exercise both`);
+  const claims = auth.claimsOf(token);
+  assert.equal(claims.email, "friend@example.com");
+  assert.equal(claims.note, "???~~~");
+});
