@@ -296,17 +296,25 @@ func (h *Handler) claim(ctx context.Context, req events.APIGatewayV2HTTPRequest)
 		slog.Error("reserving enrollment", "err", err)
 		return fail(http.StatusInternalServerError, "claim failed")
 	}
-	certPEM, err := h.Issuer.Issue(ctx, p.CSR, p.ThingName)
-	if err != nil {
-		slog.Error("issuing certificate", "thing", p.ThingName, "err", err)
-		return fail(http.StatusInternalServerError, "claim failed")
-	}
-	if err := h.Devices.Register(ctx, p.ThingName, code); err != nil {
+	// Register and Claim run before Issue. If either fails, nothing has been
+	// minted in AWS -- the enrollment stays claiming and the owner sees
+	// nothing. Ordering it the other way around would let Issue succeed and
+	// then leave an active certificate, thing and attached policy with no
+	// devices row at all: no way for the owner to see it, unbind it, or
+	// trigger any cleanup. This way, once a devices row exists, a later
+	// failure (Issue or SetCertificate) leaves an owned row the owner can see
+	// and unbind -- which is the recovery path the spec describes.
+	if err := h.Devices.Register(ctx, p.ThingName); err != nil {
 		slog.Error("registering device", "thing", p.ThingName, "err", err)
 		return fail(http.StatusInternalServerError, "claim failed")
 	}
 	if err := h.Devices.Claim(ctx, p.ThingName, sub); err != nil {
 		slog.Error("claiming device", "thing", p.ThingName, "err", err)
+		return fail(http.StatusInternalServerError, "claim failed")
+	}
+	certPEM, err := h.Issuer.Issue(ctx, p.CSR, p.ThingName)
+	if err != nil {
+		slog.Error("issuing certificate", "thing", p.ThingName, "err", err)
 		return fail(http.StatusInternalServerError, "claim failed")
 	}
 	if err := h.Enrollments.SetCertificate(ctx, p.TokenHash, certPEM); err != nil {

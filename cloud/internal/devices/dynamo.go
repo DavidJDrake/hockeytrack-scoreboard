@@ -12,8 +12,8 @@ import (
 )
 
 // Dynamo is the DynamoDB-backed Store. Items carry thingName (S, partition
-// key), owner (S), name (S), gameId (N), and code (S). GSI owner-index is
-// keyed on owner; GSI code-index is keyed on code.
+// key), owner (S), name (S), and gameId (N). GSI owner-index is keyed on
+// owner.
 type Dynamo struct {
 	client *dynamodb.Client
 	table  string
@@ -32,7 +32,6 @@ func NewDynamo(client *dynamodb.Client, table string) *Dynamo {
 func marshalDevice(d Device) (map[string]types.AttributeValue, error) {
 	item := map[string]types.AttributeValue{
 		"thingName": &types.AttributeValueMemberS{Value: d.ThingName},
-		"code":      &types.AttributeValueMemberS{Value: d.Code},
 		"name":      &types.AttributeValueMemberS{Value: d.Name},
 		"gameId":    &types.AttributeValueMemberN{Value: strconv.FormatInt(d.GameID, 10)},
 	}
@@ -53,9 +52,6 @@ func unmarshalDevice(item map[string]types.AttributeValue) (Device, error) {
 		return Device{}, err
 	}
 	if d.Name, err = attrS(item, "name"); err != nil {
-		return Device{}, err
-	}
-	if d.Code, err = attrS(item, "code"); err != nil {
 		return Device{}, err
 	}
 	if owner, ok := item["owner"]; ok {
@@ -128,37 +124,6 @@ func (x *Dynamo) Get(ctx context.Context, thingName string) (Device, bool, error
 	return d, true, nil
 }
 
-func (x *Dynamo) ByCode(ctx context.Context, code string) (Device, bool, error) {
-	out, err := x.client.Query(ctx, &dynamodb.QueryInput{
-		TableName:                 aws.String(x.table),
-		IndexName:                 aws.String("code-index"),
-		KeyConditionExpression:    aws.String("code = :c"),
-		ExpressionAttributeValues: map[string]types.AttributeValue{":c": &types.AttributeValueMemberS{Value: code}},
-	})
-	if err != nil {
-		return Device{}, false, err
-	}
-	var match Device
-	found := false
-	for _, item := range out.Items {
-		d, err := unmarshalDevice(item)
-		if err != nil {
-			return Device{}, false, err
-		}
-		if d.Owner != "" { // a claimed code must stop resolving
-			continue
-		}
-		if found {
-			// code is a GSI partition key, not a uniqueness constraint; two
-			// unclaimed rows sharing a code would otherwise bind whichever
-			// Query happened to return first.
-			return Device{}, false, ErrDuplicateCode
-		}
-		match, found = d, true
-	}
-	return match, found, nil
-}
-
 func (x *Dynamo) ListByOwner(ctx context.Context, owner string) ([]Device, error) {
 	out, err := x.client.Query(ctx, &dynamodb.QueryInput{
 		TableName:                 aws.String(x.table),
@@ -181,11 +146,11 @@ func (x *Dynamo) ListByOwner(ctx context.Context, owner string) ([]Device, error
 	return devs, nil
 }
 
-func (x *Dynamo) Register(ctx context.Context, thingName, code string) error {
+func (x *Dynamo) Register(ctx context.Context, thingName string) error {
 	if !validThingName(thingName) {
 		return ErrInvalidThingName
 	}
-	item, err := marshalDevice(Device{ThingName: thingName, Code: code})
+	item, err := marshalDevice(Device{ThingName: thingName})
 	if err != nil {
 		return err
 	}

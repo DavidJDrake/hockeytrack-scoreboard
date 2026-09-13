@@ -20,24 +20,11 @@ resource "aws_dynamodb_table" "devices" {
     name = "owner"
     type = "S"
   }
-  attribute {
-    name = "code"
-    type = "S"
-  }
 
   # "list my devices" is one query rather than a scan.
   global_secondary_index {
     name            = "owner-index"
     hash_key        = "owner"
-    projection_type = "ALL"
-  }
-
-  # Resolving a pairing code is one query. Rows keep their code after
-  # claiming; ByCode ignores a row that already has an owner, so a used code
-  # stops resolving.
-  global_secondary_index {
-    name            = "code-index"
-    hash_key        = "code"
     projection_type = "ALL"
   }
 }

@@ -9,6 +9,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"strconv"
 	"strings"
 	"testing"
@@ -114,6 +115,34 @@ func TestSubmitReturnsACodeAndAToken(t *testing.T) {
 	}
 }
 
+// TestSubmitStoresHashesNotSecrets proves the "a dump of the enrollments
+// table yields nobody a usable token and nobody a claimable code" property
+// actually holds, rather than just that both ends of each hash agree with
+// each other. It reaches into the store the way an attacker with a dump
+// would: by the stored fields, not by re-deriving what was sent.
+func TestSubmitStoresHashesNotSecrets(t *testing.T) {
+	h, _ := newHandler()
+	owner := "owner-1@example.com"
+	code, token := submitFor(t, h, owner)
+
+	p, found, err := h.Enrollments.ByTokenHash(context.Background(), enroll.HashSecret(token))
+	if err != nil || !found {
+		t.Fatalf("stored enrollment not found: found=%v err=%v", found, err)
+	}
+	if p.CodeHash == code {
+		t.Error("CodeHash holds the plaintext code")
+	}
+	if p.TokenHash == token {
+		t.Error("TokenHash holds the plaintext token")
+	}
+	if p.OwnerHintHash == owner {
+		t.Error("OwnerHintHash holds the plaintext owner hint")
+	}
+	if want := enroll.HashSecret(enroll.NormalizeOwner(owner)); p.OwnerHintHash != want {
+		t.Errorf("OwnerHintHash = %q, want %q (hash of the normalized owner)", p.OwnerHintHash, want)
+	}
+}
+
 func TestSubmitRejectsRubbish(t *testing.T) {
 	h, _ := newHandler()
 	for name, body := range map[string]string{
@@ -211,6 +240,29 @@ func TestClaimingTwiceFails(t *testing.T) {
 	}
 	if len(issuer.Calls) != 1 {
 		t.Errorf("issuer was called %d times; the second claim must not mint", len(issuer.Calls))
+	}
+}
+
+// TestAnIssueFailureLeavesAnOwnedDeviceRowForRecovery pins the claim
+// ordering: Register and Claim run before Issue, so a failure in Issue (or
+// SetCertificate) leaves the owner a row they can see and unbind, which is
+// the recovery path the spec describes. The reverse order -- Issue first --
+// would leave an active certificate, thing and attached policy in AWS with
+// no devices row at all: nothing to find, nothing to unbind.
+func TestAnIssueFailureLeavesAnOwnedDeviceRowForRecovery(t *testing.T) {
+	h, issuer := newHandler()
+	issuer.Err = errors.New("iot is down")
+	code, _ := submit(t, h)
+
+	if got := claim(h, code, "owner-1").StatusCode; got != 500 {
+		t.Fatalf("claim with a failing issuer returned %d, want 500", got)
+	}
+	devs, err := h.Devices.ListByOwner(context.Background(), "owner-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(devs) != 1 {
+		t.Fatalf("owner has %d devices after a failed issue, want 1 (recoverable via unbind)", len(devs))
 	}
 }
 

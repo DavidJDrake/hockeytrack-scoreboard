@@ -28,7 +28,7 @@ func req(method, route, sub, body string, params map[string]string) events.APIGa
 func handlerWith(t *testing.T) (*Handler, *devices.Fake, *iotpub.Fake) {
 	t.Helper()
 	st, pub := devices.NewFake(), &iotpub.Fake{}
-	_ = st.Register(context.Background(), "scoreboard-7qf2", "7QF2")
+	_ = st.Register(context.Background(), "scoreboard-7qf2")
 	return &Handler{Store: st, Pub: pub}, st, pub
 }
 
@@ -84,7 +84,7 @@ func TestAStrangerGets404AndNoPublish(t *testing.T) {
 func TestListReturnsOnlyTheCallersDevices(t *testing.T) {
 	h, st, _ := handlerWith(t)
 	ctx := context.Background()
-	_ = st.Register(ctx, "scoreboard-aaaa", "AAAA")
+	_ = st.Register(ctx, "scoreboard-aaaa")
 	_ = st.Claim(ctx, "scoreboard-7qf2", "sub-a")
 	_ = st.Claim(ctx, "scoreboard-aaaa", "sub-b")
 
