@@ -216,7 +216,6 @@ resource "aws_apigatewayv2_integration" "api" {
 locals {
   admin_routes = [
     "GET /api/devices",
-    "POST /api/devices/claim",
     "PUT /api/devices/{thing}/game",
     "PATCH /api/devices/{thing}",
     "DELETE /api/devices/{thing}",
@@ -246,6 +245,23 @@ resource "aws_apigatewayv2_stage" "default" {
   default_route_settings {
     throttling_rate_limit  = 20
     throttling_burst_limit = 40
+  }
+
+  # Enrollment is unauthenticated, so it shares the API's account-wide
+  # exposure without even the JWT authorizer's cost to slow down a caller.
+  # A tighter limit here keeps a flood of enrollment traffic from starving
+  # the rest of the site, which the shared default_route_settings budget
+  # would not do on its own.
+  route_settings {
+    route_key              = "POST /api/enroll"
+    throttling_rate_limit  = 5
+    throttling_burst_limit = 10
+  }
+
+  route_settings {
+    route_key              = "GET /api/enroll"
+    throttling_rate_limit  = 5
+    throttling_burst_limit = 10
   }
 
   access_log_settings {
