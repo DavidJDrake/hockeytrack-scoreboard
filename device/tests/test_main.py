@@ -157,7 +157,12 @@ def test_an_unregistered_panel_reaches_the_display_instead_of_exiting(tmp_path):
     # instead -- which is how we prove config no longer short-circuits boot.
     env = dict(os.environ,
                SCOREBOARD_CONFIG_DIR=str(tmp_path),
-               SDL_VIDEODRIVER="definitelynotadriver")
+               SDL_VIDEODRIVER="definitelynotadriver",
+               # Belt and suspenders alongside the conftest fixture: this is
+               # the one test that spawns a real scoreboard.main with no
+               # identity, so it is the one place a bare enroll.Enroller
+               # gets constructed and could reach the network for real.
+               SCOREBOARD_API="https://127.0.0.1:9")
     env.pop("DISPLAY", None)
     env.pop("SCOREBOARD_FIXTURE", None)
     done = subprocess.run([sys.executable, "-m", "scoreboard.main"],
