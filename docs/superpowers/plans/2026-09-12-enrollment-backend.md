@@ -1298,7 +1298,7 @@ git commit -m "enroll: pending enrollments, hashed secrets, and a one-time reser
 
 **Interfaces:**
 - Consumes: nothing from earlier tasks.
-- Produces: `Issuer` interface with `Issue(ctx context.Context, csrPEM, thingName string) (string, error)`; `IoTAPI` interface; `NewIoTIssuer(api IoTAPI, policyName string) *IoTIssuer`; `FakeIssuer` with fields `CertPEM string`, `FailAt string`, `Calls []string`.
+- Produces: `Issuer` interface with `Issue(ctx context.Context, csrPEM, thingName string) (string, error)`; `IoTAPI` interface; `NewIoTIssuer(api IoTAPI, policyName string) *IoTIssuer`; `FakeIssuer` with fields `CertPEM string`, `Err error`, `Calls []string`.
 
 Four AWS calls have to succeed together: sign the CSR, create the thing, attach the principal, attach the policy. **If any fails, the ones before it must be undone.** A half-finished enrollment leaves an orphan — a certificate attached to nothing, or a thing with no policy — and orphans in an identity system are how a fleet accumulates credentials nobody can account for.
 
@@ -1517,7 +1517,7 @@ func NewIoTIssuer(api IoTAPI, policyName string) *IoTIssuer {
 func (i *IoTIssuer) Issue(ctx context.Context, csrPEM, thingName string) (string, error) {
 	cert, err := i.api.CreateCertificateFromCsr(ctx, &iot.CreateCertificateFromCsrInput{
 		CertificateSigningRequest: aws.String(csrPEM),
-		SetAsActive:               aws.Bool(true),
+		SetAsActive:               true, // a plain bool in this SDK, not *bool
 	})
 	if err != nil {
 		// Nothing was created, so there is nothing to unwind.
@@ -1950,7 +1950,8 @@ type Handler struct {
 	Devices     devices.Store
 	Issuer      enroll.Issuer
 	IoTEndpoint string
-	TTL         time.Duration
+	TTL         time.Duration // how long an enrollment lives: a day
+	CodeTTL     time.Duration // how long one pairing code lives: minutes
 }
 
 func respond(status int, body any) (events.APIGatewayV2HTTPResponse, error) {
@@ -2264,6 +2265,10 @@ func main() {
 		Issuer:      enroll.NewIoTIssuer(iot.NewFromConfig(cfg), policy),
 		IoTEndpoint: endpoint,
 		TTL:         24 * time.Hour,
+		// The spec's two lifetimes: an enrollment lasts a day so a panel need
+		// not regenerate a keypair because nobody was home, while a code lasts
+		// a quarter hour because it is displayed on a screen.
+		CodeTTL: 15 * time.Minute,
 	}
 	lambda.Start(h.Handle)
 }
