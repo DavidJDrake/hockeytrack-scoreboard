@@ -1,3 +1,4 @@
+import json
 import subprocess
 import traceback
 from pathlib import Path
@@ -8,6 +9,9 @@ from scoreboard.netcfg import WifiSettings, parse_wifi_file, consume
 
 SITE_SETUP_FIXTURE = (Path(__file__).resolve().parents[2]
                       / "site" / "tests" / "fixtures" / "scoreboard-setup.txt")
+
+LINE_BOUNDARIES_FIXTURE = (Path(__file__).resolve().parents[2]
+                           / "site" / "tests" / "fixtures" / "line-boundaries.json")
 
 
 def test_plain_file():
@@ -397,3 +401,14 @@ def test_the_setup_file_the_website_writes_is_read_the_way_it_meant():
     # Downloaded and never edited, it must leave the network alone rather than
     # fail -- ssid= with nothing after it is "nothing to do".
     assert netcfg.parse_wifi_file(text) is None
+
+
+def test_the_website_knows_every_character_the_panel_breaks_lines_on():
+    # The website refuses an owner address containing any of these, because
+    # the panel would cut its setup file there and the address could add a
+    # line of its own -- ssid=, say. The set is derived from the panel's own
+    # parser rather than from str.splitlines() in the abstract, so a change to
+    # how this module splits lines fails here instead of silently reopening
+    # the injection. Across all of Unicode this takes under a second.
+    actual = [c for c in range(0x110000) if netcfg.parse_owner(f"owner=a{chr(c)}b") == "a"]
+    assert json.loads(LINE_BOUNDARIES_FIXTURE.read_text(encoding="utf-8")) == actual

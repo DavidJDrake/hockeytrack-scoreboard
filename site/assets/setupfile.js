@@ -18,8 +18,20 @@ export class SetupFileError extends Error {}
 export function setupFileFor(email) {
   const owner = typeof email === "string" ? email : "";
   if (!owner) throw new SetupFileError("there is no email address to write");
-  // A line break would let the address add lines of its own to the file.
-  if (/[\r\n]/.test(owner)) throw new SetupFileError("an email address cannot contain a line break");
+  // Anything the panel might read as a line break would let the address add
+  // lines of its own to the file -- an ssid= line, say, joining a stranger's
+  // network. Python's str.splitlines(), which the panel parses with, breaks on
+  // ten characters, not two: CR and LF, but also VT, FF, the file/group/record
+  // separators, NEL, and the Unicode line and paragraph separators. This
+  // refuses every control character plus U+2028 and U+2029 -- a superset,
+  // because an email address has no business containing any of them.
+  // site/tests/fixtures/line-boundaries.json pins the panel's actual set.
+  const lineBreakChars = new Set([10, 11, 12, 13, 28, 29, 30, 133, 8232, 8233]);
+  for (const char of owner) {
+    if (lineBreakChars.has(char.charCodeAt(0))) {
+      throw new SetupFileError("an email address cannot contain a line break or a control character");
+    }
+  }
   if (new TextEncoder().encode(owner).length > MAX_OWNER_BYTES) {
     throw new SetupFileError("that email address is too long for a panel to read");
   }

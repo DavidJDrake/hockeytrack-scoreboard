@@ -46,3 +46,14 @@ test("the cap agrees with the panel's own", () => {
   assert.ok(found, "MAX_OWNER_BYTES not found in device/scoreboard/netcfg.py");
   assert.equal(Number(found[1]), MAX_OWNER_BYTES);
 });
+
+test("every character the panel treats as a line break is refused", () => {
+  // Computed from the panel's own parser by device/tests/test_netcfg.py, so if
+  // Python ever breaks lines on something new, that test fails first.
+  const boundaries = JSON.parse(readFileSync(new URL("./fixtures/line-boundaries.json", import.meta.url), "utf8"));
+  assert.ok(boundaries.length >= 10, `only ${boundaries.length} boundaries in the fixture`);
+  for (const codePoint of boundaries) {
+    const hex = codePoint.toString(16).toUpperCase().padStart(4, "0");
+    assert.throws(() => setupFileFor(`a@example.com${String.fromCodePoint(codePoint)}ssid=evil`), SetupFileError, `U+${hex} was accepted`);
+  }
+});
