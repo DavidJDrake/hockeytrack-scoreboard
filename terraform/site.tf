@@ -113,7 +113,7 @@ data "aws_cloudfront_cache_policy" "optimized" {
 # require-trusted-types-for 'script' makes assigning a string to an HTML sink
 # such as innerHTML throw, in browsers that implement Trusted Types. The site
 # never does that; this turns "never does" into "cannot", where supported.
-# site/tests/app.test.js enforces the same rule everywhere else.
+# site/tests/view.test.js enforces the same rule everywhere else.
 resource "aws_cloudfront_response_headers_policy" "site" {
   name = "scoreboard-site-security"
 
