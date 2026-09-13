@@ -13,4 +13,7 @@ terraform/*.tfstate.*
 __pycache__/
 *.pem
 *.key
+# Public root CA, pinned at build time and committed on purpose -- see
+# device/scoreboard/identity.py. Nothing else certificate-shaped is.
+!device/certs/AmazonRootCA1.pem
 .playwright-mcp/
