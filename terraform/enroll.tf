@@ -109,14 +109,16 @@ data "aws_iam_policy_document" "enroll" {
   #   - this role holds none of iot:CreatePolicy, iot:CreatePolicyVersion or
   #     iot:SetDefaultPolicyVersion, so it cannot author a new, more
   #     permissive policy to attach in the first place;
-  #   - scoreboard-device (iot.tf) is currently the only aws_iot_policy in
-  #     this account, so "any policy that exists" and "the device policy"
-  #     are the same set.
+  #   - scoreboard-device (iot.tf) is currently the only IoT policy in this
+  #     account, so "any policy that exists" and "the device policy" are the
+  #     same set.
   # The contingency that follows: if a second, broader IoT policy is ever
   # created in this account, this role could attach it to any certificate,
-  # and nothing here would stop that. That is the thing to watch -- a new
-  # aws_iot_policy resource appearing anywhere in this account -- not a
-  # resource constraint that cannot be written. Restricting resources to
+  # and nothing here would stop that. That is the thing to watch -- any new
+  # IoT policy in this account, Terraform-managed or not, since one made by
+  # hand or by another stack widens this role's reach just as much and would
+  # never appear in this repo -- not a resource constraint that cannot be
+  # written. Restricting resources to
   # certificate ARNs (below), rather than "*", still buys something real:
   # it excludes thing groups, so a compromised enrollment can attach a
   # policy to one certificate at a time rather than to a whole group of

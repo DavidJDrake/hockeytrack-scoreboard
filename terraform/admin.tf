@@ -58,6 +58,22 @@ resource "aws_cognito_user_pool" "admin" {
   auto_verified_attributes = ["email"]
   username_attributes      = ["email"]
 
+  # The load-bearing half of the owner-hint defense. The enroll flow decides
+  # who owns a pre-bound panel by comparing the caller's email claim against a
+  # hash typed into the panel's setup file (ownerMatches,
+  # cloud/cmd/enroll/handler.go), so an invited user who could point their own
+  # account at the owner's address could claim the owner's panel. With this
+  # set, Cognito does not write the new address at all until it is verified:
+  # the attempt sends a code to the *owner's* mailbox, the impostor's email
+  # attribute keeps its old value, and their token therefore never carries the
+  # owner's address in any state. The handler's own email_verified check stays
+  # regardless -- it is what keeps a reverted or misconfigured pool safe -- but
+  # this is the control that does not depend on how API Gateway serializes a
+  # boolean claim.
+  user_attribute_update_settings {
+    attributes_require_verification_before_update = ["email"]
+  }
+
   mfa_configuration = "OPTIONAL"
   software_token_mfa_configuration {
     enabled = true

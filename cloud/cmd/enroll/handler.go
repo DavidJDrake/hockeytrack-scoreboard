@@ -266,15 +266,35 @@ func ownerMatches(p enroll.Pending, req events.APIGatewayV2HTTPRequest) bool {
 	// closes that, because Cognito only sets it once the address has been
 	// confirmed through its own verification flow, not by the user's say-so.
 	//
+	// Three things defend this, in descending order of how much weight they
+	// carry -- which is the reverse of what an earlier version of this comment
+	// said:
+	//   - the pool requires verification before an email change is written at
+	//     all (user_attribute_update_settings, admin.tf), so an impostor's
+	//     token never carries the owner's address in any state, verified or
+	//     not, and the verification mail goes to the owner;
+	//   - this check, which is what keeps a misconfigured or reverted pool
+	//     safe and costs one comparison;
+	//   - write_attributes on the site client (admin.tf), which stops the
+	//     attempt earlier still but is defense in depth, not the load-bearing
+	//     control.
+	//
 	// The exact string API Gateway's JWT authorizer flattens the boolean
 	// email_verified claim into cannot be confirmed without a real token;
-	// this assumes "true" and needs confirming at hardware-test time. That is
-	// why write_attributes on aws_cognito_user_pool_client.site (admin.tf) is
-	// the structural half of this fix and not optional: it holds even if this
-	// string assumption turns out to be wrong.
-	if e := claims["email"]; e != "" && claims["email_verified"] == "true" {
-		if enroll.HashSecret(enroll.NormalizeOwner(e)) == p.OwnerHintHash {
+	// this assumes "true". A wrong guess fails closed -- a legitimate owner
+	// gets a 404, never an impostor a certificate -- but a 404 here is
+	// indistinguishable from every other 404 in this handler, so the near
+	// miss is logged rather than left to be diagnosed at hardware-test time.
+	if e := claims["email"]; e != "" {
+		matches := enroll.HashSecret(enroll.NormalizeOwner(e)) == p.OwnerHintHash
+		if matches && claims["email_verified"] == "true" {
 			return true
+		}
+		if matches {
+			// The address itself is never logged; only the flag's raw form,
+			// which is the thing in doubt.
+			slog.Warn("owner hint matched an email claim that is not verified",
+				"email_verified", claims["email_verified"])
 		}
 	}
 	return false

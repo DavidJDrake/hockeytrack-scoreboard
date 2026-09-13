@@ -356,6 +356,25 @@ func TestCollectingAnExpiredEnrollmentIs404(t *testing.T) {
 	}
 }
 
+// TestClaimingAnExpiredEnrollmentIs404 covers the other half of the claim
+// guard, which a mutation showed no test reached: with `now >= p.ExpiresAt`
+// replaced by `now < 0` the suite stayed green. That half is not redundant
+// with the code bound. RotateCode refreshes CodeExpiresAt on every poll and
+// never touches ExpiresAt, so a panel polling for twenty-five hours holds a
+// perfectly fresh code on a row that aged out -- and this check is the only
+// thing that refuses it.
+func TestClaimingAnExpiredEnrollmentIs404(t *testing.T) {
+	h, issuer := newHandler()
+	h.TTL = -1 * time.Minute // the row is already past its 24-hour bound
+	code, _ := submit(t, h)  // ... while the code itself is freshly minted
+	if got := claim(h, code, "owner-1").StatusCode; got != 404 {
+		t.Errorf("claim against an expired enrollment returned %d, want 404", got)
+	}
+	if len(issuer.Calls) != 0 {
+		t.Fatal("an expired enrollment minted a certificate")
+	}
+}
+
 // TestAnUnverifiedEmailCannotSatisfyTheOwnerHint is the attack the review
 // found: email is the only claim ownerMatches can ever be satisfied by (sub
 // is a UUID nobody could type into a setup file), and email is writable by
