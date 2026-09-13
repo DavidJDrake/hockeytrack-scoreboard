@@ -65,8 +65,16 @@ def parse_owner(text: str) -> str | None:
     return _values(text).get("owner") or None
 
 
-def boot_file(primary: Path = BOOT_FILE, legacy: Path = LEGACY_BOOT_FILE) -> Path:
-    """The setup file to read. The new name wins; the old one is a fallback."""
+def boot_file(primary: Path | None = None, legacy: Path | None = None) -> Path:
+    """The setup file to read. The new name wins; the old one is a fallback.
+
+    Resolved from the module-level BOOT_FILE/LEGACY_BOOT_FILE at call time,
+    not bound as default arguments -- a default expression is evaluated once
+    at import, so it would freeze in whichever file existed at that moment
+    and never see one written later.
+    """
+    primary = BOOT_FILE if primary is None else primary
+    legacy = LEGACY_BOOT_FILE if legacy is None else legacy
     if primary.exists():
         return primary
     if legacy.exists():
@@ -315,15 +323,21 @@ class NetworkManager:
         return Status(online=online, ssid=ssid, ip=ip)
 
 
-def apply_boot_file(path: Path = BOOT_FILE, nm: "NetworkManager | None" = None, now=None) -> bool:
+def apply_boot_file(path: Path | None = None, nm: "NetworkManager | None" = None, now=None) -> bool:
     """Apply the boot-partition file if it has anything to say.
 
     Returns True if settings were applied and the file consumed. Raises on a
     file that cannot work, leaving it in place: it is the user's only copy of
     what they meant, and they need to read it to fix it.
+
+    path defaults to boot_file(), resolved at call time rather than bound as
+    a default argument, so a card carrying only the legacy filename is still
+    found -- a default expression is evaluated once at import and would miss
+    a file that only exists by the time this actually runs.
     """
+    target = boot_file() if path is None else path
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        text = target.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return False
     settings = parse_wifi_file(text)
@@ -335,7 +349,7 @@ def apply_boot_file(path: Path = BOOT_FILE, nm: "NetworkManager | None" = None, 
     manager.apply(settings)
     stamp = now() if now is not None else datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     try:
-        consume(path, stamp, parse_owner(text))
+        consume(target, stamp, parse_owner(text))
     except OSError:
         # The connect succeeded, but the file could not be rewritten -- most
         # realistically a /boot/firmware remounted read-only after an unclean
@@ -344,23 +358,31 @@ def apply_boot_file(path: Path = BOOT_FILE, nm: "NetworkManager | None" = None, 
         # to say so.
         log.warning(
             "applied Wi-Fi settings from %s, but the file could not be "
-            "cleared -- your password is still on the boot partition", path)
+            "cleared -- your password is still on the boot partition", target)
     return True
 
 
 def main(argv=None) -> int:
     logging.basicConfig(level="INFO")
+    # A safe name for the log lines below if boot_file() itself somehow
+    # raises; overwritten immediately inside the try.
+    target = BOOT_FILE
     try:
-        if apply_boot_file():
-            log.info("applied Wi-Fi settings from %s", BOOT_FILE)
+        # Resolved once, before apply_boot_file() consumes it, so the log
+        # lines below name the file that was actually read -- BOOT_FILE
+        # itself may not be the one in play on a card that only has the
+        # legacy filename.
+        target = boot_file()
+        if apply_boot_file(target):
+            log.info("applied Wi-Fi settings from %s", target)
         return 0
     except ValueError as e:
         # Deliberately not a failure exit: a typo in a user's file must not
         # stop the panel booting. Say so in the journal and carry on.
-        log.error("%s: %s -- left in place so it can be corrected", BOOT_FILE, e)
+        log.error("%s: %s -- left in place so it can be corrected", target, e)
         return 0
     except NetworkError as e:
-        log.error("could not apply %s: %s", BOOT_FILE, e)
+        log.error("could not apply %s: %s", target, e)
         return 0
     except Exception:
         # Anything else -- a timed-out nmcli call that slipped past the guard
@@ -368,7 +390,7 @@ def main(argv=None) -> int:
         # panel booting either, and a bare exception could carry anything
         # (see the TimeoutExpired case this guards against), so a fixed
         # message goes to the journal rather than str(e) or a traceback.
-        log.error("could not apply %s -- unexpected error", BOOT_FILE)
+        log.error("could not apply %s -- unexpected error", target)
         return 0
 
 

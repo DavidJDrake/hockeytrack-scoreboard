@@ -140,6 +140,23 @@ def test_the_new_filename_wins_when_both_exist(tmp_path):
     assert netcfg.boot_file(primary=primary, legacy=legacy) == primary
 
 
+def test_a_card_with_only_the_old_filename_still_gets_its_wifi_applied(tmp_path, monkeypatch):
+    # The regression the rename could have caused: a card written before the
+    # rename, not yet booted, would otherwise read a file that is not there
+    # and silently apply nothing.
+    legacy = tmp_path / "scoreboard-wifi.txt"
+    legacy.write_text("ssid=Home\npsk=password123\n")
+    monkeypatch.setattr(netcfg, "BOOT_FILE", tmp_path / "scoreboard-setup.txt")
+    monkeypatch.setattr(netcfg, "LEGACY_BOOT_FILE", legacy)
+
+    class FakeNM:
+        def apply(self, settings): self.applied = settings
+
+    nm = FakeNM()
+    assert netcfg.apply_boot_file(nm=nm, now=lambda: "2026-09-13 10:00 UTC") is True
+    assert nm.applied.ssid == "Home"
+
+
 from scoreboard.netcfg import (NetworkManager, NetworkError, Network, Status,
                                split_terse, apply_boot_file)
 
