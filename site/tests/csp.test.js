@@ -29,8 +29,16 @@ test("scripts come from this origin only", () => {
   assert.equal(directive("script-src").trim(), "'self'");
 });
 
-test("a string can never become a script sink", () => {
+test("styles come from this origin only, with no inline style allowance", () => {
+  assert.equal(directive("style-src").trim(), "'self'");
+});
+
+test("the policy requires Trusted Types for script sinks", () => {
   assert.match(text, /require-trusted-types-for 'script'/);
+});
+
+test("no script may register a Trusted Types policy of its own", () => {
+  assert.equal(directive("trusted-types").trim(), "'none'");
 });
 
 test("the page cannot be framed", () => {

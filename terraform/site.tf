@@ -111,9 +111,23 @@ data "aws_cloudfront_cache_policy" "optimized" {
 # drift away from what it describes.
 #
 # require-trusted-types-for 'script' makes assigning a string to an HTML sink
-# such as innerHTML throw, in browsers that implement Trusted Types. The site
-# never does that; this turns "never does" into "cannot", where supported.
-# site/tests/view.test.js enforces the same rule everywhere else.
+# such as innerHTML throw, in browsers that implement Trusted Types; the site
+# never does that, and this turns "never does" into "cannot" where Trusted
+# Types is supported. site/tests/view.test.js's sink scan is a tripwire
+# against an honest mistake in every browser, not a wall against a
+# deliberate one anywhere -- its regex does not see every sink Trusted Types
+# does (a computed property access, DOMParser, createContextualFragment,
+# srcdoc, setHTMLUnsafe). trusted-types 'none' closes the gap between those
+# two: the site registers no Trusted Types policy of its own, so this stops
+# any script from registering a permissive `default` policy that would hand
+# the sinks above back their old, unchecked behavior.
+#
+# style-src is 'self' only, with no 'unsafe-inline': the admin page has no
+# inline styles or style attributes. 'unsafe-inline' was needed only by the
+# holding page's own <style> block, which the first `make site` replaces --
+# for the few minutes between `terraform apply` and that deploy, the holding
+# page renders unstyled under this policy, and that gap is accepted rather
+# than widening the policy the real page runs under indefinitely.
 resource "aws_cloudfront_response_headers_policy" "site" {
   name = "scoreboard-site-security"
 
@@ -136,11 +150,11 @@ resource "aws_cloudfront_response_headers_policy" "site" {
     }
     content_security_policy {
       content_security_policy = join("", [
-        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; ",
+        "default-src 'self'; script-src 'self'; style-src 'self'; ",
         "img-src 'self' data:; font-src 'self'; ",
         "connect-src 'self' ${aws_apigatewayv2_api.admin.api_endpoint} https://${aws_cognito_user_pool_domain.admin.domain}.auth.${var.region}.amazoncognito.com; ",
         "base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; ",
-        "require-trusted-types-for 'script'",
+        "require-trusted-types-for 'script'; trusted-types 'none'",
       ])
       override = true
     }
