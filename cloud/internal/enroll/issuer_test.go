@@ -87,10 +87,14 @@ func TestIssueMakesTheFourCallsInOrder(t *testing.T) {
 
 func TestIssueCleansUpWhenAStepFails(t *testing.T) {
 	// An orphaned certificate or a thing with no policy is a credential
-	// nobody can account for. Every partial failure must unwind.
+	// nobody can account for. Every partial failure must unwind, and it must
+	// unwind in the right order: you cannot detach a principal from a thing
+	// that has already been deleted, so DetachThingPrincipal must precede
+	// DeleteThing, and a certificate must be deactivated before it can be
+	// deleted, so UpdateCertificate must precede DeleteCertificate.
 	for _, tc := range []struct {
 		failAt  string
-		cleanup []string
+		cleanup []string // required relative order; not necessarily adjacent
 	}{
 		{"CreateThing", []string{"UpdateCertificate", "DeleteCertificate"}},
 		{"AttachThingPrincipal", []string{"DeleteThing", "UpdateCertificate", "DeleteCertificate"}},
@@ -102,16 +106,24 @@ func TestIssueCleansUpWhenAStepFails(t *testing.T) {
 			if err == nil {
 				t.Fatal("expected an error")
 			}
+
+			// Each wanted call must appear, and each must appear after the
+			// one before it in tc.cleanup -- a subsequence check, not just
+			// set membership.
+			pos := -1
 			for _, want := range tc.cleanup {
-				found := false
-				for _, call := range stub.calls {
-					if call == want {
-						found = true
+				found := -1
+				for idx, call := range stub.calls {
+					if call == want && idx > pos {
+						found = idx
+						break
 					}
 				}
-				if !found {
-					t.Errorf("failure at %s did not call %s; calls were %v", tc.failAt, want, stub.calls)
+				if found == -1 {
+					t.Errorf("failure at %s did not call %s after position %d; calls were %v", tc.failAt, want, pos, stub.calls)
+					break
 				}
+				pos = found
 			}
 		})
 	}

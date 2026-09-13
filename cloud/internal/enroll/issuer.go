@@ -35,9 +35,9 @@ type IoTAPI interface {
 //
 // The policy name is fixed at construction rather than passed per call, so no
 // caller can choose which policy a new certificate receives. The IAM role this
-// runs under also pins iot:AttachPolicy to that one policy ARN; this is the
-// same rule stated twice, because it is the difference between a bug in device
-// onboarding and a compromise of the whole fleet.
+// runs under must also pin iot:AttachPolicy to that one policy ARN; without
+// that second constraint, a bug in device onboarding here becomes compromise
+// of the whole fleet.
 type IoTIssuer struct {
 	api        IoTAPI
 	policyName string
@@ -102,8 +102,15 @@ func (i *IoTIssuer) rollback(ctx context.Context, thingName, certARN, certID str
 		CertificateId: aws.String(certID),
 		NewStatus:     types.CertificateStatusInactive,
 	}); err != nil {
-		slog.Error("enroll rollback: deactivating certificate", "certificate", certID, "err", err)
-		return // deleting will fail too; leave it INACTIVE at worst
+		// Deactivation itself failed, so the certificate is still ACTIVE and
+		// now orphaned: AWS will refuse to delete an ACTIVE certificate, so
+		// there is no point trying. It carries no policy and no principal --
+		// AttachPolicy is the last of the four calls, so no rollback path is
+		// ever reached with a policy attached -- so it cannot be used to
+		// connect or publish. It is inert, but it will not clean itself up;
+		// someone has to remove it by hand.
+		slog.Error("enroll rollback: certificate left ACTIVE and orphaned; deactivation failed so deletion was not attempted", "certificate", certID, "err", err)
+		return
 	}
 	if _, err := i.api.DeleteCertificate(ctx, &iot.DeleteCertificateInput{
 		CertificateId: aws.String(certID),
