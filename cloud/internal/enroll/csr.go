@@ -21,34 +21,36 @@ const MaxCSRBytes = 4096
 // proof of possession. It is not a request for a name -- the thing name is
 // assigned by ThingName(), server-side, so that nothing a stranger sends can
 // name a device or collide with one that exists.
-func ParseCSR(pemBytes []byte) (*x509.CertificateRequest, error) {
+//
+// The signature is error-only so the subject cannot escape to the caller.
+func ParseCSR(pemBytes []byte) error {
 	if len(pemBytes) == 0 {
-		return nil, errors.New("empty certificate request")
+		return errors.New("empty certificate request")
 	}
 	if len(pemBytes) > MaxCSRBytes {
-		return nil, fmt.Errorf("certificate request is %d bytes; the maximum is %d", len(pemBytes), MaxCSRBytes)
+		return fmt.Errorf("certificate request is %d bytes; the maximum is %d", len(pemBytes), MaxCSRBytes)
 	}
 	block, _ := pem.Decode(pemBytes)
 	if block == nil || block.Type != "CERTIFICATE REQUEST" {
-		return nil, errors.New("not a PEM certificate request")
+		return errors.New("not a PEM certificate request")
 	}
 	csr, err := x509.ParseCertificateRequest(block.Bytes)
 	if err != nil {
 		// Deliberately not wrapped: x509's errors can quote parts of the
 		// input, and the input is attacker-supplied.
-		return nil, errors.New("malformed certificate request")
+		return errors.New("malformed certificate request")
 	}
 	// The signature is the sender's proof it holds the matching private key.
 	// Without this check anyone could enroll a public key they found.
 	if err := csr.CheckSignature(); err != nil {
-		return nil, errors.New("certificate request signature does not verify")
+		return errors.New("certificate request signature does not verify")
 	}
 	pub, ok := csr.PublicKey.(*ecdsa.PublicKey)
 	if !ok {
-		return nil, errors.New("key must be ECDSA P-256")
+		return errors.New("key must be ECDSA P-256")
 	}
 	if pub.Curve != elliptic.P256() {
-		return nil, errors.New("key must be ECDSA P-256")
+		return errors.New("key must be ECDSA P-256")
 	}
-	return csr, nil
+	return nil
 }
