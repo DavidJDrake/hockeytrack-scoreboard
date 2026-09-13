@@ -1,0 +1,69 @@
+# The unit for an appliance image. Not a template: an image cannot know the
+# owner's username, because Raspberry Pi OS renames the first account on first
+# boot precisely so images do not ship a default one. So the service gets an
+# account of its own, and the human login account has nothing to do with it.
+#
+# device/scoreboard.service remains the template for a git checkout, where
+# ProtectHome and ProtectSystem=strict would break a checkout under /home.
+
+[Unit]
+Description=HockeyTrack scoreboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=scoreboard
+Group=scoreboard
+# No SupplementaryGroups= here: systemd applies User='s own /etc/group
+# memberships via initgroups without being told to, and tools/pi-setup.sh's
+# install_appliance is what puts scoreboard into video, render, input and
+# (if present) gpio. Declaring the same groups here too would let this file
+# and the installer disagree about which ones are optional -- as they used
+# to -- and systemd fails a unit outright (216/GROUP) if a name it's told to
+# resolve does not exist, which is a worse failure than the installer simply
+# not adding a group that isn't there.
+WorkingDirectory=/opt/scoreboard
+Environment=SDL_VIDEODRIVER=kmsdrm
+Environment=PYTHONUNBUFFERED=1
+Environment=SCOREBOARD_CONFIG_DIR=/var/lib/scoreboard
+ExecStart=/opt/scoreboard/.venv/bin/python -m scoreboard.main
+Restart=always
+RestartSec=3
+# 78 is EX_CONFIG: a failure a restart cannot fix, chiefly a pygame whose SDL
+# has no kmsdrm driver. Stop, and leave the reason at the end of the journal.
+RestartPreventExitStatus=78
+
+# --- Console access for kmsdrm ---
+# systemd starts this with no controlling terminal and no logind seat, so
+# without a TTY attached SDL's kmsdrm backend cannot become DRM master and the
+# panel stays black while the process looks healthy. Do not remove these.
+TTYPath=/dev/tty1
+StandardInput=tty
+StandardOutput=journal
+StandardError=journal
+TTYReset=yes
+TTYVHangup=yes
+
+# --- Hardening ---
+# PROVISIONAL until hardware check H1. Sandboxing a process that talks to
+# /dev/dri directly is exactly where these break. Any directive that stops the
+# panel rendering is removed, and the removal recorded in docs/hardware-checks.md
+# with the symptom that justified it.
+# MemoryDenyWriteExecute is deliberately absent: SDL and its drivers map
+# executable pages, and denying that would trade a working panel for a
+# checkbox.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/scoreboard
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+DeviceAllow=char-drm rw
+DeviceAllow=char-input r
+DeviceAllow=/dev/tty1 rw
+
+[Install]
+WantedBy=multi-user.target

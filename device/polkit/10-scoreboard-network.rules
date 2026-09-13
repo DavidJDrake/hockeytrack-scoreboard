@@ -1,0 +1,16 @@
+// The scoreboard service runs as an unprivileged system account, but its
+// settings screen has to be able to join a Wi-Fi network. polkit grants that
+// to active local sessions; a system account has no session, so it has to be
+// said explicitly here. Nothing beyond these three actions is granted, and
+// nothing at all is granted to any other user.
+polkit.addRule(function (action, subject) {
+    if (subject.user !== "scoreboard") {
+        return polkit.Result.NOT_HANDLED;
+    }
+    if (action.id === "org.freedesktop.NetworkManager.settings.modify.system" ||
+        action.id === "org.freedesktop.NetworkManager.network-control" ||
+        action.id === "org.freedesktop.NetworkManager.wifi.scan") {
+        return polkit.Result.YES;
+    }
+    return polkit.Result.NOT_HANDLED;
+});

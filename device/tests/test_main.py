@@ -3,9 +3,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+from scoreboard import main as main_module
 from scoreboard.display import EX_CONFIG
-from scoreboard.main import should_blank
+from scoreboard.main import carry_out, should_blank
 from scoreboard.model import GameState
+from scoreboard.netcfg import WifiSettings
+from scoreboard.settings import RESULT, Settings
 
 FIX = Path(__file__).parent / "fixtures"
 DEVICE = Path(__file__).resolve().parent.parent
@@ -58,3 +61,106 @@ def test_a_video_driver_missing_from_the_build_stops_the_service_for_good():
     r = subprocess.run([sys.executable, "-m", "scoreboard.main"], cwd=DEVICE, env=env,
                        capture_output=True, text=True, timeout=30)
     assert r.returncode == EX_CONFIG, r.stderr
+
+
+def test_a_connect_timeout_never_shows_the_password():
+    # nmcli's own argv -- including the password -- ends up inside
+    # subprocess.TimeoutExpired's str(), and apply() is the one call in
+    # this codebase whose argv can hold a secret. An ordinary, unexotic
+    # timeout must not put that secret on a wall-mounted screen.
+    secret = "hunter2hunter2"
+
+    class TimesOut:
+        def scan(self):
+            raise AssertionError("not called")
+
+        def apply(self, settings):
+            raise subprocess.TimeoutExpired(
+                ["nmcli", "device", "wifi", "connect", settings.ssid, "password", settings.psk], 30)
+
+        def status(self):
+            raise AssertionError("not called")
+
+        def forget_all(self):
+            raise AssertionError("not called")
+
+    panel = Settings(networks=[])
+    panel.pending = ("apply", WifiSettings(ssid="HomeNet", psk=secret))
+
+    carry_out(panel, TimesOut(), cfg=None)
+
+    assert secret not in panel.message
+    assert panel.mode == RESULT
+
+
+def test_a_failed_status_refresh_does_not_overwrite_a_successful_connect():
+    # nm.status() makes three more nmcli calls after a successful apply(). If
+    # any of them fails, the panel must still say "Connected to ...", not a
+    # failure message contradicting a connect that actually succeeded.
+    class ConnectsButStatusFails:
+        def apply(self, settings):
+            pass
+
+        def status(self):
+            raise subprocess.TimeoutExpired(["nmcli", "-t", "-f", "STATE", "general"], 10)
+
+    panel = Settings(networks=[])
+    panel.pending = ("apply", WifiSettings(ssid="HomeNet", psk="supersecret"))
+
+    result = carry_out(panel, ConnectsButStatusFails(), cfg=None)
+
+    assert result is None
+    assert panel.message == "Connected to HomeNet"
+    assert panel.mode == RESULT
+
+
+def test_a_successful_status_refresh_is_still_returned():
+    class ConnectsAndReportsStatus:
+        def apply(self, settings):
+            pass
+
+        def status(self):
+            return "fresh status"
+
+    panel = Settings(networks=[])
+    panel.pending = ("apply", WifiSettings(ssid="HomeNet"))
+
+    assert carry_out(panel, ConnectsAndReportsStatus(), cfg=None) == "fresh status"
+    assert panel.message == "Connected to HomeNet"
+
+
+def test_an_unrecognised_pending_action_gets_a_generic_message_not_a_crash(monkeypatch):
+    # SAFE_ERRORS[what] used to be a subscript inside the except handler
+    # itself -- an uncaught KeyError there would escape the render loop's
+    # only error handler for any `what` the dict doesn't cover. Today the
+    # state machine only ever sets the three keys already in SAFE_ERRORS, so
+    # this is simulated by removing one, standing in for a future pending
+    # kind nobody remembered to add to the dict.
+    monkeypatch.setattr(main_module, "SAFE_ERRORS", {})
+
+    class Boom:
+        def apply(self, settings):
+            raise RuntimeError("unexpected")
+
+    panel = Settings(networks=[])
+    panel.pending = ("apply", WifiSettings(ssid="HomeNet"))
+
+    carry_out(panel, Boom(), cfg=None)
+
+    assert panel.message == "Something went wrong"
+    assert panel.mode == RESULT
+
+
+def test_an_unregistered_panel_reaches_the_display_instead_of_exiting(tmp_path):
+    # Before this change main exited 1 on a missing device.json, never reaching
+    # the display. Now it must get past config and fail on the bogus driver
+    # instead -- which is how we prove config no longer short-circuits boot.
+    env = dict(os.environ,
+               SCOREBOARD_CONFIG_DIR=str(tmp_path),
+               SDL_VIDEODRIVER="definitelynotadriver")
+    env.pop("DISPLAY", None)
+    env.pop("SCOREBOARD_FIXTURE", None)
+    done = subprocess.run([sys.executable, "-m", "scoreboard.main"],
+                          cwd=Path(__file__).resolve().parents[1],
+                          env=env, capture_output=True, text=True, timeout=60)
+    assert done.returncode == EX_CONFIG
