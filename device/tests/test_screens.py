@@ -101,3 +101,58 @@ def test_draw_settings_draws_the_selected_network():
     rows = [text for text in assets.drawn if text.lstrip().startswith(("Net", "> Net"))]
     assert any(text.startswith("> Net7") for text in rows), rows
     assert len(rows) == screens.NETWORK_WINDOW, rows
+
+
+def test_a_panel_with_a_code_shows_the_code_screen():
+    from scoreboard import enroll
+    state = enroll.Waiting("7K4M-9QX2", 1757800000, "friend@example.com")
+    assert screens.screen_for(False, True, state) == screens.WAITING
+
+
+def test_a_failing_enrollment_does_not_look_like_waiting():
+    from scoreboard import enroll
+    assert screens.screen_for(False, True, enroll.Problem("down")) == screens.ENROLL_PROBLEM
+
+
+def test_no_network_still_wins_over_enrollment():
+    # A panel that cannot reach Wi-Fi must say so, not show a stale code.
+    from scoreboard import enroll
+    state = enroll.Waiting("7K4M-9QX2", 1757800000, None)
+    assert screens.screen_for(False, False, state) == screens.OFFLINE
+
+
+def test_a_panel_that_has_not_asked_yet_shows_the_old_unregistered_screen():
+    assert screens.screen_for(False, True, None) == screens.UNREGISTERED
+
+
+def test_an_identity_beats_everything():
+    from scoreboard import enroll
+    state = enroll.Waiting("7K4M-9QX2", 1757800000, None)
+    assert screens.screen_for(True, True, state) == screens.SCOREBOARD
+
+
+def _painted(draw_call) -> bool:
+    """Did anything actually reach the panel? Byte-for-byte against a blank
+    fill, the way test_screens_paint_something already does it -- an average
+    would round a mostly-dark screen with a little text on it back to BG."""
+    pygame.init()
+    surface = pygame.Surface((W, H))
+    draw_call(surface)
+    blank = pygame.Surface((W, H))
+    blank.fill(BG)
+    return pygame.image.tostring(surface, "RGB") != pygame.image.tostring(blank, "RGB")
+
+
+def test_the_code_screen_draws_the_code_and_the_owner():
+    assert _painted(lambda s: screens.draw_waiting(
+        s, Assets(), "7K4M-9QX2", "scoreboard.example.com", "friend@example.com", "test build"))
+
+
+def test_the_code_screen_works_without_an_owner():
+    assert _painted(lambda s: screens.draw_waiting(
+        s, Assets(), "7K4M-9QX2", "scoreboard.example.com", None, "test build"))
+
+
+def test_the_problem_screen_draws():
+    assert _painted(lambda s: screens.draw_enroll_problem(
+        s, Assets(), "cannot reach the service", "test build"))

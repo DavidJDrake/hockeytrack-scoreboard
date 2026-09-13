@@ -15,18 +15,31 @@ from .assets import Assets
 from .render import W, H, BG, INK, MUTED
 
 SCOREBOARD, UNREGISTERED, OFFLINE = "scoreboard", "unregistered", "offline"
+WAITING, ENROLL_PROBLEM = "waiting", "enroll-problem"
 BUILD_FILE = Path("/etc/scoreboard-build")
 NETWORK_WINDOW = 5  # rows of the network list shown at once on the settings screen
 
 
-def screen_for(has_identity: bool, has_network: bool) -> str:
-    """Which panel is showing. Identity first: a panel nobody has registered
-    has nothing to say about hockey even with perfect Wi-Fi."""
-    if not has_identity:
+def screen_for(has_identity: bool, has_network: bool, enrollment=None) -> str:
+    """Which panel is showing.
+
+    Identity first: a panel nobody has registered has nothing to say about
+    hockey even with perfect Wi-Fi. That ordering predates enrollment and the
+    four existing cases keep it exactly -- do not "tidy" them, there is a
+    parametrized test on all four.
+
+    The network only outranks enrollment once there IS an enrollment to show,
+    because a code the panel cannot refresh is worse than useless: it may have
+    rotated already, and "no network" is the thing the person standing there
+    can actually fix.
+    """
+    if has_identity:
+        return SCOREBOARD if has_network else OFFLINE
+    if enrollment is None:
         return UNREGISTERED
     if not has_network:
         return OFFLINE
-    return SCOREBOARD
+    return WAITING if getattr(enrollment, "display", None) else ENROLL_PROBLEM
 
 
 def _network_window_start(index: int, count: int, size: int = NETWORK_WINDOW) -> int:
@@ -72,6 +85,47 @@ def draw_offline(surface: pygame.Surface, assets: Assets, build: str) -> None:
     draw_message(surface, assets, "No network", [
         "This panel cannot reach Wi-Fi.",
         "Press S for network settings.",
+        build,
+    ])
+
+
+def draw_waiting(surface: pygame.Surface, assets: Assets, code: str, site: str,
+                 owner: str | None, build: str) -> None:
+    """The pairing code, big enough to read across a room and type on a phone.
+
+    The owner line is here because it is otherwise invisible until something
+    goes wrong: "Waiting for friend@example.com" tells whoever is standing
+    there that the setup file was read and who the panel expects to claim it.
+    """
+    surface.fill(BG)
+    y = H // 2 - 170
+    heading = assets.font(44, False).render("Add this panel at", True, MUTED)
+    surface.blit(heading, heading.get_rect(midtop=(W // 2, y)))
+    y += 56
+    where = assets.font(56, True).render(site, True, INK)
+    surface.blit(where, where.get_rect(midtop=(W // 2, y)))
+    y += 92
+    shown = assets.font(140, True).render(code, True, INK)
+    surface.blit(shown, shown.get_rect(midtop=(W // 2, y)))
+    y += 168
+    for line in ([f"Waiting for {owner}"] if owner else ["Waiting to be claimed"]) + [build]:
+        img = assets.font(38, False).render(line, True, MUTED)
+        surface.blit(img, img.get_rect(midtop=(W // 2, y)))
+        y += 48
+
+
+def draw_enroll_problem(surface: pygame.Surface, assets: Assets, detail: str,
+                        build: str) -> None:
+    """Enrollment is failing, said plainly.
+
+    Deliberately unlike draw_waiting: somebody looking at this panel must be
+    able to tell "go and type this code" from "this is broken at our end"
+    without knowing anything about how either works.
+    """
+    draw_message(surface, assets, "Cannot register", [
+        "This panel could not reach the scoreboard service.",
+        detail,
+        "It will keep trying. Press S for network settings.",
         build,
     ])
 
