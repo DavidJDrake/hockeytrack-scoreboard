@@ -100,6 +100,9 @@ The check this whole plan exists for, and the one no CI can do: the Python and
 Go halves have never spoken over a real network, and §11 of the enrollment spec
 lists exactly this as untestable in CI.
 
+0. Signed in as the owner, use *Download setup file* rather than writing
+   `scoreboard-setup.txt` by hand. This also checks the file the site writes
+   is one the panel reads.
 1. Flash a card. Write `scoreboard-setup.txt` on the boot partition with
    `ssid=`, `psk=` and `owner=` set to the email address of a user who exists
    in the Cognito pool.
@@ -108,10 +111,13 @@ lists exactly this as untestable in CI.
    `XXXX-XXXX`, and `Waiting for <that address>`.
 3. Leave it for twenty minutes without claiming it. The code must change. The
    old one must then be refused.
-4. Sign in to the admin site **as a different invited user** and try the code.
-   Expect a refusal that does not reveal whether the code was real.
-5. Sign in as the owner and claim it. Within about thirty seconds the panel
-   should restart itself and come up on the scoreboard.
+4. Sign in at https://scoreboard.davidjdrake.com **as a different invited
+   user** and type the code into *Claim a panel*. Expect "No panel is waiting
+   for you with that code…" — the same message a mistyped code gets, so the
+   page reveals nothing about whether the code was real.
+5. Sign out, sign in as the owner, and claim it. The panel should appear in
+   the list, and within about thirty seconds the panel itself should restart
+   into the scoreboard. Choose a game for it and confirm the panel switches.
 6. Check `/var/lib/scoreboard`: `device.json`, `device.pem.crt`,
    `private.pem.key` (mode 0600) and `AmazonRootCA1.pem` present, and
    **`enrollment.json` gone**.

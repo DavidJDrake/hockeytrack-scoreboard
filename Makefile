@@ -17,7 +17,7 @@ GO          := go
 PY          := .venv/bin/python
 PYTEST      := .venv/bin/pytest
 
-.PHONY: test test-go test-py test-js vuln vuln-go vuln-py build deploy provision fmt
+.PHONY: test test-go test-py test-js vuln vuln-go vuln-py build deploy provision fmt site-config site site-local
 
 test: vuln test-go test-py test-js
 
@@ -58,6 +58,37 @@ test-js:
 
 fmt:
 	cd cloud && gofmt -l . && test -z "$$(gofmt -l .)"
+
+# The admin site's runtime settings, taken from the stack itself so the page
+# can never point at an API or a Cognito domain the stack does not have.
+site-config:
+	cd terraform && printf '{\n  "apiBase": "%s",\n  "cognitoDomain": "%s",\n  "clientId": "%s"\n}\n' \
+	  "$$(terraform output -raw api_endpoint)" \
+	  "$$(terraform output -raw cognito_domain)" \
+	  "$$(terraform output -raw user_pool_client_id)" > ../site/config.json
+
+# Upload the admin site. Tests first, so a broken page cannot ship.
+#
+# Cache lifetimes differ from HockeyTrack's on purpose. Its assets are cached
+# for a day; these are five minutes, because this site's JavaScript carries the
+# sign-in flow and has no hashed filenames, so a fix to it has to reach browsers
+# promptly. config.json is never cached. Fonts never change and are immutable.
+# tests/, package.json and config.json are excluded from the main sync --
+# excluded files are also exempt from --delete, so the separate config.json
+# upload is not removed by it.
+site: test-js site-config
+	aws s3 sync site/ s3://$$(cd terraform && terraform output -raw site_bucket)/ --exclude 'assets/*' --exclude 'tests/*' --exclude 'package.json' --exclude 'config.json' --delete --cache-control 'public, max-age=300' --region $(REGION)
+	aws s3 cp site/config.json s3://$$(cd terraform && terraform output -raw site_bucket)/config.json --cache-control 'no-store' --content-type 'application/json' --region $(REGION)
+	aws s3 sync site/assets/ s3://$$(cd terraform && terraform output -raw site_bucket)/assets/ --exclude 'fonts/*' --delete --cache-control 'public, max-age=300' --region $(REGION)
+	aws s3 sync site/assets/fonts/ s3://$$(cd terraform && terraform output -raw site_bucket)/assets/fonts/ --delete --cache-control 'public, max-age=31536000, immutable' --content-type 'font/woff2' --region $(REGION)
+	aws cloudfront create-invalidation --distribution-id $$(cd terraform && terraform output -raw site_distribution_id) --paths '/*' --query 'Invalidation.Id' --output text
+
+# Serve the site locally on the one non-production callback URL Cognito
+# accepts. Sign-in works here; API calls do not, because the API's CORS admits
+# only the production origin, and widening production CORS for a development
+# convenience is the wrong trade.
+site-local: site-config
+	cd site && python3 -m http.server 8000
 
 # Lambda zips: static arm64 binaries named `bootstrap` for provided.al2023,
 # zipped with python3's zipfile module (no `zip` binary on this machine).
