@@ -140,12 +140,6 @@ def main() -> None:
     events: queue.Queue = queue.Queue()
     enroll_state = None
     enroll_stop = threading.Event()
-    if cfg is None and not fixture:
-        # The owner line rides on the boot partition beside the Wi-Fi settings,
-        # so the code this panel asks for is claimable by that person alone.
-        owner = owner_hint()
-        log.info("no identity yet; enrolling%s", " for a named owner" if owner else "")
-        enrollment_thread(default_config_dir(), owner, events, enroll_stop)
     link = None
     if cfg:
         link = Link(cfg.endpoint, cfg.client_id, cfg.cert, cfg.key, cfg.ca,
@@ -176,6 +170,21 @@ def main() -> None:
             log.error("%s", hint)
         sys.exit(code)
     pygame.mouse.set_visible(False)
+    if cfg is None and not fixture:
+        # Only started once the display is known to work: a panel that
+        # cannot render a pairing code has no business posting a CSR and
+        # consuming one, and starting this thread before the display was
+        # open meant a display failure's sys.exit() could tear down the
+        # interpreter while this thread was inside OpenSSL -- a segfault,
+        # not the clean exit code the appliance unit relies on to stop
+        # restarting rather than loop forever.
+        #
+        # The owner line rides on the boot partition beside the Wi-Fi
+        # settings, so the code this panel asks for is claimable by that
+        # person alone.
+        owner = owner_hint()
+        log.info("no identity yet; enrolling%s", " for a named owner" if owner else "")
+        enrollment_thread(default_config_dir(), owner, events, enroll_stop)
     place = placement((W, H), screen.get_size(), rotate)
     log.info("pygame %s, SDL %s, %s driver, display %dx%d; frame turned %d° and drawn at %dx%d",
              pygame.version.ver, pygame.version.SDL, pygame.display.get_driver(),
@@ -353,6 +362,7 @@ def main() -> None:
             pygame.display.flip()
             clock.tick(10)
     finally:
+        enroll_stop.set()
         if link:
             link.stop()
 
