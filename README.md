@@ -118,14 +118,17 @@ type the password, press Enter. `R` there offers a factory reset, which clears
 this panel's identity and saved networks — it does not stop the old certificate
 working, so also remove the device from your account.
 
-If you cannot get a keyboard to it, write a file called `scoreboard-wifi.txt`
-on the card's boot partition — the one Windows and macOS can see — containing:
+If you cannot get a keyboard to it, write a file called `scoreboard-setup.txt`
+on the card's boot partition (the one Windows and macOS can see):
 
     ssid=YourNetworkName
     psk=YourWiFiPassword
+    owner=you@example.com
 
-and reboot. The panel applies it on every boot, then replaces the file with a
-note so your password is not left sitting on a partition any computer can read.
+The panel reads it on every boot, connects, and then removes the password from
+the file — it is the one partition any computer mounts automatically. The owner
+line stays, and is what makes the pairing code claimable by you and nobody
+else. Leave it out and any invited user can claim the panel.
 
 The first line the service logs (`journalctl -u scoreboard -f`) names the
 video driver, the display size and the rotation it chose. If the picture is

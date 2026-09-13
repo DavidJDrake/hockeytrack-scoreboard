@@ -157,3 +157,26 @@ def test_appliance_installer_requires_video_render_input_but_not_gpio(checkout):
     assert 'for g in video render input; do' in text
     assert 'die "required group' in text
     assert 'getent group gpio >/dev/null && usermod -aG gpio' in text
+
+
+def test_the_installer_installs_the_crypto_package():
+    text = (REPO / "tools" / "pi-setup.sh").read_text()
+    # Enrollment generates a P-256 key on the device; the PyPI wheel is not
+    # what this venv sees, the distribution package is.
+    assert text.count("python3-cryptography") == 2, \
+        "both the checkout and the appliance apt lines need python3-cryptography"
+
+
+def test_the_installer_installs_a_trust_store(checkout):
+    text = (checkout / "tools" / "pi-setup.sh").read_text()
+    # ssl.create_default_context() needs a system trust store to verify the
+    # enrollment endpoint's certificate against (M-6). Present by default on
+    # Raspberry Pi OS, but the installer should not silently depend on that.
+    assert text.count("ca-certificates") == 2, \
+        "both the checkout and the appliance apt lines need ca-certificates"
+
+
+def test_the_root_ca_travels_with_the_code():
+    ca = REPO / "device" / "certs" / "AmazonRootCA1.pem"
+    assert ca.exists(), "an enrolling appliance has no provisioning step to download this"
+    assert "BEGIN CERTIFICATE" in ca.read_text()

@@ -3,6 +3,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pygame
+
 from scoreboard import main as main_module
 from scoreboard.display import EX_CONFIG
 from scoreboard.main import carry_out, should_blank
@@ -157,10 +159,152 @@ def test_an_unregistered_panel_reaches_the_display_instead_of_exiting(tmp_path):
     # instead -- which is how we prove config no longer short-circuits boot.
     env = dict(os.environ,
                SCOREBOARD_CONFIG_DIR=str(tmp_path),
-               SDL_VIDEODRIVER="definitelynotadriver")
+               SDL_VIDEODRIVER="definitelynotadriver",
+               # Belt and suspenders alongside the conftest fixture: this is
+               # the one test that spawns a real scoreboard.main with no
+               # identity, so it is the one place a bare enroll.Enroller
+               # gets constructed and could reach the network for real.
+               SCOREBOARD_API="https://127.0.0.1:9")
     env.pop("DISPLAY", None)
     env.pop("SCOREBOARD_FIXTURE", None)
     done = subprocess.run([sys.executable, "-m", "scoreboard.main"],
                           cwd=Path(__file__).resolve().parents[1],
                           env=env, capture_output=True, text=True, timeout=60)
     assert done.returncode == EX_CONFIG
+
+
+def test_the_enrollment_thread_reports_each_state_and_stops_when_ready(tmp_path):
+    import queue
+    import threading
+    from scoreboard import enroll, main as m
+
+    class Scripted:
+        def __init__(self):
+            self.delay = 0
+            self._steps = [enroll.Waiting("7K4M-9QX2", 0, None),
+                           enroll.Problem("down"),
+                           enroll.Ready("scoreboard-abc123")]
+
+        def step(self):
+            return self._steps.pop(0)
+
+    events: queue.Queue = queue.Queue()
+    stop = threading.Event()
+    t = m.enrollment_thread(tmp_path, None, events, stop, enroller=Scripted())
+    t.join(timeout=5)
+    assert not t.is_alive(), "the thread must stop once the panel is claimed"
+    seen = []
+    while not events.empty():
+        seen.append(events.get())
+    assert [kind for kind, _ in seen] == ["enroll", "enroll", "enroll"]
+    assert isinstance(seen[-1][1], enroll.Ready)
+
+
+def test_the_enrollment_thread_stops_when_asked(tmp_path):
+    import queue
+    import threading
+    from scoreboard import enroll, main as m
+
+    class Forever:
+        delay = 0
+
+        def step(self):
+            return enroll.Waiting("7K4M-9QX2", 0, None)
+
+    events: queue.Queue = queue.Queue()
+    stop = threading.Event()
+    t = m.enrollment_thread(tmp_path, None, events, stop, enroller=Forever())
+    events.get(timeout=5)
+    stop.set()
+    t.join(timeout=5)
+    assert not t.is_alive()
+
+
+def test_a_factory_reset_stops_the_enrollment_thread(tmp_path):
+    # I-1, the main.py side: before this, carry_out's "reset" branch never
+    # touched the enrollment thread at all, so a still-running Enroller kept
+    # polling with the token reset just made unusable and, on its next
+    # success, would install a certificate for a private key that no longer
+    # existed. If the thread is not stopped here, this test hangs on join.
+    import queue
+    import threading
+    from scoreboard import enroll, main as m
+
+    class FakeNM:
+        def forget_all(self):
+            pass
+
+    class Forever:
+        delay = 0
+
+        def step(self):
+            return enroll.Waiting("7K4M-9QX2", 0, None)
+
+    events: queue.Queue = queue.Queue()
+    stop = threading.Event()
+    t = m.enrollment_thread(tmp_path, None, events, stop, enroller=Forever())
+    events.get(timeout=5)  # the thread has started and taken at least one step
+
+    panel = Settings(networks=[])
+    panel.pending = ("reset", None)
+    m.carry_out(panel, FakeNM(), cfg=None, enroll_stop=stop)
+
+    assert stop.is_set()
+    t.join(timeout=5)
+    assert not t.is_alive()
+
+
+def test_enrollment_starts_for_an_unprovisioned_panel_with_a_working_display(tmp_path, monkeypatch):
+    # M-7: main()'s own call site for the enrollment thread -- the guard,
+    # not the thread itself -- had no test at all, and it is exactly the
+    # seam F1 and F2 lived in. Pins the guard directly rather than driving
+    # the whole render loop.
+    monkeypatch.setenv("SCOREBOARD_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("SDL_VIDEODRIVER", "dummy")
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("SCOREBOARD_FIXTURE", raising=False)
+
+    calls = []
+    monkeypatch.setattr(main_module, "enrollment_thread",
+                        lambda config_dir, owner, events, stop, enroller=None: calls.append(config_dir))
+
+    posted = {"done": False}
+
+    def fake_get(*a, **k):
+        if posted["done"]:
+            return []
+        posted["done"] = True
+        return [pygame.event.Event(pygame.QUIT)]
+
+    monkeypatch.setattr(pygame.event, "get", fake_get)
+
+    main_module.main()
+
+    assert calls == [main_module.default_config_dir()]
+
+
+def test_enrollment_does_not_start_when_a_fixture_is_set(tmp_path, monkeypatch):
+    # M-7: the other half of the guard -- a desktop preview must never post a
+    # CSR, even though it also has no device.json.
+    monkeypatch.setenv("SCOREBOARD_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("SDL_VIDEODRIVER", "dummy")
+    monkeypatch.setenv("SCOREBOARD_FIXTURE", str(FIX / "state_live.json"))
+    monkeypatch.delenv("DISPLAY", raising=False)
+
+    calls = []
+    monkeypatch.setattr(main_module, "enrollment_thread",
+                        lambda *a, **k: calls.append(a))
+
+    posted = {"done": False}
+
+    def fake_get(*a, **k):
+        if posted["done"]:
+            return []
+        posted["done"] = True
+        return [pygame.event.Event(pygame.QUIT)]
+
+    monkeypatch.setattr(pygame.event, "get", fake_get)
+
+    main_module.main()
+
+    assert calls == []

@@ -16,9 +16,18 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-BOOT_FILE = Path("/boot/firmware/scoreboard-wifi.txt")
+BOOT_FILE = Path("/boot/firmware/scoreboard-setup.txt")
+# The name this file had when it carried only Wi-Fi. Cards written before the
+# rename still work: a panel that refused to read the file the user was told
+# to write last month is a support call, and the file's contents are
+# unambiguous either way.
+LEGACY_BOOT_FILE = Path("/boot/firmware/scoreboard-wifi.txt")
 MAX_SSID_BYTES = 32
 MIN_PSK_CHARS, MAX_PSK_CHARS = 8, 63
+# Generous for an email address, and this is a typo guard, not a real limit:
+# owner_hint() puts this straight into the enrollment POST body, and nothing
+# upstream of it caps the length of a line on a FAT partition anyone can edit.
+MAX_OWNER_BYTES = 256
 
 
 @dataclass(frozen=True)
@@ -27,6 +36,76 @@ class WifiSettings:
     psk: str | None = None
     country: str | None = None
     hidden: bool = False
+
+
+def _values(text: str) -> dict[str, str]:
+    """Key/value lines from a file a person typed on a FAT partition.
+
+    A UTF-8 BOM is stripped, CRLF is handled, surrounding whitespace is
+    ignored, keys are case-insensitive, and only the first '=' separates so
+    a password may contain more.
+    """
+    if text.startswith("\ufeff"):
+        text = text[1:]
+    values: dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        values[key.strip().lower()] = value.strip()
+    return values
+
+
+def parse_owner(text: str) -> str | None:
+    """Who this panel belongs to, if the card says.
+
+    Never raises. An absent or empty owner line is a normal state: the panel
+    enrolls without a hint and its code is claimable by any invited user. Case
+    is preserved rather than folded -- the server normalizes before hashing,
+    and a mangled address here would silently produce a code its owner cannot
+    claim.
+    """
+    return _values(text).get("owner") or None
+
+
+def boot_file(primary: Path | None = None, legacy: Path | None = None) -> Path:
+    """The setup file to read. The new name wins; the old one is a fallback.
+
+    Resolved from the module-level BOOT_FILE/LEGACY_BOOT_FILE at call time,
+    not bound as default arguments -- a default expression is evaluated once
+    at import, so it would freeze in whichever file existed at that moment
+    and never see one written later.
+    """
+    primary = BOOT_FILE if primary is None else primary
+    legacy = LEGACY_BOOT_FILE if legacy is None else legacy
+    if primary.exists():
+        return primary
+    if legacy.exists():
+        return legacy
+    return primary
+
+
+def owner_hint(path: Path | None = None) -> str | None:
+    """The owner line from the boot partition, or None.
+
+    Unreadable file, unreadable bytes, no owner line, or an owner line far
+    longer than any real email address -- all None. Nothing about enrollment
+    should fail because of what somebody typed here, and this value goes
+    straight into the enrollment POST body: an over-long line is a typo on
+    the boot partition, not a configuration to send on. It is dropped
+    outright rather than truncated, since a truncated address would still be
+    sent, just wrong.
+    """
+    target = boot_file() if path is None else path
+    try:
+        text = target.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    owner = parse_owner(text)
+    if owner is not None and len(owner.encode("utf-8")) > MAX_OWNER_BYTES:
+        return None
+    return owner
 
 
 def parse_wifi_file(text: str) -> WifiSettings | None:
@@ -41,15 +120,7 @@ def parse_wifi_file(text: str) -> WifiSettings | None:
     ignored, keys are case-insensitive, and only the first '=' separates so
     a password may contain more.
     """
-    if text.startswith("\ufeff"):
-        text = text[1:]
-    values: dict[str, str] = {}
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        values[key.strip().lower()] = value.strip()
+    values = _values(text)
 
     ssid = values.get("ssid", "")
     if not ssid:
@@ -78,24 +149,31 @@ def parse_wifi_file(text: str) -> WifiSettings | None:
     )
 
 
-def consume(path: Path, when: str) -> None:
+def consume(path: Path, when: str, owner: str | None = None) -> None:
     """Replace the file with a note saying it was applied.
 
     The password is now in NetworkManager's own store, root-owned on the
     root partition. Leaving a copy here would mean a cleartext Wi-Fi
     password living permanently on the one partition every operating system
     mounts automatically when the card is plugged in.
+
+    The owner line is deliberately kept. It is not a secret in the way a
+    password is -- it is the address of the person holding the card -- and
+    the panel may not enroll until a later boot, or may be factory reset,
+    at which point this file is the only record of who it belongs to.
     """
+    kept = f"owner={owner}\n\n" if owner else ""
     path.write_text(
-        f"# Applied by the scoreboard on {when}.\n"
+        kept +
+        f"# Wi-Fi settings applied by the scoreboard on {when}.\n"
         "#\n"
         "# The network details that were here are stored on the device now, and\n"
         "# have been removed from this file, which any computer can read.\n"
         "#\n"
-        "# To change networks, replace all of this with:\n"
+        "# To change networks, replace the lines below with:\n"
         "#   ssid=YourNetworkName\n"
         "#   psk=YourWiFiPassword\n"
-        "# and reboot the panel.\n"
+        "# and reboot the panel. Leave the owner line alone.\n"
     )
 
 
@@ -257,15 +335,21 @@ class NetworkManager:
         return Status(online=online, ssid=ssid, ip=ip)
 
 
-def apply_boot_file(path: Path = BOOT_FILE, nm: "NetworkManager | None" = None, now=None) -> bool:
+def apply_boot_file(path: Path | None = None, nm: "NetworkManager | None" = None, now=None) -> bool:
     """Apply the boot-partition file if it has anything to say.
 
     Returns True if settings were applied and the file consumed. Raises on a
     file that cannot work, leaving it in place: it is the user's only copy of
     what they meant, and they need to read it to fix it.
+
+    path defaults to boot_file(), resolved at call time rather than bound as
+    a default argument, so a card carrying only the legacy filename is still
+    found -- a default expression is evaluated once at import and would miss
+    a file that only exists by the time this actually runs.
     """
+    target = boot_file() if path is None else path
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        text = target.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return False
     settings = parse_wifi_file(text)
@@ -277,7 +361,7 @@ def apply_boot_file(path: Path = BOOT_FILE, nm: "NetworkManager | None" = None, 
     manager.apply(settings)
     stamp = now() if now is not None else datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     try:
-        consume(path, stamp)
+        consume(target, stamp, parse_owner(text))
     except OSError:
         # The connect succeeded, but the file could not be rewritten -- most
         # realistically a /boot/firmware remounted read-only after an unclean
@@ -286,23 +370,31 @@ def apply_boot_file(path: Path = BOOT_FILE, nm: "NetworkManager | None" = None, 
         # to say so.
         log.warning(
             "applied Wi-Fi settings from %s, but the file could not be "
-            "cleared -- your password is still on the boot partition", path)
+            "cleared -- your password is still on the boot partition", target)
     return True
 
 
 def main(argv=None) -> int:
     logging.basicConfig(level="INFO")
+    # A safe name for the log lines below if boot_file() itself somehow
+    # raises; overwritten immediately inside the try.
+    target = BOOT_FILE
     try:
-        if apply_boot_file():
-            log.info("applied Wi-Fi settings from %s", BOOT_FILE)
+        # Resolved once, before apply_boot_file() consumes it, so the log
+        # lines below name the file that was actually read -- BOOT_FILE
+        # itself may not be the one in play on a card that only has the
+        # legacy filename.
+        target = boot_file()
+        if apply_boot_file(target):
+            log.info("applied Wi-Fi settings from %s", target)
         return 0
     except ValueError as e:
         # Deliberately not a failure exit: a typo in a user's file must not
         # stop the panel booting. Say so in the journal and carry on.
-        log.error("%s: %s -- left in place so it can be corrected", BOOT_FILE, e)
+        log.error("%s: %s -- left in place so it can be corrected", target, e)
         return 0
     except NetworkError as e:
-        log.error("could not apply %s: %s", BOOT_FILE, e)
+        log.error("could not apply %s: %s", target, e)
         return 0
     except Exception:
         # Anything else -- a timed-out nmcli call that slipped past the guard
@@ -310,7 +402,7 @@ def main(argv=None) -> int:
         # panel booting either, and a bare exception could carry anything
         # (see the TimeoutExpired case this guards against), so a fixed
         # message goes to the journal rather than str(e) or a traceback.
-        log.error("could not apply %s -- unexpected error", BOOT_FILE)
+        log.error("could not apply %s -- unexpected error", target)
         return 0
 
 

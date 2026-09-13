@@ -1,6 +1,6 @@
 # Hardware checks
 
-Seven things the test suite cannot prove. Each is run on real hardware and its
+Eight things the test suite cannot prove. Each is run on real hardware and its
 result recorded here — including failures, which are the useful ones.
 
 Spec: `docs/superpowers/specs/2026-09-12-device-image-design.md`
@@ -14,9 +14,11 @@ Spec: `docs/superpowers/specs/2026-09-12-device-image-design.md`
 | H5 | Image boots | Both boards boot and the panel lights up | not yet run |
 | H6 | CMA on the Zero 2 W | 480×1920 renders without CMA exhaustion | not yet run |
 | H7 | Keyboard under kmsdrm | A USB keyboard drives the settings screen | not yet run |
+| H8 | A panel enrolls itself | Pairing, claim and restart all work end to end against real AWS | not yet run |
 
 H4, H5 and H6 need an image, so they belong to B2. H1, H2, H3 and H7 can be run
-as soon as this plan is installed on a Pi.
+as soon as this plan is installed on a Pi. H8 needs the enrollment path this
+plan builds, plus a Cognito user to claim with.
 
 ## H1 — systemd hardening against kmsdrm
 
@@ -63,7 +65,7 @@ Open Raspberry Pi Imager, choose "Use custom", select the built `.img.xz`.
 
 Pass: the OS customisation dialog is offered, and hostname, user and Wi-Fi
 take effect on first boot. Fail: no dialog — in which case document
-`/boot/firmware/scoreboard-wifi.txt` as the flash-time path in the README and
+`/boot/firmware/scoreboard-setup.txt` as the flash-time path in the README and
 say so plainly on the download page.
 
 ## H5 — image boots
@@ -91,3 +93,33 @@ confirm the service account is in the `input` group (`id scoreboard`) and that
 This is unproven for the existing `a` and `b` keys too: every keyboard path in
 this codebase has only ever run in a desktop window or under SDL's dummy
 driver, never on a panel.
+
+## H8 — A panel enrolls itself
+
+The check this whole plan exists for, and the one no CI can do: the Python and
+Go halves have never spoken over a real network, and §11 of the enrollment spec
+lists exactly this as untestable in CI.
+
+1. Flash a card. Write `scoreboard-setup.txt` on the boot partition with
+   `ssid=`, `psk=` and `owner=` set to the email address of a user who exists
+   in the Cognito pool.
+2. Boot with the panel connected. Within about a minute it should show
+   **Add this panel at scoreboard.davidjdrake.com**, a code in the form
+   `XXXX-XXXX`, and `Waiting for <that address>`.
+3. Leave it for twenty minutes without claiming it. The code must change. The
+   old one must then be refused.
+4. Sign in to the admin site **as a different invited user** and try the code.
+   Expect a refusal that does not reveal whether the code was real.
+5. Sign in as the owner and claim it. Within about thirty seconds the panel
+   should restart itself and come up on the scoreboard.
+6. Check `/var/lib/scoreboard`: `device.json`, `device.pem.crt`,
+   `private.pem.key` (mode 0600) and `AmazonRootCA1.pem` present, and
+   **`enrollment.json` gone**.
+7. Confirm in the AWS console that the thing exists, has one certificate, and
+   that the certificate has the `scoreboard-device` policy attached.
+
+**The one to watch:** step 5 is the first time `Dynamo.ByCodeHash` runs against
+real DynamoDB. It has no test coverage and neither alarm would catch an
+inverted comparison there — a 404 does not trip the 5xx alarm, and the 4xx
+alarm needs twenty in five minutes, which a three-panel fleet will never
+reach. If the claim 404s with everything else correct, suspect that line first.

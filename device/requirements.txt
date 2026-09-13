@@ -3,3 +3,9 @@
 # panel needs, and no pygame wheel on PyPI does. tools/pi-setup.sh arranges it.
 paho-mqtt>=2.1,<3
 pygame>=2.5,<3
+
+# Enrollment generates a P-256 key and a CSR on the device. On the Pi this is
+# the distribution's python3-cryptography, seen through the same
+# --system-site-packages venv as pygame; the floor here is what pip installs on
+# a development machine.
+cryptography>=42

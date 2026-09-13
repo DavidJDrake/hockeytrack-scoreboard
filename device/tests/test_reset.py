@@ -1,4 +1,4 @@
-from scoreboard.reset import factory_reset
+from scoreboard.reset import IDENTITY_FILES, factory_reset
 
 
 class FakeNM:
@@ -11,7 +11,7 @@ class FakeNM:
 
 def test_factory_reset_clears_the_identity_and_forgets_networks(tmp_path):
     for name in ("device.json", "device.pem.crt", "private.pem.key",
-                 "AmazonRootCA1.pem", "state.json"):
+                 "AmazonRootCA1.pem", "state.json", "enrollment.json"):
         (tmp_path / name).write_text("x")
     keep = tmp_path / "something-else.txt"
     keep.write_text("not ours")
@@ -21,8 +21,18 @@ def test_factory_reset_clears_the_identity_and_forgets_networks(tmp_path):
 
     assert not (tmp_path / "private.pem.key").exists()
     assert not (tmp_path / "device.json").exists()
+    assert not (tmp_path / "enrollment.json").exists()
     assert nm.forgotten
     assert keep.exists(), "must not clear files it does not own"
+
+
+def test_the_enrollment_token_is_an_identity_file(tmp_path):
+    # I-1: this file holds the collection token for a certificate this reset
+    # is about to orphan. Left behind, a still-running Enroller's next
+    # successful poll installs a certificate for the private key this same
+    # reset just deleted -- and Config.load then believes the panel is
+    # provisioned forever, with no key that can complete a handshake.
+    assert "enrollment.json" in IDENTITY_FILES
 
 
 def test_factory_reset_is_safe_on_an_already_empty_device(tmp_path):
