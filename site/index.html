@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<meta name="description" content="Add a HockeyTrack scoreboard panel to your account and choose the game it follows.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%8F%92%3C/text%3E%3C/svg%3E">
+<link rel="preload" href="/assets/fonts/plex-sans.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/assets/fonts/barlow-condensed-700.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/assets/site.css">
+<link rel="stylesheet" href="/assets/admin.css">
+<title>Scoreboards · HockeyTrack</title>
+<script type="module" src="/assets/app.js"></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<nav class="nav" aria-label="Site">
+  <div class="wrap">
+    <a class="wordmark" href="/">HOCKEYTRACK</a>
+    <ul>
+      <li><span id="who" class="who" hidden></span></li>
+      <li><button id="sign-out" class="link" type="button" hidden>Sign out</button></li>
+    </ul>
+  </div>
+</nav>
+
+<main class="wrap" id="main">
+  <h1>Scoreboards</h1>
+  <p class="status" id="status" role="status" aria-live="polite"></p>
+  <noscript><p class="status error">This page needs JavaScript to sign you in.</p></noscript>
+
+  <section id="signed-out" hidden>
+    <p class="lede">Sign in to add a scoreboard panel to your account, choose the game it follows, or remove it. Accounts are by invitation.</p>
+    <button id="sign-in" class="btn primary" type="button">Sign in</button>
+  </section>
+
+  <section id="signed-in" hidden>
+    <ul class="panels" id="panels" aria-label="Your panels" hidden></ul>
+
+    <form class="card" id="claim" novalidate>
+      <h2>Claim a panel</h2>
+      <p>Type the code shown on the panel's screen.</p>
+      <div class="row">
+        <label for="claim-code" class="sr-only">Pairing code</label>
+        <input id="claim-code" class="code" type="text" name="code" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="16">
+        <button class="btn primary" type="submit">Claim</button>
+      </div>
+    </form>
+
+    <section class="card" id="add" aria-labelledby="add-heading">
+      <h2 id="add-heading">Set up a new panel</h2>
+      <ol>
+        <li>Prepare an SD card with the scoreboard installed.</li>
+        <li>Download the setup file and save it onto the card's boot partition.</li>
+        <li>Open it there, and type your Wi-Fi name and password.</li>
+        <li>Put the card in the panel and power it on. When it shows a code, claim it above.</li>
+      </ol>
+      <p id="add-note" hidden></p>
+      <button id="download" class="btn" type="button">Download setup file</button>
+    </section>
+  </section>
+</main>
+
+<footer class="site-foot">
+  <div class="wrap">
+    <p>Part of <a href="https://hockeytrack.davidjdrake.com/">HockeyTrack</a>.</p>
+  </div>
+</footer>
+</body>
+</html>
