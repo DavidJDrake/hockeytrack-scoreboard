@@ -136,6 +136,14 @@ class Enroller:
     def step(self) -> Waiting | Problem | Ready:
         try:
             state = self._poll() if self._state.get("token") else self._submit()
+        except identity.UnusableKey as e:
+            # Distinct from every branch below: no network call was made, so
+            # nothing here is the server's fault, and folding this into the
+            # malformed-reply message (I-2) told the person standing at the
+            # panel to blame a service that was working fine.
+            log.error("this panel's key is unusable: %s", e)
+            self._slow_down()
+            return Problem("this panel's key is unusable")
         except OSError as e:
             # Includes every socket and DNS failure urllib raises. Usually
             # this is a message from the operating system itself ("Name or

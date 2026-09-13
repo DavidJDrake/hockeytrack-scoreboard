@@ -223,6 +223,18 @@ def test_a_server_error_is_a_problem_and_never_a_traceback(tmp_path):
     assert isinstance(state, enroll.Problem)
 
 
+def test_an_unusable_key_blames_the_key_not_the_server(tmp_path):
+    # I-2: this used to fall into the malformed-reply handler and tell the
+    # person standing at the panel the enrollment service was broken, having
+    # never made a network call. It must say so plainly instead, and it must
+    # not touch the network to find out.
+    (tmp_path / "private.pem.key").write_bytes(b"not a PEM key")
+    api = FakeAPI()
+    state = enroll.Enroller(tmp_path, transport=api).step()
+    assert state == enroll.Problem("this panel's key is unusable")
+    assert api.sent == []
+
+
 def test_the_backoff_settles_at_thirty_seconds(tmp_path):
     # The person on the other end is signing into a website and hunting for a
     # password. A panel that hammers the endpoint trips its own rate limit.

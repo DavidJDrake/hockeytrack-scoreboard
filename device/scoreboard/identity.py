@@ -26,6 +26,18 @@ CA_NAME = "AmazonRootCA1.pem"
 BUNDLED_CA = ROOT / "certs" / CA_NAME
 
 
+class UnusableKey(Exception):
+    """The key on this card cannot be used -- it will not parse, or it is not
+    the curve the server accepts (tools/provision.sh once wrote RSA here).
+
+    Distinct from every exception step() already knows how to explain, on
+    purpose: this is neither a malformed server reply nor an unreachable
+    server, and telling the person standing at the panel to blame the
+    enrollment service for a problem that lives entirely on this card would
+    be confidently wrong about whose fault it is.
+    """
+
+
 def write_atomic(path: Path, data: bytes, mode: int = 0o644) -> None:
     """Write a file that a power cut cannot leave half-written.
 
@@ -61,17 +73,38 @@ def ensure_keypair(config_dir: Path) -> ec.EllipticCurvePrivateKey:
     time somebody claimed a code the panel had already given up on, and the
     orphan would sit in IoT Core attached to a thing nobody owns.
 
-    P-256 because that is what the server accepts; see csr.go.
+    P-256 because that is what the server accepts; see csr.go. Raises
+    UnusableKey rather than regenerating when the stored key will not parse
+    or is the wrong curve: regenerating over a key that pairs with an
+    already-issued certificate would silently orphan it (I-3), which is
+    exactly the outcome this function's reuse exists to prevent, reached
+    from the other direction.
     """
     config_dir = Path(config_dir)
     config_dir.mkdir(parents=True, exist_ok=True)
     key_path = config_dir / KEY_NAME
     try:
         existing = key_path.read_bytes()
-    except OSError:
+    except FileNotFoundError:
         pass
+    # Any other OSError -- permission denied, I/O error -- surfaces to the
+    # caller instead of falling through to "generate a new one": that
+    # directory being writable while the key file itself is not is the
+    # ordinary shape of a key placed by hand or by an installer under a
+    # different uid, and silently replacing it would destroy the only copy
+    # of a key that may already pair with an issued certificate (I-3).
     else:
-        return serialization.load_pem_private_key(existing, password=None)
+        try:
+            key = serialization.load_pem_private_key(existing, password=None)
+        except ValueError as e:
+            raise UnusableKey(f"the stored key will not parse: {e}") from e
+        if not isinstance(key, ec.EllipticCurvePrivateKey) or not isinstance(key.curve, ec.SECP256R1):
+            # tools/provision.sh used to write an RSA key to this same
+            # filename. A panel provisioned that way that later loses
+            # device.json would otherwise enroll with that legacy key and be
+            # refused by csr.go on every attempt, forever (I-2).
+            raise UnusableKey("the stored key is not a P-256 key")
+        return key
     key = ec.generate_private_key(ec.SECP256R1())
     write_atomic(key_path, key.private_bytes(
         encoding=serialization.Encoding.PEM,
