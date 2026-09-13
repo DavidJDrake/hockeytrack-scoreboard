@@ -76,9 +76,18 @@ function signIn() {
     });
 }
 
+// At most one reauth() per page load. refresh() fires two requests together,
+// and each calls this on its own 401; without the guard, the second call --
+// refused by mayReauth -- would forget the sign-in the first call just
+// started, deleting the PKCE verifier out from under the redirect already
+// under way. Reset only by a fresh page load, never by this module.
+let reauthStarted = false;
+
 // Called when the API says the token is no longer good. Guarded, so an API
 // that rejects even a fresh token cannot send the browser round in a loop.
 function reauth() {
+  if (reauthStarted) return;
+  reauthStarted = true;
   session = null;
   if (!mayReauth(sessionStorage)) {
     forgetSignIn(sessionStorage);
@@ -277,6 +286,15 @@ async function start() {
   $("sign-out").addEventListener("click", () => signOut());
   wireClaim();
 
+  // Capture the URL and strip the callback params before anything that can
+  // fail -- notably the config fetch below -- so a config failure can't
+  // leave ?code= sitting in the address bar, the history, or a referrer.
+  // The code is single-use and about to be spent either way.
+  const href = location.href;
+  const here = new URL(href);
+  const isCallback = here.searchParams.has("code") || here.searchParams.has("error");
+  if (isCallback) history.replaceState(null, "", "/");
+
   try {
     const resp = await fetch("/config.json", { cache: "no-store" });
     if (!resp.ok) throw new Error(`config ${resp.status}`);
@@ -291,19 +309,14 @@ async function start() {
     onUnauthorized: reauth,
   });
 
-  const here = new URL(location.href);
-  if (here.searchParams.has("code") || here.searchParams.has("error")) {
-    const url = location.href;
-    // The code is single-use and about to be spent, but it should not sit in
-    // the address bar, the history, or a referrer either way.
-    history.replaceState(null, "", "/");
+  if (isCallback) {
     if (here.searchParams.has("error")) {
       forgetSignIn(sessionStorage);
       showSignedOut("Sign-in was cancelled.");
       return;
     }
     try {
-      session = await completeSignIn(cfg, { url, storage: sessionStorage });
+      session = await completeSignIn(cfg, { url: href, storage: sessionStorage });
     } catch {
       forgetSignIn(sessionStorage);
       showSignedOut("Sign-in could not be completed. Try again.");
@@ -315,13 +328,32 @@ async function start() {
 
   // A refresh drops the in-memory token by design. A page that was signed in
   // goes back through Cognito, which returns straight away while its own
-  // session cookie is valid. Not guarded by mayReauth: a successful sign-in
-  // lands on ?code, not here, so this path cannot loop.
+  // session cookie is valid. The signed-in flag is cleared before that
+  // redirect: if Cognito's own session has lapsed, it shows a login form
+  // instead of bouncing straight back, and clearing the flag first means
+  // Back from there lands on this site's signed-out page rather than being
+  // sent through Cognito again. completeSignIn sets the flag again on
+  // success. This guarantees a stuck Back button cannot happen; it does not
+  // guard against a true redirect loop the way mayReauth does for
+  // API-triggered reauth, because it doesn't need to -- a successful round
+  // trip lands on ?code, not here, and an unsuccessful one leaves the flag
+  // cleared for next time.
   if (wasSignedIn(sessionStorage)) {
+    forgetSignIn(sessionStorage);
     signIn();
     return;
   }
   showSignedOut();
 }
+
+// Back navigation after sign-out or re-auth can restore this page from the
+// back/forward cache instead of re-running start(): the DOM as it looked
+// signed in, complete with the previous user's email and panel names, with
+// no token behind it. Reload rather than trying to patch the DOM up, since a
+// full reload is the only way back to a state this module actually reasons
+// about.
+window.addEventListener("pageshow", (event) => {
+  if (event.persisted) location.reload();
+});
 
 start();
