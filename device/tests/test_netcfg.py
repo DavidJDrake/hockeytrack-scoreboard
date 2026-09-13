@@ -1,9 +1,13 @@
 import subprocess
 import traceback
+from pathlib import Path
 
 import pytest
 from scoreboard import netcfg
 from scoreboard.netcfg import WifiSettings, parse_wifi_file, consume
+
+SITE_SETUP_FIXTURE = (Path(__file__).resolve().parents[2]
+                      / "site" / "tests" / "fixtures" / "scoreboard-setup.txt")
 
 
 def test_plain_file():
@@ -382,3 +386,14 @@ def test_connecting_gets_a_longer_timeout_than_a_query():
     assert seen["device"] == netcfg.CONNECT_TIMEOUT_S
     assert seen["-t"] is None  # scan leaves the runner's own default in place
     assert netcfg.CONNECT_TIMEOUT_S > netcfg.QUERY_TIMEOUT_S
+
+
+def test_the_setup_file_the_website_writes_is_read_the_way_it_meant():
+    # One fixture, asserted from both sides: site/tests/setupfile.test.js
+    # checks the website produces exactly this text, and this checks the panel
+    # reads it as the website intended. Neither side can drift alone.
+    text = SITE_SETUP_FIXTURE.read_text(encoding="utf-8")
+    assert netcfg.parse_owner(text) == "friend@example.com"
+    # Downloaded and never edited, it must leave the network alone rather than
+    # fail -- ssid= with nothing after it is "nothing to do".
+    assert netcfg.parse_wifi_file(text) is None

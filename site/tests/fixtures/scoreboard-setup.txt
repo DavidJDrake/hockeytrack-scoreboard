@@ -1,0 +1,14 @@
+# HockeyTrack scoreboard setup
+#
+# Save this file onto your panel's SD card, in the partition your computer
+# can open, named exactly: scoreboard-setup.txt
+#
+# Type your Wi-Fi network name and password after the = signs below. The
+# panel reads them when it starts, connects, and then removes the password
+# from this file.
+ssid=
+psk=
+
+# This line ties the panel to your account, so the code it shows can be
+# claimed by you and nobody else. Leave it exactly as it is.
+owner=friend@example.com
