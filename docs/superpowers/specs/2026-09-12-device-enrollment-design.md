@@ -362,7 +362,7 @@ sign-up, and all four stay out — device health particularly, since "last seen"
 is the feature that quietly turns a subscribe-only device into one that phones
 home.
 
-**It looks like HockeyTrack**, per §5.1 of that spec: the same typography, dark
+**It looks like HockeyTrack**, per §5.1 of that spec: the same typography,
 palette and static-files-on-CloudFront shape. It is the same project and should
 read as one.
 

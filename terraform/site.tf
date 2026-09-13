@@ -6,10 +6,7 @@
 # because two sites in one account that differ arbitrarily are two sites to
 # reason about instead of one.
 #
-# Nothing is built on it yet. It exists now so the name resolves, the
-# certificate path is proven, and there is somewhere for the image download
-# page to live when the image build lands. A holding page ships with it: a
-# domain that resolves to a 404 is worse than one that resolves to "not yet".
+# The admin page lives in site/ and is deployed by `make site`.
 
 variable "site_domain" {
   type        = string
@@ -104,11 +101,33 @@ data "aws_cloudfront_cache_policy" "optimized" {
 
 # Security headers on every response.
 #
-# The CSP is deliberately wider than hockeytrack's, and only where it has to
-# be: this site signs users in against Cognito and calls the admin API, so
-# connect-src has to name both. Everything else stays self-only. Both hosts are
-# interpolated from the resources themselves rather than typed in, so the
-# policy cannot drift away from the API it is describing.
+# The CSP is wider than hockeytrack's only where it has to be. This site signs
+# users in and calls the admin API, so connect-src names exactly two hosts: the
+# API, and the Cognito hosted-UI domain the PKCE token exchange posts to. An
+# earlier version named cognito-idp.<region>.amazonaws.com instead -- the
+# user-pool API, which this site never calls -- and so blocked the one request
+# that turns an authorization code into a token. Both hosts are interpolated
+# from the resources themselves rather than typed in, so the policy cannot
+# drift away from what it describes.
+#
+# require-trusted-types-for 'script' makes assigning a string to an HTML sink
+# such as innerHTML throw, in browsers that implement Trusted Types; the site
+# never does that, and this turns "never does" into "cannot" where Trusted
+# Types is supported. site/tests/view.test.js's sink scan is a tripwire
+# against an honest mistake in every browser, not a wall against a
+# deliberate one anywhere -- its regex does not see every sink Trusted Types
+# does (a computed property access, DOMParser, createContextualFragment,
+# srcdoc, setHTMLUnsafe). trusted-types 'none' closes the gap between those
+# two: the site registers no Trusted Types policy of its own, so this stops
+# any script from registering a permissive `default` policy that would hand
+# the sinks above back their old, unchecked behavior.
+#
+# style-src is 'self' only, with no 'unsafe-inline': the admin page has no
+# inline styles or style attributes. 'unsafe-inline' was needed only by the
+# holding page's own <style> block, which the first `make site` replaces --
+# for the few minutes between `terraform apply` and that deploy, the holding
+# page renders unstyled under this policy, and that gap is accepted rather
+# than widening the policy the real page runs under indefinitely.
 resource "aws_cloudfront_response_headers_policy" "site" {
   name = "scoreboard-site-security"
 
@@ -131,10 +150,11 @@ resource "aws_cloudfront_response_headers_policy" "site" {
     }
     content_security_policy {
       content_security_policy = join("", [
-        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; ",
+        "default-src 'self'; script-src 'self'; style-src 'self'; ",
         "img-src 'self' data:; font-src 'self'; ",
-        "connect-src 'self' ${aws_apigatewayv2_api.admin.api_endpoint} https://cognito-idp.${var.region}.amazonaws.com; ",
-        "base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'",
+        "connect-src 'self' ${aws_apigatewayv2_api.admin.api_endpoint} https://${aws_cognito_user_pool_domain.admin.domain}.auth.${var.region}.amazoncognito.com; ",
+        "base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; ",
+        "require-trusted-types-for 'script'; trusted-types 'none'",
       ])
       override = true
     }
@@ -225,38 +245,17 @@ resource "aws_route53_record" "site_aaaa" {
   }
 }
 
-# A holding page, managed here rather than uploaded by hand so the name never
-# resolves to a 404 and so this file is the whole story of the domain.
-resource "aws_s3_object" "holding_page" {
-  bucket        = aws_s3_bucket.site.id
-  key           = "index.html"
-  content_type  = "text/html; charset=utf-8"
-  cache_control = "public, max-age=300"
-  content       = <<-HTML
-    <!doctype html>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>HockeyTrack Scoreboard</title>
-    <style>
-      :root { color-scheme: dark }
-      body { margin: 0; min-height: 100vh; display: grid; place-items: center;
-             background: #0a0a0c; color: #fafafa;
-             font: 16px/1.6 system-ui, sans-serif }
-      main { max-width: 34rem; padding: 2rem }
-      h1 { font-size: 1.6rem; margin: 0 0 1rem }
-      p { color: #969eA8; margin: 0 0 1rem }
-      a { color: #fafafa }
-    </style>
-    <main>
-      <h1>HockeyTrack Scoreboard</h1>
-      <p>A physical NHL scoreboard: a Raspberry Pi driving a bar display that
-         follows one live game, pushed from HockeyTrack's event bus through
-         AWS IoT Core within about a second of the play.</p>
-      <p>This is where the device image and the panel admin will live. Neither
-         is ready yet.</p>
-      <p><a href="https://github.com/DavidJDrake/hockeytrack-scoreboard">The code, in the meantime</a>.</p>
-    </main>
-  HTML
+# index.html belonged to Terraform while the site was a holding page. It now
+# belongs to `make site`, which uploads the real one. `removed` with
+# destroy = false makes Terraform forget the object without deleting it, so the
+# holding page stays live until the first `make site` replaces it -- rather
+# than the domain serving a 404 between an apply and a deploy.
+removed {
+  from = aws_s3_object.holding_page
+
+  lifecycle {
+    destroy = false
+  }
 }
 
 output "site_url" {
@@ -269,4 +268,9 @@ output "site_bucket" {
 
 output "site_distribution_id" {
   value = aws_cloudfront_distribution.site.id
+}
+
+output "cognito_domain" {
+  value       = "${aws_cognito_user_pool_domain.admin.domain}.auth.${var.region}.amazoncognito.com"
+  description = "Hosted-UI host the site signs in through. make site writes it into site/config.json."
 }

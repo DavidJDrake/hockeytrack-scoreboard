@@ -1,0 +1,6 @@
+{
+  "name": "scoreboard-site",
+  "private": true,
+  "type": "module",
+  "description": "No dependencies, deliberately: plain ES modules, tested with Node's built-in runner."
+}
