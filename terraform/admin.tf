@@ -271,9 +271,21 @@ resource "aws_apigatewayv2_stage" "default" {
   # route is a deliberate, accepted cost -- per-route CloudWatch metrics are
   # billed as custom metrics -- against an alarm that would otherwise be
   # trustworthy for nothing.
+  #
+  # The throttle values repeat the stage default (20 rps / 40 burst) rather
+  # than leaving them out to "inherit" it. A route_settings block with no
+  # throttle fields is not guaranteed to mean "use default_route_settings" --
+  # there is no version-controlled acceptance test for what API Gateway does
+  # with an omitted RouteSettings throttle, and the risk if it means an
+  # explicit 0 is throttling the one route that mints certificates and grants
+  # ownership to nothing. Stating the intent costs two lines; an untested
+  # assumption about inheritance does not belong on this route. Do not remove
+  # these as "redundant" with default_route_settings.
   route_settings {
     route_key                = "POST /api/devices/claim"
     detailed_metrics_enabled = true
+    throttling_rate_limit    = 20
+    throttling_burst_limit   = 40
   }
 
   access_log_settings {
