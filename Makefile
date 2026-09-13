@@ -17,9 +17,9 @@ GO          := go
 PY          := .venv/bin/python
 PYTEST      := .venv/bin/pytest
 
-.PHONY: test test-go test-py vuln vuln-go vuln-py build deploy provision fmt
+.PHONY: test test-go test-py test-js vuln vuln-go vuln-py build deploy provision fmt
 
-test: vuln test-go test-py
+test: vuln test-go test-py test-js
 
 # Fails on any known vulnerability. govulncheck checks reachability, not just
 # version numbers, so it only fires on something this code can actually
@@ -48,6 +48,13 @@ test-py:
 	cd device && SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy ../$(PYTEST) -q; \
 	status=$$?; \
 	if [ $$status -ne 0 ] && [ $$status -ne 5 ]; then exit $$status; fi
+
+# The site has no dependencies and no build step, so its test runner is Node's
+# own: nothing to install and nothing to audit. Node is found on PATH; under
+# nvm that means running make from a shell that has loaded it.
+test-js:
+	@command -v node >/dev/null || { echo "node not found on PATH; the site's tests need Node 22 or later"; exit 1; }
+	cd site && node --test tests/*.test.js
 
 fmt:
 	cd cloud && gofmt -l . && test -z "$$(gofmt -l .)"
