@@ -62,7 +62,7 @@ install() {
   sudo apt-get update
   # The distribution's pygame, because its SDL has kmsdrm; gpiozero for the
   # optional buttons (the code no-ops without it).
-  sudo apt-get install -y python3-pygame python3-gpiozero python3-venv python3-cryptography
+  sudo apt-get install -y python3-pygame python3-gpiozero python3-venv python3-cryptography ca-certificates
 
   echo "==> virtualenv"
   python3 -m venv --system-site-packages "$DEVICE/.venv"
@@ -99,7 +99,7 @@ install_appliance() {
   preflight
   echo "==> apt packages"
   apt-get update
-  apt-get install -y python3-pygame python3-gpiozero python3-venv network-manager polkitd python3-cryptography
+  apt-get install -y python3-pygame python3-gpiozero python3-venv network-manager polkitd python3-cryptography ca-certificates
 
   echo "==> service account"
   getent passwd "$SERVICE_USER" >/dev/null || \

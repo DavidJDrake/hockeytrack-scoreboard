@@ -167,6 +167,15 @@ def test_the_installer_installs_the_crypto_package():
         "both the checkout and the appliance apt lines need python3-cryptography"
 
 
+def test_the_installer_installs_a_trust_store(checkout):
+    text = (checkout / "tools" / "pi-setup.sh").read_text()
+    # ssl.create_default_context() needs a system trust store to verify the
+    # enrollment endpoint's certificate against (M-6). Present by default on
+    # Raspberry Pi OS, but the installer should not silently depend on that.
+    assert text.count("ca-certificates") == 2, \
+        "both the checkout and the appliance apt lines need ca-certificates"
+
+
 def test_the_root_ca_travels_with_the_code():
     ca = REPO / "device" / "certs" / "AmazonRootCA1.pem"
     assert ca.exists(), "an enrolling appliance has no provisioning step to download this"
