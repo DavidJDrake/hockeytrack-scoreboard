@@ -14,6 +14,11 @@ let cfg = null;
 let api = null;
 // The one place a token lives: this variable, for the life of the tab.
 let session = null;
+// One action at a time. Two game changes fired in quick succession would
+// otherwise race, and the panel would end on whichever the server committed
+// last rather than the user's final choice. The re-render that ends every
+// action puts each control back to what the server holds.
+let busy = false;
 
 function el(tag, props = {}, ...children) {
   const node = document.createElement(tag);
@@ -30,6 +35,31 @@ function el(tag, props = {}, ...children) {
 
 const kindOf = (err) => (err instanceof ApiError ? err.kind : "failed");
 
+// A 401 belongs to reauth(), which has already either started a redirect or
+// said the session could not be renewed. Reporting it again here would
+// overwrite that message with one promising a redirect that may not happen.
+function reportFailure(action, err) {
+  const kind = kindOf(err);
+  if (kind === "unauthorized") return;
+  setStatus(messageFor(action, kind), { error: true });
+}
+
+function setBusy(value) {
+  busy = value;
+  $("signed-in").setAttribute("aria-busy", String(value));
+}
+
+// Every action ends by re-rendering the panel list, which destroys the control
+// that had focus. Return focus to its replacement, or -- when the panel is
+// gone, as after Remove -- to the status line, so a keyboard or screen-reader
+// user is not dropped back to the top of the page. Matched by comparing the
+// key rather than building a selector, because the key contains a thing name.
+function restoreFocus(key) {
+  if (!key) return;
+  const replacement = [...document.querySelectorAll("[data-focus-key]")].find((node) => node.dataset.focusKey === key);
+  (replacement ?? $("status")).focus();
+}
+
 function setStatus(text, { error = false } = {}) {
   const status = $("status");
   status.textContent = text;
@@ -37,7 +67,13 @@ function setStatus(text, { error = false } = {}) {
 }
 
 function signIn() {
-  beginSignIn(cfg, { origin: location.origin, storage: sessionStorage, navigate: (url) => location.assign(url) });
+  beginSignIn(cfg, { origin: location.origin, storage: sessionStorage, navigate: (url) => location.assign(url) })
+    .catch(() => {
+      // Most plausibly no Web Crypto, which browsers withhold outside a secure
+      // context. Without this the page is left blank with nothing to say why.
+      forgetSignIn(sessionStorage);
+      showSignedOut("Sign-in could not be started in this browser.");
+    });
 }
 
 // Called when the API says the token is no longer good. Guarded, so an API
@@ -87,25 +123,33 @@ async function refresh() {
     api.listGames().then((doc) => (Array.isArray(doc?.games) ? doc.games : [])).catch((err) => ({ err })),
   ]);
   if (devices.err) {
-    setStatus(messageFor("list", kindOf(devices.err)), { error: true });
+    reportFailure("list", devices.err);
     return false;
   }
   const gamesFailed = Boolean(games.err);
   renderPanels(devices, gamesFailed ? [] : games, gamesFailed);
-  if (gamesFailed) setStatus(messageFor("games", kindOf(games.err)), { error: true });
+  if (gamesFailed) reportFailure("games", games.err);
   else setStatus(devices.length ? "" : "No panels on your account yet.");
   return true;
 }
 
 async function act(action, run, success) {
+  if (busy) return;
+  const focusKey = document.activeElement?.dataset?.focusKey ?? null;
+  setBusy(true);
   setStatus("Working…");
   try {
-    await run();
-  } catch (err) {
-    setStatus(messageFor(action, kindOf(err)), { error: true });
-    return;
+    try {
+      await run();
+    } catch (err) {
+      reportFailure(action, err);
+      return;
+    }
+    if (await refresh()) setStatus(success);
+  } finally {
+    setBusy(false);
+    restoreFocus(focusKey);
   }
-  if (await refresh()) setStatus(success);
 }
 
 function renderPanels(devices, games, gamesFailed) {
@@ -118,32 +162,48 @@ function panelItem(device, games, gamesFailed) {
   const title = panelTitle(device);
   const selectId = `game-${device.thingName}`;
 
+  const choices = gameChoices(device, games);
+  const rendered = choices.find((choice) => choice.selected)?.value ?? "";
   const select = el("select", { id: selectId, disabled: gamesFailed },
-    ...gameChoices(device, games).map((choice) =>
+    ...choices.map((choice) =>
       el("option", { value: choice.value, selected: choice.selected, disabled: choice.disabled }, choice.label)));
-  select.addEventListener("change", () =>
+  select.dataset.focusKey = `${device.thingName}:game`;
+  select.addEventListener("change", () => {
+    // Ignored while another action runs; put the control back so it never
+    // shows a choice that was not sent.
+    if (busy) {
+      select.value = rendered;
+      return;
+    }
     act("setGame", () => api.setGame(device.thingName, Number(select.value)),
-      "Game set. The panel switches within a few seconds."));
+      "Game set. The panel switches within a few seconds.");
+  });
 
   const nameInput = el("input", { type: "text", value: device.name ?? "", maxLength: 40, "aria-label": `Name for ${title}` });
+  nameInput.dataset.focusKey = `${device.thingName}:name`;
+  const renameButton = el("button", { class: "btn", type: "submit", "aria-label": `Rename ${title}` }, "Rename");
+  renameButton.dataset.focusKey = `${device.thingName}:rename`;
   const renameForm = el("form", {
     class: "row",
     onsubmit: (event) => {
       event.preventDefault();
       act("rename", () => api.rename(device.thingName, nameInput.value), "Renamed.");
     },
-  }, nameInput, el("button", { class: "btn", type: "submit" }, "Rename"));
+  }, nameInput, renameButton);
 
   const remove = el("button", {
     class: "btn quiet",
     type: "button",
+    "aria-label": `Remove ${title}`,
     onclick: () => {
+      if (busy) return;
       // Honest about what removal does not do: the panel keeps its certificate
       // until it is factory reset (SCO-24 is where revocation on unbind lives).
       if (!confirm(`Remove ${title} from your account? It keeps showing its current game until it is factory reset.`)) return;
       act("unbind", () => api.unbind(device.thingName), "Removed.");
     },
   }, "Remove");
+  remove.dataset.focusKey = `${device.thingName}:remove`;
 
   return el("li", { class: "panel" },
     el("h2", {}, title),
@@ -188,21 +248,27 @@ function download(text) {
 function wireClaim() {
   $("claim").addEventListener("submit", async (event) => {
     event.preventDefault();
+    if (busy) return;
     const input = $("claim-code");
     const code = input.value.trim();
     if (!code) {
       setStatus(messageFor("claim", "bad-request"), { error: true });
       return;
     }
+    setBusy(true);
     setStatus("Claiming…");
     try {
-      await api.claim(code);
-    } catch (err) {
-      setStatus(messageFor("claim", kindOf(err)), { error: true });
-      return;
+      try {
+        await api.claim(code);
+      } catch (err) {
+        reportFailure("claim", err);
+        return;
+      }
+      input.value = "";
+      if (await refresh()) setStatus("Panel added. It restarts into the scoreboard in about thirty seconds.");
+    } finally {
+      setBusy(false);
     }
-    input.value = "";
-    if (await refresh()) setStatus("Panel added. It restarts into the scoreboard in about thirty seconds.");
   });
 }
 
