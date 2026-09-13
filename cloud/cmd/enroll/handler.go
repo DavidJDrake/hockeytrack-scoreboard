@@ -182,6 +182,13 @@ func (h *Handler) collect(ctx context.Context, req events.APIGatewayV2HTTPReques
 	if !found {
 		return fail(http.StatusNotFound, "no such enrollment")
 	}
+	// The 24-hour bound is enforced here, not left to DynamoDB's TTL: AWS
+	// documents TTL deletion as happening "within a few days", and GetItem
+	// returns an expired-but-undeleted item in full. Without this check an
+	// enrollment stays collectable long past the day the spec promises.
+	if time.Now().Unix() >= p.ExpiresAt {
+		return fail(http.StatusNotFound, "no such enrollment")
+	}
 	if p.Status != enroll.StatusReady {
 		// The poll is what rotates the code: the panel updates its own display
 		// without needing a second endpoint, and a code photographed off a
@@ -247,13 +254,26 @@ func ownerMatches(p enroll.Pending, req events.APIGatewayV2HTTPRequest) bool {
 		return false
 	}
 	claims := req.RequestContext.Authorizer.JWT.Claims
-	// sub is a UUID nobody could have typed into a file, so the comparison is
-	// against what a person would actually write.
-	for _, claim := range []string{claims["email"], claims["cognito:username"]} {
-		if claim == "" {
-			continue
-		}
-		if enroll.HashSecret(enroll.NormalizeOwner(claim)) == p.OwnerHintHash {
+	// cognito:username is a UUID nobody could have typed into a file, so the
+	// comparison is against what a person would actually write.
+	if u := claims["cognito:username"]; u != "" && enroll.HashSecret(enroll.NormalizeOwner(u)) == p.OwnerHintHash {
+		return true
+	}
+	// email is mutable by the signed-in user themselves (Cognito's
+	// UpdateUserAttributes), so an unverified email claim proves nothing: an
+	// invited user who has seen a pre-bound code could set their own email to
+	// the owner's address and satisfy this check. Requiring email_verified
+	// closes that, because Cognito only sets it once the address has been
+	// confirmed through its own verification flow, not by the user's say-so.
+	//
+	// The exact string API Gateway's JWT authorizer flattens the boolean
+	// email_verified claim into cannot be confirmed without a real token;
+	// this assumes "true" and needs confirming at hardware-test time. That is
+	// why write_attributes on aws_cognito_user_pool_client.site (admin.tf) is
+	// the structural half of this fix and not optional: it holds even if this
+	// string assumption turns out to be wrong.
+	if e := claims["email"]; e != "" && claims["email_verified"] == "true" {
+		if enroll.HashSecret(enroll.NormalizeOwner(e)) == p.OwnerHintHash {
 			return true
 		}
 	}
@@ -281,6 +301,15 @@ func (h *Handler) claim(ctx context.Context, req events.APIGatewayV2HTTPRequest)
 		return fail(http.StatusInternalServerError, "claim failed")
 	}
 	if !found {
+		return fail(http.StatusNotFound, "no enrollment with that code")
+	}
+	// Both bounds are enforced here, not left to DynamoDB's TTL: AWS
+	// documents TTL deletion as happening "within a few days", and GetItem
+	// returns an expired-but-undeleted item in full. Identical 404 to an
+	// unknown code -- a code photographed off a screen must stop working
+	// the moment it rotates or the enrollment ages out, not days later.
+	now := time.Now().Unix()
+	if now >= p.CodeExpiresAt || now >= p.ExpiresAt {
 		return fail(http.StatusNotFound, "no enrollment with that code")
 	}
 	// 404, not 403: somebody who read the code off a screen learns nothing

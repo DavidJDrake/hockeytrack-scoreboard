@@ -95,14 +95,38 @@ data "aws_iam_policy_document" "enroll" {
     ]
   }
 
-  # THE constraint. Unpinned, a bug in device onboarding becomes fleet-wide
-  # compromise: mint a certificate, attach an over-permissive policy, and the
-  # result is a credential nobody intended to exist. Pinned to one policy, the
-  # worst an enrollment bug produces is another ordinary scoreboard.
+  # iot:AttachPolicy and iot:DetachPolicy are authorized against their
+  # *target* -- a certificate or a thing group -- not against the policy
+  # being attached. There is no resource type, and no condition key, that
+  # lets a grant say "only this policy may be attached"; naming the policy
+  # ARN in resources is simply the wrong resource type for this action and
+  # authorizes nothing at all. So this cannot be pinned the way an earlier
+  # version of this comment claimed, and what actually keeps this role from
+  # attaching an over-permissive policy is three things, none of them IAM:
+  #   - the policy name is fixed at construction (NewIoTIssuer, issuer.go)
+  #     from an environment variable, so no request to this function can
+  #     choose which policy gets attached;
+  #   - this role holds none of iot:CreatePolicy, iot:CreatePolicyVersion or
+  #     iot:SetDefaultPolicyVersion, so it cannot author a new, more
+  #     permissive policy to attach in the first place;
+  #   - scoreboard-device (iot.tf) is currently the only aws_iot_policy in
+  #     this account, so "any policy that exists" and "the device policy"
+  #     are the same set.
+  # The contingency that follows: if a second, broader IoT policy is ever
+  # created in this account, this role could attach it to any certificate,
+  # and nothing here would stop that. That is the thing to watch -- a new
+  # aws_iot_policy resource appearing anywhere in this account -- not a
+  # resource constraint that cannot be written. Restricting resources to
+  # certificate ARNs (below), rather than "*", still buys something real:
+  # it excludes thing groups, so a compromised enrollment can attach a
+  # policy to one certificate at a time rather than to a whole group of
+  # them at once.
   statement {
-    sid       = "AttachOnlyTheDevicePolicy"
-    actions   = ["iot:AttachPolicy", "iot:DetachPolicy"]
-    resources = [aws_iot_policy.device.arn]
+    sid     = "AttachTheDevicePolicyToCertificatesOnly"
+    actions = ["iot:AttachPolicy", "iot:DetachPolicy"]
+    resources = [
+      "arn:aws:iot:${var.region}:${data.aws_caller_identity.current.account_id}:cert/*",
+    ]
   }
 }
 
@@ -248,6 +272,39 @@ resource "aws_cloudwatch_metric_alarm" "enroll_claim_failures" {
     The likely innocent cause is somebody mistyping their pairing code; the
     one worth acting on is somebody working through the eight-character code
     space. Check the access log group for the source address.
+  EOT
+  alarm_actions      = [data.aws_sns_topic.security_alerts.arn]
+  treat_missing_data = "notBreaching"
+}
+
+# The handler returns 500 as a *successful* Lambda response (respond() always
+# returns a nil error), so a total failure of the claim route moves neither
+# the Lambda Errors metric nor enroll_claim_failures above, which only counts
+# 4xx. Without this alarm, every claim in the fleet could return 500 -- for
+# example if the IAM policy above stops authorizing iot:AttachPolicy -- and
+# nothing would page. Same dimensions as enroll_claim_failures so it reads
+# the same per-route metric API Gateway publishes for this one route.
+resource "aws_cloudwatch_metric_alarm" "enroll_claim_errors" {
+  alarm_name          = "scoreboard-enroll-claim-errors"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 1
+  threshold           = 0
+  period              = 300
+  statistic           = "Sum"
+  namespace           = "AWS/ApiGateway"
+  metric_name         = "5xx"
+  dimensions = {
+    ApiId    = aws_apigatewayv2_api.admin.id
+    Stage    = aws_apigatewayv2_stage.default.name
+    Method   = "POST"
+    Resource = "/api/devices/claim"
+  }
+  alarm_description  = <<-EOT
+    Any 5xx response from POST /api/devices/claim in five minutes. A claim
+    500 means the mint path is broken -- the Store, the IoT issuer, or the
+    IAM role underneath it -- and no panel can complete enrollment while it
+    stays broken. This should essentially never fire; a single occurrence is
+    worth paging on.
   EOT
   alarm_actions      = [data.aws_sns_topic.security_alerts.arn]
   treat_missing_data = "notBreaching"

@@ -34,10 +34,17 @@ type IoTAPI interface {
 // IoTIssuer mints device identities in AWS IoT.
 //
 // The policy name is fixed at construction rather than passed per call, so no
-// caller can choose which policy a new certificate receives. The IAM role this
-// runs under must also pin iot:AttachPolicy to that one policy ARN; without
-// that second constraint, a bug in device onboarding here becomes compromise
-// of the whole fleet.
+// caller can choose which policy a new certificate receives. That is load
+// bearing, because iot:AttachPolicy cannot be pinned to a policy ARN in IAM
+// at all -- it is authorized against its target (a certificate or thing
+// group), not against the policy being attached, so there is no resource
+// constraint that says "only this policy." What keeps this from becoming
+// fleet-wide compromise is that this field is the only thing choosing the
+// policy, that the enroll role holds no policy-authoring actions (see
+// terraform/enroll.tf), and that scoreboard-device is currently the only IoT
+// policy in the account. A second, broader IoT policy appearing in the
+// account would be attachable by this role, and that is the thing to watch
+// for.
 type IoTIssuer struct {
 	api        IoTAPI
 	policyName string

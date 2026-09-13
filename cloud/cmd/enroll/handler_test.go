@@ -83,15 +83,21 @@ func submitFor(t *testing.T, h *Handler, owner string) (code, token string) {
 	return out.Code, out.Token
 }
 
-func claim(h *Handler, code, sub string) events.APIGatewayV2HTTPResponse {
+// claimAs lets a test supply exactly the claims a token would carry, for
+// cases that need to control email_verified rather than get it for free.
+func claimAs(h *Handler, code string, claims map[string]string) events.APIGatewayV2HTTPResponse {
 	req := post("/api/devices/claim", `{"code":"`+code+`"}`)
 	req.RequestContext.Authorizer = &events.APIGatewayV2HTTPRequestContextAuthorizerDescription{
-		JWT: &events.APIGatewayV2HTTPRequestContextAuthorizerJWTDescription{
-			Claims: map[string]string{"sub": sub, "email": sub + "@example.com"},
-		},
+		JWT: &events.APIGatewayV2HTTPRequestContextAuthorizerJWTDescription{Claims: claims},
 	}
 	resp, _ := h.Handle(context.Background(), req)
 	return resp
+}
+
+func claim(h *Handler, code, sub string) events.APIGatewayV2HTTPResponse {
+	return claimAs(h, code, map[string]string{
+		"sub": sub, "email": sub + "@example.com", "email_verified": "true",
+	})
 }
 
 func collect(h *Handler, token string) events.APIGatewayV2HTTPResponse {
@@ -319,6 +325,149 @@ func TestCodesAreAcceptedAsPeopleTypeThem(t *testing.T) {
 	typed := strings.ToLower(code[:4] + "-" + code[4:])
 	if got := claim(h, typed, "owner-1").StatusCode; got != 200 {
 		t.Errorf("claim with %q returned %d", typed, got)
+	}
+}
+
+// TestClaimingAnExpiredCodeIs404 is spec section 11's "claiming an expired
+// row": the fifteen-minute code bound must be enforced at claim time, not
+// left to DynamoDB's TTL, which AWS documents as deleting expired items
+// "within a few days" and which returns an expired-but-undeleted item in
+// full from GetItem.
+func TestClaimingAnExpiredCodeIs404(t *testing.T) {
+	h, issuer := newHandler()
+	h.CodeTTL = -1 * time.Minute // expired the instant it was minted
+	code, _ := submit(t, h)
+	if got := claim(h, code, "owner-1").StatusCode; got != 404 {
+		t.Errorf("claim with an expired code returned %d, want 404", got)
+	}
+	if len(issuer.Calls) != 0 {
+		t.Fatal("an expired code minted a certificate")
+	}
+}
+
+// TestCollectingAnExpiredEnrollmentIs404 is spec section 11's other half: the
+// 24-hour enrollment bound, enforced the same way and for the same reason.
+func TestCollectingAnExpiredEnrollmentIs404(t *testing.T) {
+	h, _ := newHandler()
+	h.TTL = -1 * time.Minute
+	_, token := submit(t, h)
+	if got := collect(h, token).StatusCode; got != 404 {
+		t.Errorf("collect of an expired enrollment returned %d, want 404", got)
+	}
+}
+
+// TestAnUnverifiedEmailCannotSatisfyTheOwnerHint is the attack the review
+// found: email is the only claim ownerMatches can ever be satisfied by (sub
+// is a UUID nobody could type into a setup file), and email is writable by
+// the signed-in caller themselves unless something stops it. Without the
+// email_verified check, an invited user who read a pre-bound code off a
+// screen could set their own email to the owner's address and claim it.
+func TestAnUnverifiedEmailCannotSatisfyTheOwnerHint(t *testing.T) {
+	h, issuer := newHandler()
+	code, _ := submitFor(t, h, "owner-1@example.com")
+
+	for name, claims := range map[string]map[string]string{
+		"email_verified false":  {"sub": "owner-2", "email": "owner-1@example.com", "email_verified": "false"},
+		"email_verified absent": {"sub": "owner-3", "email": "owner-1@example.com"},
+	} {
+		if got := claimAs(h, code, claims).StatusCode; got != 404 {
+			t.Errorf("%s: claim returned %d, want 404", name, got)
+		}
+	}
+	if len(issuer.Calls) != 0 {
+		t.Fatal("an unverified email claim minted a certificate")
+	}
+	// The one-time guard was not consumed by the failed attempts: the real,
+	// verified owner still succeeds.
+	if got := claim(h, code, "owner-1").StatusCode; got != 200 {
+		t.Errorf("the verified owner's claim returned %d, want 200", got)
+	}
+}
+
+// TestPollingBeforeExpiryDoesNotRotate is rotation coverage's first row: a
+// poll that lands before the code expires must not hand back a new one, and
+// the original code must still work.
+func TestPollingBeforeExpiryDoesNotRotate(t *testing.T) {
+	h, _ := newHandler()
+	code, token := submit(t, h)
+	resp := collect(h, token)
+	if resp.StatusCode != 202 {
+		t.Fatalf("collect returned %d", resp.StatusCode)
+	}
+	var out map[string]any
+	if err := json.Unmarshal([]byte(resp.Body), &out); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := out["code"]; present {
+		t.Errorf("collect rotated a code that had not expired: %+v", out)
+	}
+	if got := claim(h, code, "owner-1").StatusCode; got != 200 {
+		t.Errorf("the un-rotated code failed to claim: %d", got)
+	}
+}
+
+// TestPollingAfterExpiryRotatesAndRetiresTheOldCode closes the rest of
+// rotation coverage's blind spot: a poll after expiry must hand back a
+// different code, the old code must never claim again -- not even via the
+// reservation it left behind (see Dynamo.ByCodeHash) -- and the new code must
+// work. The mutations the review ran against this branch (deleting the
+// rotation branch, inverting its condition, zeroing both TTLs) all left the
+// suite green before this test existed.
+func TestPollingAfterExpiryRotatesAndRetiresTheOldCode(t *testing.T) {
+	h, issuer := newHandler()
+	h.CodeTTL = -1 * time.Minute // expired before the first poll
+	oldCode, token := submit(t, h)
+	h.CodeTTL = 15 * time.Minute // restore, so the rotated code is not itself expired
+
+	resp := collect(h, token)
+	if resp.StatusCode != 202 {
+		t.Fatalf("collect returned %d: %s", resp.StatusCode, resp.Body)
+	}
+	var out struct {
+		Code          string `json:"code"`
+		CodeExpiresAt int64  `json:"codeExpiresAt"`
+	}
+	if err := json.Unmarshal([]byte(resp.Body), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Code == "" {
+		t.Fatal("a poll after expiry did not rotate the code")
+	}
+	if out.Code == oldCode {
+		t.Fatal("rotation returned the same code")
+	}
+	if want := time.Now().Add(h.CodeTTL).Unix(); out.CodeExpiresAt < want-1 || out.CodeExpiresAt > want+1 {
+		t.Errorf("codeExpiresAt = %d, want within a second of %d", out.CodeExpiresAt, want)
+	}
+
+	if got := claim(h, oldCode, "owner-1").StatusCode; got != 404 {
+		t.Errorf("claiming the rotated-away code returned %d, want 404", got)
+	}
+	if len(issuer.Calls) != 0 {
+		t.Fatal("a rotated-away code minted a certificate")
+	}
+	if got := claim(h, out.Code, "owner-1").StatusCode; got != 200 {
+		t.Errorf("claiming the fresh code returned %d, want 200", got)
+	}
+}
+
+// TestRotationDoesNotChangeTheCollectionToken: rotation is entirely a code
+// concern. The device authenticates its poll with the collection token, so if
+// rotation ever touched it, a panel would lose the ability to collect its own
+// certificate.
+func TestRotationDoesNotChangeTheCollectionToken(t *testing.T) {
+	h, _ := newHandler()
+	h.CodeTTL = -1 * time.Minute
+	_, token := submit(t, h)
+	h.CodeTTL = 15 * time.Minute
+
+	if resp := collect(h, token); resp.StatusCode != 202 {
+		t.Fatalf("collect that triggers rotation returned %d", resp.StatusCode)
+	}
+	// The same original token still resolves after rotation -- the only thing
+	// that changed is the code.
+	if resp := collect(h, token); resp.StatusCode != 202 {
+		t.Errorf("collect with the original token returned %d after rotation, want 202", resp.StatusCode)
 	}
 }
 

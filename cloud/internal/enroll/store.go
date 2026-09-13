@@ -118,6 +118,14 @@ func (f *Fake) ByTokenHash(_ context.Context, tokenHash string) (Pending, bool, 
 	return p, ok, nil
 }
 
+// ByCodeHash matches on each row's current CodeHash, which is the same
+// contract Dynamo.ByCodeHash enforces explicitly: a code that used to point
+// at a row but has since been rotated away must not resolve to it. The Fake
+// has no separate reservation item to go stale -- RotateCode overwrites
+// CodeHash on the one row it holds under a single lock -- so it cannot
+// reproduce the race that leaves Dynamo's reservation pointing at an
+// enrollment that has moved on, but the outward behavior the two must agree
+// on is this: only the row's current code resolves.
 func (f *Fake) ByCodeHash(_ context.Context, codeHash string) (Pending, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

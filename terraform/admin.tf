@@ -87,6 +87,16 @@ resource "aws_cognito_user_pool_client" "site" {
   # would let a caller submit a password straight to Cognito for guessing.
   explicit_auth_flows = ["ALLOW_USER_SRP_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"]
 
+  # Empty on purpose: nothing on the site lets a signed-in user edit their own
+  # profile, so nothing here should be able to. Without this, AWS gives a new
+  # client its default writable set, which includes email -- and this pool's
+  # enroll flow trusts a caller's email claim to decide who owns a pre-bound
+  # panel (see ownerMatches, cloud/cmd/enroll/handler.go). A client that could
+  # write email would let any invited user set their own email to the owner's
+  # address and claim someone else's panel. If a real profile-editing feature
+  # is ever added, name exactly the attributes it needs here -- never email.
+  write_attributes = []
+
   # Without this, AWS defaults new clients to LEGACY, which makes sign-in
   # error messages tell an unauthenticated caller whether a given email has
   # an account -- the same disclosure the API itself avoids by returning 404

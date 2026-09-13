@@ -203,6 +203,17 @@ func (x *Dynamo) ByTokenHash(ctx context.Context, tokenHash string) (Pending, bo
 // ByCodeHash follows the reservation to the enrollment. No index: the
 // reservation item exists to make codes unique, and pointing at its owner is
 // free.
+//
+// A reservation surviving past its code's usefulness is not hypothetical: two
+// RotateCode calls racing each other can leave a stale reservation whose
+// unconditioned delete (index 0) targets a hash that a second rotation
+// already moved past, so the second rotation's own reservation survives --
+// still pointing at a live enrollment whose codeHash has since moved on
+// again. That enrollment's CodeExpiresAt is refreshed on every rotation, so
+// it looks fresh even though the code that reached it here is not the code it
+// currently trusts. Comparing codeHash below is what closes that: a
+// reservation pointing at an enrollment that has moved on is reported exactly
+// like an unknown code, not like a match.
 func (x *Dynamo) ByCodeHash(ctx context.Context, codeHash string) (Pending, bool, error) {
 	out, err := x.client.GetItem(ctx, &dynamodb.GetItemInput{
 		TableName: aws.String(x.table),
@@ -218,7 +229,16 @@ func (x *Dynamo) ByCodeHash(ctx context.Context, codeHash string) (Pending, bool
 	if !ok {
 		return Pending{}, false, errors.New("enroll: malformed code reservation")
 	}
-	return x.ByTokenHash(ctx, pointer.Value)
+	p, found, err := x.ByTokenHash(ctx, pointer.Value)
+	if err != nil || !found {
+		return Pending{}, false, err
+	}
+	if p.CodeHash != codeHash {
+		// The reservation this code led to no longer belongs to it: a
+		// rotation moved the enrollment on and left this reservation behind.
+		return Pending{}, false, nil
+	}
+	return p, true, nil
 }
 
 // Reserve is the one-time guard. The condition is what enforces it: an

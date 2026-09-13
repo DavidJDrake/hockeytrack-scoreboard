@@ -189,6 +189,47 @@ func TestRotateCodeReplacesTheOldOne(t *testing.T) {
 	}
 }
 
+func TestASupersededCodeStaysDeadAcrossMultipleRotations(t *testing.T) {
+	// Guards against the Dynamo-specific version of this: two RotateCode
+	// transactions racing each other can leave a stale reservation pointing
+	// at an enrollment that has since rotated again, and that enrollment's
+	// CodeExpiresAt is refreshed each time so the stale row looks fresh.
+	// Dynamo.ByCodeHash closes this by checking the loaded row's own CodeHash
+	// against the hash that was looked up. The Fake's single-row-per-token
+	// model cannot reproduce the race itself (RotateCode holds the lock for
+	// its whole duration here), but it must still uphold the same contract:
+	// every code that ever pointed at this enrollment except the current one
+	// stays dead, not just the immediately-previous one.
+	ctx, s := context.Background(), NewFake()
+	p, firstCode, _ := pending(t)
+	if err := s.Create(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	secondCode, err := Code()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RotateCode(ctx, p.TokenHash, HashSecret(secondCode), time.Now().Add(15*time.Minute).Unix()); err != nil {
+		t.Fatal(err)
+	}
+	thirdCode, err := Code()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RotateCode(ctx, p.TokenHash, HashSecret(thirdCode), time.Now().Add(15*time.Minute).Unix()); err != nil {
+		t.Fatal(err)
+	}
+	for _, old := range []string{firstCode, secondCode} {
+		if _, found, _ := s.ByCodeHash(ctx, HashSecret(old)); found {
+			t.Errorf("a superseded code (%q) still resolves", old)
+		}
+	}
+	got, found, _ := s.ByCodeHash(ctx, HashSecret(thirdCode))
+	if !found || got.TokenHash != p.TokenHash {
+		t.Errorf("the current code resolved to %+v", got)
+	}
+}
+
 func TestRotateCodeRefusesACodeInUse(t *testing.T) {
 	ctx, s := context.Background(), NewFake()
 	first, _, _ := pending(t)
