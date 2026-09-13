@@ -98,7 +98,7 @@ def draw_waiting(surface: pygame.Surface, assets: Assets, code: str, site: str,
     there that the setup file was read and who the panel expects to claim it.
     """
     surface.fill(BG)
-    y = H // 2 - 170
+    y = H // 2 - 200
     heading = assets.font(44, False).render("Add this panel at", True, MUTED)
     surface.blit(heading, heading.get_rect(midtop=(W // 2, y)))
     y += 56
