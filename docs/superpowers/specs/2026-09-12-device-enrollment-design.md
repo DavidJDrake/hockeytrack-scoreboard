@@ -270,11 +270,35 @@ in it.
 its current permissions; the enrollment function gets the four IoT actions and
 nothing else.
 
-**`iot:AttachPolicy` must be pinned to the `scoreboard-device` policy ARN.**
-Left unpinned it is the sharpest hole in this design: a compromised enrollment
-path could mint a certificate and attach an over-permissive policy to it,
-turning a device-onboarding bug into fleet-wide compromise. It is one omitted
-resource constraint away, which is exactly why it is written down here.
+**Which policy gets attached cannot be constrained in IAM, and an earlier
+version of this document said otherwise.** It claimed `iot:AttachPolicy` must
+be pinned to the `scoreboard-device` policy ARN, and called that the sharpest
+hole in the design. That control does not exist. AWS authorizes `AttachPolicy`
+against its *target* -- the certificate -- not against the policy being
+attached, so a statement scoped to a policy ARN matches nothing at all. It was
+disproved by simulation rather than by reading: pinned to the policy ARN,
+`iam simulate-custom-policy` returns `implicitDeny` for attaching to a
+certificate; on `cert/*` or `*` it returns `allowed`; and `iot:DeletePolicy`
+against a policy ARN returns `allowed`, so policy ARNs do work for the actions
+that take them. The original wording would therefore have failed every claim
+with AccessDenied *and* never expressed the constraint it promised.
+
+**What actually contains this, honestly stated.** Four things, none of which is
+the single hard pin the earlier text implied:
+
+- The policy name is fixed when the issuer is constructed, so no caller and no
+  request can choose which policy is attached.
+- The enrollment role holds no policy-authoring actions -- no `CreatePolicy`,
+  `CreatePolicyVersion` or `SetDefaultPolicyVersion` -- so it cannot write a
+  permissive policy to attach.
+- `iot:AttachPolicy` is scoped to `cert/*` in this account, which constrains
+  what it can attach *to* even though it cannot constrain what it attaches.
+- There is currently exactly one IoT policy in the account.
+
+**That last one is a contingency, not a guarantee**, and it is the thing to
+watch: if a second, broader IoT policy is ever created here, this role could
+attach it, and nothing in IAM would stop that. Anyone adding an IoT policy to
+this account needs to know that.
 
 **Nothing is trusted from the CSR.** Not the subject, not the SANs, not any
 extension. The thing name is assigned server-side. A CSR is a public key and a
