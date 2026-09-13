@@ -39,7 +39,15 @@ def screen_for(has_identity: bool, has_network: bool, enrollment=None) -> str:
         return UNREGISTERED
     if not has_network:
         return OFFLINE
-    return WAITING if getattr(enrollment, "display", None) else ENROLL_PROBLEM
+    if getattr(enrollment, "display", None):
+        return WAITING
+    # ENROLL_PROBLEM's caller reads enrollment.detail, so only take this
+    # branch when there is one to read -- which today means Problem, the
+    # only other state that reaches this line. A Ready reaching here at all
+    # is a bug elsewhere -- main.py exits before the render loop can see one
+    # -- but this function has no way to know that, so it falls back to
+    # UNREGISTERED rather than crash on a Ready's missing .detail (M-3).
+    return ENROLL_PROBLEM if getattr(enrollment, "detail", None) is not None else UNREGISTERED
 
 
 def _network_window_start(index: int, count: int, size: int = NETWORK_WINDOW) -> int:
