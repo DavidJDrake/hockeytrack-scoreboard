@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 
 	"github.com/aws/aws-lambda-go/events"
@@ -100,28 +99,6 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 			out = append(out, deviceView{ThingName: d.ThingName, Name: d.Name, GameID: d.GameID})
 		}
 		return respond(200, out)
-
-	case "POST /api/devices/claim":
-		var body struct {
-			Code string `json:"code"`
-		}
-		if err := json.Unmarshal(rawBody, &body); err != nil || body.Code == "" {
-			return fail(400, "a code is required")
-		}
-		d, found, err := h.Store.ByCode(ctx, body.Code)
-		if err != nil {
-			return fail(500, "claim failed")
-		}
-		if !found {
-			return fail(404, "no unclaimed device with that code")
-		}
-		if err := h.Store.Claim(ctx, d.ThingName, sub); err != nil {
-			if errors.Is(err, devices.ErrAlreadyClaimed) {
-				return fail(404, "no unclaimed device with that code")
-			}
-			return fail(500, "claim failed")
-		}
-		return respond(200, deviceView{ThingName: d.ThingName})
 
 	case "PUT /api/devices/{thing}/game":
 		var body struct {

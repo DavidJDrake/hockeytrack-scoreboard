@@ -28,7 +28,7 @@ func req(method, route, sub, body string, params map[string]string) events.APIGa
 func handlerWith(t *testing.T) (*Handler, *devices.Fake, *iotpub.Fake) {
 	t.Helper()
 	st, pub := devices.NewFake(), &iotpub.Fake{}
-	_ = st.Register(context.Background(), "scoreboard-7qf2", "7QF2")
+	_ = st.Register(context.Background(), "scoreboard-7qf2")
 	return &Handler{Store: st, Pub: pub}, st, pub
 }
 
@@ -81,27 +81,10 @@ func TestAStrangerGets404AndNoPublish(t *testing.T) {
 	}
 }
 
-func TestClaimBindsByCodeAndRefusesAUsedCode(t *testing.T) {
-	h, _, _ := handlerWith(t)
-	ctx := context.Background()
-
-	res, err := h.Handle(ctx, req("POST", "POST /api/devices/claim", "sub-a", `{"code":"7QF2"}`, nil))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if res.StatusCode != 200 {
-		t.Fatalf("first claim status = %d, want 200 (body %s)", res.StatusCode, res.Body)
-	}
-	res, _ = h.Handle(ctx, req("POST", "POST /api/devices/claim", "sub-b", `{"code":"7QF2"}`, nil))
-	if res.StatusCode != 404 {
-		t.Errorf("second claim status = %d, want 404", res.StatusCode)
-	}
-}
-
 func TestListReturnsOnlyTheCallersDevices(t *testing.T) {
 	h, st, _ := handlerWith(t)
 	ctx := context.Background()
-	_ = st.Register(ctx, "scoreboard-aaaa", "AAAA")
+	_ = st.Register(ctx, "scoreboard-aaaa")
 	_ = st.Claim(ctx, "scoreboard-7qf2", "sub-a")
 	_ = st.Claim(ctx, "scoreboard-aaaa", "sub-b")
 

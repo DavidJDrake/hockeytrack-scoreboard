@@ -20,24 +20,11 @@ resource "aws_dynamodb_table" "devices" {
     name = "owner"
     type = "S"
   }
-  attribute {
-    name = "code"
-    type = "S"
-  }
 
   # "list my devices" is one query rather than a scan.
   global_secondary_index {
     name            = "owner-index"
     hash_key        = "owner"
-    projection_type = "ALL"
-  }
-
-  # Resolving a pairing code is one query. Rows keep their code after
-  # claiming; ByCode ignores a row that already has an owner, so a used code
-  # stops resolving.
-  global_secondary_index {
-    name            = "code-index"
-    hash_key        = "code"
     projection_type = "ALL"
   }
 }
@@ -71,6 +58,22 @@ resource "aws_cognito_user_pool" "admin" {
   auto_verified_attributes = ["email"]
   username_attributes      = ["email"]
 
+  # The load-bearing half of the owner-hint defense. The enroll flow decides
+  # who owns a pre-bound panel by comparing the caller's email claim against a
+  # hash typed into the panel's setup file (ownerMatches,
+  # cloud/cmd/enroll/handler.go), so an invited user who could point their own
+  # account at the owner's address could claim the owner's panel. With this
+  # set, Cognito does not write the new address at all until it is verified:
+  # the attempt sends a code to the *owner's* mailbox, the impostor's email
+  # attribute keeps its old value, and their token therefore never carries the
+  # owner's address in any state. The handler's own email_verified check stays
+  # regardless -- it is what keeps a reverted or misconfigured pool safe -- but
+  # this is the control that does not depend on how API Gateway serializes a
+  # boolean claim.
+  user_attribute_update_settings {
+    attributes_require_verification_before_update = ["email"]
+  }
+
   mfa_configuration = "OPTIONAL"
   software_token_mfa_configuration {
     enabled = true
@@ -99,6 +102,22 @@ resource "aws_cognito_user_pool_client" "site" {
   # alive between the two; nothing here needs USER_PASSWORD_AUTH, which
   # would let a caller submit a password straight to Cognito for guessing.
   explicit_auth_flows = ["ALLOW_USER_SRP_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"]
+
+  # NOT empty -- the provider's write_attributes is Optional+Computed, so an
+  # empty list is indistinguishable from omitting the argument entirely: the
+  # provider leaves whatever the API already has, which is Cognito's default
+  # writable set, and that default includes email. "name" is a placeholder
+  # standard attribute with no meaning to this app; it exists only so this
+  # list is non-empty and therefore actually replaces the default. The point
+  # is what is missing: nothing on the site lets a signed-in user edit their
+  # own profile, and this pool's enroll flow trusts a caller's email claim to
+  # decide who owns a pre-bound panel (see ownerMatches,
+  # cloud/cmd/enroll/handler.go). A client that could write email would let
+  # any invited user set their own email to the owner's address and claim
+  # someone else's panel. If a real profile-editing feature is ever added,
+  # replace "name" with exactly the attributes it needs -- never email, and
+  # never an empty list.
+  write_attributes = ["name"]
 
   # Without this, AWS defaults new clients to LEGACY, which makes sign-in
   # error messages tell an unauthenticated caller whether a given email has
@@ -229,7 +248,6 @@ resource "aws_apigatewayv2_integration" "api" {
 locals {
   admin_routes = [
     "GET /api/devices",
-    "POST /api/devices/claim",
     "PUT /api/devices/{thing}/game",
     "PATCH /api/devices/{thing}",
     "DELETE /api/devices/{thing}",
@@ -259,6 +277,47 @@ resource "aws_apigatewayv2_stage" "default" {
   default_route_settings {
     throttling_rate_limit  = 20
     throttling_burst_limit = 40
+  }
+
+  # Enrollment is unauthenticated, so it shares the API's account-wide
+  # exposure without even the JWT authorizer's cost to slow down a caller.
+  # A tighter limit here keeps a flood of enrollment traffic from starving
+  # the rest of the site, which the shared default_route_settings budget
+  # would not do on its own.
+  route_settings {
+    route_key              = "POST /api/enroll"
+    throttling_rate_limit  = 5
+    throttling_burst_limit = 10
+  }
+
+  route_settings {
+    route_key              = "GET /api/enroll"
+    throttling_rate_limit  = 5
+    throttling_burst_limit = 10
+  }
+
+  # Detailed metrics are off account-wide (a stage-level default, checked
+  # before adding this), so without this the enroll_claim_failures alarm
+  # (enroll.tf) would watch a route-level metric nothing ever emits and look
+  # healthy while seeing no data at all. Turning it on for just this one
+  # route is a deliberate, accepted cost -- per-route CloudWatch metrics are
+  # billed as custom metrics -- against an alarm that would otherwise be
+  # trustworthy for nothing.
+  #
+  # The throttle values repeat the stage default (20 rps / 40 burst) rather
+  # than leaving them out to "inherit" it. A route_settings block with no
+  # throttle fields is not guaranteed to mean "use default_route_settings" --
+  # there is no version-controlled acceptance test for what API Gateway does
+  # with an omitted RouteSettings throttle, and the risk if it means an
+  # explicit 0 is throttling the one route that mints certificates and grants
+  # ownership to nothing. Stating the intent costs two lines; an untested
+  # assumption about inheritance does not belong on this route. Do not remove
+  # these as "redundant" with default_route_settings.
+  route_settings {
+    route_key                = "POST /api/devices/claim"
+    detailed_metrics_enabled = true
+    throttling_rate_limit    = 20
+    throttling_burst_limit   = 40
   }
 
   access_log_settings {

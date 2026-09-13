@@ -264,6 +264,13 @@ resource "aws_cloudwatch_metric_alarm" "iot_publish_out_auth_error" {
 # topic (dlq.tf), not hockeytrack-security-alerts, and does get ok_actions:
 # unlike a probe against the device policy, "the Lambda started working
 # again" is useful information on its own, not just a redundant page.
+#
+# A fourth identity now touches IoT: scoreboard-enroll (enroll.tf) holds
+# CreateCertificateFromCsr, thing registration, and AttachPolicy/DetachPolicy
+# pinned to the device policy, so it can mint and register a device identity.
+# It holds no iot:Publish or iot:RetainPublish grant anywhere and never
+# publishes, so it cannot produce this metric and is not a fourth suspect
+# below.
 resource "aws_cloudwatch_metric_alarm" "iot_publish_retained_auth_error" {
   alarm_name        = "scoreboard-iot-publish-retained-auth-error"
   alarm_description = <<-EOT

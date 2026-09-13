@@ -10,7 +10,7 @@ import (
 
 func TestClaimBindsAnUnclaimedDeviceExactlyOnce(t *testing.T) {
 	st, ctx := NewFake(), context.Background()
-	if err := st.Register(ctx, "scoreboard-01", "01"); err != nil {
+	if err := st.Register(ctx, "scoreboard-01"); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.Claim(ctx, "scoreboard-01", "user-a"); err != nil {
@@ -27,12 +27,12 @@ func TestClaimBindsAnUnclaimedDeviceExactlyOnce(t *testing.T) {
 
 func TestListByOwnerReturnsOnlyThatOwnersDevices(t *testing.T) {
 	st, ctx := NewFake(), context.Background()
-	for _, tc := range []struct{ thing, code, owner string }{
-		{"scoreboard-01", "01", "user-a"},
-		{"scoreboard-02", "02", "user-b"},
-		{"scoreboard-03", "03", "user-a"},
+	for _, tc := range []struct{ thing, owner string }{
+		{"scoreboard-01", "user-a"},
+		{"scoreboard-02", "user-b"},
+		{"scoreboard-03", "user-a"},
 	} {
-		if err := st.Register(ctx, tc.thing, tc.code); err != nil {
+		if err := st.Register(ctx, tc.thing); err != nil {
 			t.Fatal(err)
 		}
 		if err := st.Claim(ctx, tc.thing, tc.owner); err != nil {
@@ -55,7 +55,7 @@ func TestListByOwnerReturnsOnlyThatOwnersDevices(t *testing.T) {
 
 func TestUnbindRequiresTheCurrentOwnerAndLeavesTheDeviceClaimable(t *testing.T) {
 	st, ctx := NewFake(), context.Background()
-	_ = st.Register(ctx, "scoreboard-01", "01")
+	_ = st.Register(ctx, "scoreboard-01")
 	_ = st.Claim(ctx, "scoreboard-01", "user-a")
 	if err := st.Unbind(ctx, "scoreboard-01", "user-b"); !errors.Is(err, ErrNotOwner) {
 		t.Errorf("unbind by a stranger err = %v, want ErrNotOwner", err)
@@ -68,21 +68,9 @@ func TestUnbindRequiresTheCurrentOwnerAndLeavesTheDeviceClaimable(t *testing.T) 
 	}
 }
 
-func TestByCodeFindsOnlyUnclaimedDevices(t *testing.T) {
-	st, ctx := NewFake(), context.Background()
-	_ = st.Register(ctx, "scoreboard-01", "7QF2")
-	if d, found, _ := st.ByCode(ctx, "7QF2"); !found || d.ThingName != "scoreboard-01" {
-		t.Fatalf("ByCode before claim: found=%v thing=%q", found, d.ThingName)
-	}
-	_ = st.Claim(ctx, "scoreboard-01", "user-a")
-	if _, found, _ := st.ByCode(ctx, "7QF2"); found {
-		t.Error("ByCode found a claimed device; a used code must stop resolving")
-	}
-}
-
 func TestUpdateEnforcesOwnershipAndImmutability(t *testing.T) {
 	st, ctx := NewFake(), context.Background()
-	_ = st.Register(ctx, "scoreboard-01", "7QF2")
+	_ = st.Register(ctx, "scoreboard-01")
 	_ = st.Claim(ctx, "scoreboard-01", "user-a")
 
 	// Non-owner cannot update.
@@ -99,23 +87,25 @@ func TestUpdateEnforcesOwnershipAndImmutability(t *testing.T) {
 		t.Errorf("after update: Name=%q GameID=%d, want Living Room/2025020123", d.Name, d.GameID)
 	}
 
-	// Code and ThingName must remain immutable: attempting to change them has no effect.
-	if err := st.Update(ctx, Device{ThingName: "scoreboard-01", Owner: "user-a", Code: "XXXX"}); err != nil {
-		t.Fatalf("update with different Code: %v", err)
+	// ThingName must remain immutable: attempting to change it via Update has
+	// no path to do so (Update keys on the original ThingName), and the row
+	// stored under the original name is unaffected.
+	if err := st.Update(ctx, Device{ThingName: "scoreboard-01", Owner: "user-a", Name: "Still Living Room"}); err != nil {
+		t.Fatalf("update again: %v", err)
 	}
 	d, _, _ = st.Get(ctx, "scoreboard-01")
-	if d.Code != "7QF2" {
-		t.Errorf("Code was mutated to %q, want 7QF2 (immutable)", d.Code)
+	if d.ThingName != "scoreboard-01" {
+		t.Errorf("ThingName was mutated to %q, want scoreboard-01 (immutable)", d.ThingName)
 	}
 }
 
 func TestItemRoundTripsThroughDynamoAttributes(t *testing.T) {
-	in := Device{ThingName: "scoreboard-7qf2", Owner: "sub-123", Name: "Living room", GameID: 2026020001, Code: "7QF2"}
+	in := Device{ThingName: "scoreboard-7qf2", Owner: "sub-123", Name: "Living room", GameID: 2026020001}
 	item, err := marshalDevice(in)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"thingName", "owner", "name", "gameId", "code"} {
+	for _, key := range []string{"thingName", "owner", "name", "gameId"} {
 		if _, ok := item[key]; !ok {
 			t.Errorf("marshalled item is missing %q", key)
 		}
@@ -130,7 +120,7 @@ func TestItemRoundTripsThroughDynamoAttributes(t *testing.T) {
 }
 
 func TestAnUnclaimedDeviceMarshalsWithoutAnOwnerAttribute(t *testing.T) {
-	item, err := marshalDevice(Device{ThingName: "scoreboard-7qf2", Code: "7QF2"})
+	item, err := marshalDevice(Device{ThingName: "scoreboard-7qf2"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +132,7 @@ func TestAnUnclaimedDeviceMarshalsWithoutAnOwnerAttribute(t *testing.T) {
 func TestRegisterRejectsInvalidThingNames(t *testing.T) {
 	st, ctx := NewFake(), context.Background()
 	for _, name := range []string{"", "has space", "slash/here", "semi;colon", "colon:not-allowed", "dot.not-allowed", "hash#wild", "plus+wild"} {
-		if err := st.Register(ctx, name, "01"); !errors.Is(err, ErrInvalidThingName) {
+		if err := st.Register(ctx, name); !errors.Is(err, ErrInvalidThingName) {
 			t.Errorf("Register(%q) err = %v, want ErrInvalidThingName", name, err)
 		}
 	}
@@ -150,29 +140,9 @@ func TestRegisterRejectsInvalidThingNames(t *testing.T) {
 		t.Error("an invalid thing name must not be stored")
 	}
 	for _, name := range []string{"scoreboard-01", "scoreboard_01", "ABC123"} {
-		if err := st.Register(ctx, name, "01"); err != nil {
+		if err := st.Register(ctx, name); err != nil {
 			t.Errorf("Register(%q) with a valid name: %v", name, err)
 		}
-	}
-}
-
-func TestByCodeErrorsOnDuplicateUnclaimedCodes(t *testing.T) {
-	st, ctx := NewFake(), context.Background()
-	_ = st.Register(ctx, "scoreboard-01", "DUPE")
-	_ = st.Register(ctx, "scoreboard-02", "DUPE")
-	if _, _, err := st.ByCode(ctx, "DUPE"); !errors.Is(err, ErrDuplicateCode) {
-		t.Errorf("ByCode with two unclaimed rows sharing a code err = %v, want ErrDuplicateCode", err)
-	}
-}
-
-func TestByCodeIgnoresClaimedDuplicatesWhenOnlyOneIsUnclaimed(t *testing.T) {
-	st, ctx := NewFake(), context.Background()
-	_ = st.Register(ctx, "scoreboard-01", "DUPE")
-	_ = st.Register(ctx, "scoreboard-02", "DUPE")
-	_ = st.Claim(ctx, "scoreboard-01", "user-a")
-	d, found, err := st.ByCode(ctx, "DUPE")
-	if err != nil || !found || d.ThingName != "scoreboard-02" {
-		t.Fatalf("ByCode = %+v, found=%v, err=%v; want scoreboard-02/true/nil", d, found, err)
 	}
 }
 
