@@ -264,6 +264,18 @@ resource "aws_apigatewayv2_stage" "default" {
     throttling_burst_limit = 10
   }
 
+  # Detailed metrics are off account-wide (a stage-level default, checked
+  # before adding this), so without this the enroll_claim_failures alarm
+  # (enroll.tf) would watch a route-level metric nothing ever emits and look
+  # healthy while seeing no data at all. Turning it on for just this one
+  # route is a deliberate, accepted cost -- per-route CloudWatch metrics are
+  # billed as custom metrics -- against an alarm that would otherwise be
+  # trustworthy for nothing.
+  route_settings {
+    route_key                = "POST /api/devices/claim"
+    detailed_metrics_enabled = true
+  }
+
   access_log_settings {
     destination_arn = aws_cloudwatch_log_group.api_access.arn
     format = jsonencode({

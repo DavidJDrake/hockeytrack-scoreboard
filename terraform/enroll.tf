@@ -117,11 +117,17 @@ resource "aws_cloudwatch_log_group" "enroll" {
   retention_in_days = 30
 }
 
+data "archive_file" "enroll" {
+  type        = "zip"
+  source_file = "${path.module}/../build/enroll/bootstrap"
+  output_path = "${path.module}/../build/enroll.zip"
+}
+
 resource "aws_lambda_function" "enroll" {
   function_name    = "scoreboard-enroll"
   role             = aws_iam_role.enroll.arn
-  filename         = "${path.module}/../build/enroll.zip"
-  source_code_hash = filebase64sha256("${path.module}/../build/enroll.zip")
+  filename         = data.archive_file.enroll.output_path
+  source_code_hash = data.archive_file.enroll.output_base64sha256
   handler          = "bootstrap"
   runtime          = "provided.al2023"
   architectures    = ["arm64"]
@@ -212,6 +218,16 @@ resource "aws_cloudwatch_metric_alarm" "enroll_flood" {
 
 # A claim that fails is somebody typing a code wrong, which happens. A lot of
 # them is somebody guessing, and the codes are only eight characters.
+#
+# Scoped to this one route, not the whole API: an unscoped 4xx sum would also
+# count a panel polling GET /api/enroll with a stale collection token (an
+# expected, harmless 404) and every other admin route's ordinary client
+# errors, which would make this alarm fire on noise and get muted. HTTP APIs
+# only emit a route-level metric when detailed metrics are turned on for that
+# route (see the POST /api/devices/claim route_settings block in admin.tf),
+# and per AWS's own docs that per-route metric is dimensioned ApiId, Stage,
+# Method, Resource -- HTTP APIs still call it Method/Resource, not Route,
+# even though a route_key elsewhere in this file is written "POST /path".
 resource "aws_cloudwatch_metric_alarm" "enroll_claim_failures" {
   alarm_name          = "scoreboard-enroll-claim-failures"
   comparison_operator = "GreaterThanThreshold"
@@ -221,13 +237,18 @@ resource "aws_cloudwatch_metric_alarm" "enroll_claim_failures" {
   statistic           = "Sum"
   namespace           = "AWS/ApiGateway"
   metric_name         = "4xx"
-  dimensions          = { ApiId = aws_apigatewayv2_api.admin.id }
-  alarm_description   = <<-EOT
-    More than 20 4xx responses from the admin API in five minutes. The likely
-    innocent cause is a panel polling with a stale token; the one worth acting
-    on is somebody working through the pairing-code space. Check the access log
-    group for which route and which source address.
+  dimensions = {
+    ApiId    = aws_apigatewayv2_api.admin.id
+    Stage    = aws_apigatewayv2_stage.default.name
+    Method   = "POST"
+    Resource = "/api/devices/claim"
+  }
+  alarm_description  = <<-EOT
+    More than 20 4xx responses from POST /api/devices/claim in five minutes.
+    The likely innocent cause is somebody mistyping their pairing code; the
+    one worth acting on is somebody working through the eight-character code
+    space. Check the access log group for the source address.
   EOT
-  alarm_actions       = [data.aws_sns_topic.security_alerts.arn]
-  treat_missing_data  = "notBreaching"
+  alarm_actions      = [data.aws_sns_topic.security_alerts.arn]
+  treat_missing_data = "notBreaching"
 }
