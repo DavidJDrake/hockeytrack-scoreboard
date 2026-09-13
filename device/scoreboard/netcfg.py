@@ -24,6 +24,10 @@ BOOT_FILE = Path("/boot/firmware/scoreboard-setup.txt")
 LEGACY_BOOT_FILE = Path("/boot/firmware/scoreboard-wifi.txt")
 MAX_SSID_BYTES = 32
 MIN_PSK_CHARS, MAX_PSK_CHARS = 8, 63
+# Generous for an email address, and this is a typo guard, not a real limit:
+# owner_hint() puts this straight into the enrollment POST body, and nothing
+# upstream of it caps the length of a line on a FAT partition anyone can edit.
+MAX_OWNER_BYTES = 256
 
 
 @dataclass(frozen=True)
@@ -85,15 +89,23 @@ def boot_file(primary: Path | None = None, legacy: Path | None = None) -> Path:
 def owner_hint(path: Path | None = None) -> str | None:
     """The owner line from the boot partition, or None.
 
-    Unreadable file, unreadable bytes, no owner line -- all None. Nothing
-    about enrollment should fail because of what somebody typed here.
+    Unreadable file, unreadable bytes, no owner line, or an owner line far
+    longer than any real email address -- all None. Nothing about enrollment
+    should fail because of what somebody typed here, and this value goes
+    straight into the enrollment POST body: an over-long line is a typo on
+    the boot partition, not a configuration to send on. It is dropped
+    outright rather than truncated, since a truncated address would still be
+    sent, just wrong.
     """
     target = boot_file() if path is None else path
     try:
         text = target.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
-    return parse_owner(text)
+    owner = parse_owner(text)
+    if owner is not None and len(owner.encode("utf-8")) > MAX_OWNER_BYTES:
+        return None
+    return owner
 
 
 def parse_wifi_file(text: str) -> WifiSettings | None:
