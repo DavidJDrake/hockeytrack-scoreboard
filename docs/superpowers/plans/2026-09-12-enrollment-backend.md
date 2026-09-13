@@ -333,7 +333,7 @@ git commit -m "enroll: codes a person can read off a screen, tokens they cannot"
 
 **Interfaces:**
 - Consumes: nothing from Task 1.
-- Produces: `MaxCSRBytes` (const); `ParseCSR(pemBytes []byte) (*x509.CertificateRequest, error)`.
+- Produces: `MaxCSRBytes` (const); `ParseCSR(pemBytes []byte) error`. It returns no parsed request on purpose: the subject, SANs and extensions must not travel out to a caller who might reach into them, so "nothing is trusted from the CSR" is enforced by the compiler rather than by discipline.
 
 This is the one input an anonymous stranger fully controls, which is why it gets its own task and its own review gate. Four things must hold: the body is size-capped, the key is P-256 and nothing else, the signature verifies (that is the proof the sender holds the private key), and **nothing in the subject is read or returned**.
 
@@ -2023,7 +2023,7 @@ func (h *Handler) submit(ctx context.Context, req events.APIGatewayV2HTTPRequest
 	if err := json.Unmarshal(body(req), &in); err != nil || in.CSR == "" {
 		return fail(http.StatusBadRequest, "a certificate request is required")
 	}
-	if _, err := enroll.ParseCSR([]byte(in.CSR)); err != nil {
+	if err := enroll.ParseCSR([]byte(in.CSR)); err != nil {
 		return fail(http.StatusBadRequest, err.Error())
 	}
 	code, err := enroll.Code()
