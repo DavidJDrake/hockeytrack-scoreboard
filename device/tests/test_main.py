@@ -252,3 +252,59 @@ def test_a_factory_reset_stops_the_enrollment_thread(tmp_path):
     assert stop.is_set()
     t.join(timeout=5)
     assert not t.is_alive()
+
+
+def test_enrollment_starts_for_an_unprovisioned_panel_with_a_working_display(tmp_path, monkeypatch):
+    # M-7: main()'s own call site for the enrollment thread -- the guard,
+    # not the thread itself -- had no test at all, and it is exactly the
+    # seam F1 and F2 lived in. Pins the guard directly rather than driving
+    # the whole render loop.
+    monkeypatch.setenv("SCOREBOARD_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("SDL_VIDEODRIVER", "dummy")
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("SCOREBOARD_FIXTURE", raising=False)
+
+    calls = []
+    monkeypatch.setattr(main_module, "enrollment_thread",
+                        lambda config_dir, owner, events, stop, enroller=None: calls.append(config_dir))
+
+    posted = {"done": False}
+
+    def fake_get(*a, **k):
+        if posted["done"]:
+            return []
+        posted["done"] = True
+        return [pygame.event.Event(pygame.QUIT)]
+
+    monkeypatch.setattr(pygame.event, "get", fake_get)
+
+    main_module.main()
+
+    assert calls == [main_module.default_config_dir()]
+
+
+def test_enrollment_does_not_start_when_a_fixture_is_set(tmp_path, monkeypatch):
+    # M-7: the other half of the guard -- a desktop preview must never post a
+    # CSR, even though it also has no device.json.
+    monkeypatch.setenv("SCOREBOARD_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("SDL_VIDEODRIVER", "dummy")
+    monkeypatch.setenv("SCOREBOARD_FIXTURE", str(FIX / "state_live.json"))
+    monkeypatch.delenv("DISPLAY", raising=False)
+
+    calls = []
+    monkeypatch.setattr(main_module, "enrollment_thread",
+                        lambda *a, **k: calls.append(a))
+
+    posted = {"done": False}
+
+    def fake_get(*a, **k):
+        if posted["done"]:
+            return []
+        posted["done"] = True
+        return [pygame.event.Event(pygame.QUIT)]
+
+    monkeypatch.setattr(pygame.event, "get", fake_get)
+
+    main_module.main()
+
+    assert calls == []
