@@ -32,6 +32,7 @@ Settled in brainstorming and treated here as fixed inputs.
 | Is AWS IoT with per-device X.509 required? | Yes — decided in the image design, unchanged here |
 | Who can create an account? | Invite-only. The Cognito pool stays closed; public sign-up remains out of scope |
 | How is the certificate issued? | `iot:CreateCertificateFromCsr` — the device keeps its private key |
+| Can a shoulder surfer claim a code they read off the screen? | No, when the panel was pre-bound. The owner's name travels on the boot partition, so the code is claimable only by them |
 
 ## 3. What this amends in an accepted spec
 
@@ -96,16 +97,18 @@ checked.
    certificate signing request, writes the key to
    `/var/lib/scoreboard/private.pem.key` at mode 600, and keeps both. The
    private key never leaves the SD card.
-2. **`POST /api/enroll`**, unauthenticated, carrying only the CSR. The server
-   validates it, assigns a thing name, a **pairing code** and a **collection
-   token**, and writes a pending enrollment row with a TTL. It creates no thing
-   and no certificate. It returns the code and the token.
+2. **`POST /api/enroll`**, unauthenticated, carrying the CSR and — if the card
+   was prepared with one — an **owner hint**. The server validates the CSR,
+   assigns a thing name, a **pairing code** and a **collection token**, and
+   writes a pending enrollment row with a TTL. It creates no thing and no
+   certificate. It returns the code and the token.
 3. **The panel displays the code**, on the "Not registered" screen the device
    image work already built for this purpose.
-4. **The owner signs in and types the code.** Only now does anything get
-   minted: sign the CSR, create the thing, attach the principal and the device
-   policy, write the ownership row, and store the certificate against the
-   pending record.
+4. **The owner signs in and types the code.** If the enrollment carries an
+   owner hint, the claim is refused unless the signed-in caller is that person.
+   Only then does anything get minted: sign the CSR, create the thing, attach
+   the principal and the device policy, write the ownership row, and store the
+   certificate against the pending record.
 5. **`GET /api/enroll`**, bearing the collection token. 202 while unclaimed,
    200 with the certificate, thing name and endpoint once claimed.
 6. **The device writes its config and restarts** into the panel it was always
@@ -125,10 +128,68 @@ that asked.
 ### 5.2 The pairing code
 
 Eight characters of Crockford base32, displayed as `XXXX-XXXX`, with `0`, `O`,
-`1`, `I` and `L` absent so it cannot be mistyped. That is roughly 10¹²
-combinations against a claim endpoint that is authenticated, rate-limited per
-user, one-time per code, and expires after 24 hours — after which the panel
-enrolls again and shows a new one.
+`1`, `I` and `L` absent so it cannot be mistyped. Roughly 10¹² combinations
+against a claim endpoint that is authenticated, rate-limited per user, and
+one-time per code.
+
+**Codes are unique at the moment they are written**, not merely checked for
+collision afterwards: a conditional write reserves the code, and a collision
+means generating another. A uniqueness property enforced by detection is not a
+uniqueness property.
+
+**Codes rotate, and the enrollment outlives them.** These are two different
+lifetimes and conflating them was a mistake worth naming: the enrollment — the
+CSR and the collection token — lives 24 hours, because a device should not have
+to generate a new keypair just because nobody was home. The *code* lives 15
+minutes. The device's own poll is what rotates it: `GET /api/enroll` returns a
+fresh code once the previous one expires, so the panel updates its display
+without doing anything special, and a code photographed off a screen is useless
+within the quarter hour.
+
+### 5.3 The owner hint, and why it closes the shoulder-surfing problem
+
+A code shown on a panel can be read by anyone in the room. Rotation shrinks
+that window but does not close it, and no amount of entropy helps against
+somebody who can simply see the screen.
+
+It closes when the panel knows whose it is **before** it ever shows a code. The
+boot partition already carries setup the owner writes at flash time, so it
+carries one more line:
+
+    owner=friend@example.com
+
+The device sends that hint with its CSR. The server stores `sha256` of it and,
+at claim time, compares it against the caller's `email` or `cognito:username`
+claim. A shoulder surfer reading the screen therefore has a code they cannot
+use: claiming it requires signing in as the owner, which is the one thing they
+cannot do.
+
+Three properties of this worth stating:
+
+- **The hint is not a secret.** It is an email address sitting in plaintext on
+  a FAT partition anyone holding the card can read. It is stored hashed for
+  consistency with the code and the token, not because a username needs
+  protecting.
+- **Matching is on `email` or `cognito:username`, never `sub`**, because `sub`
+  is a UUID nobody can type into a file. Comparison is case-insensitive and
+  whitespace-trimmed, the same normalization the pairing code gets, because
+  this is hand-typed too.
+- **The hint is optional.** A card prepared without one behaves exactly as
+  described above: any invited user may claim it, with short rotating codes.
+  This keeps the file from becoming a new way to brick a setup, and gives the
+  stronger property to anyone who writes it.
+
+**The site generates the file.** "Add a panel" produces a
+`scoreboard-setup.txt` with the owner line already filled in, which the friend
+drops onto the boot partition beside their Wi-Fi settings. That is a better
+setup story than typing an address by hand, and it means the panel comes up
+already knowing whose it is.
+
+**The file is renamed.** The device image work shipped
+`/boot/firmware/scoreboard-wifi.txt`; it becomes `scoreboard-setup.txt`, since
+a file named for Wi-Fi that carries an owner line is the sort of small
+dishonesty that confuses somebody a year later. Nothing has shipped to anyone,
+so the rename costs nothing now and cannot be done cheaply later.
 
 ## 6. Abuse bounds
 
@@ -161,7 +222,9 @@ resource.
 | Attribute | Purpose |
 |---|---|
 | `pk` | `sha256(collection token)` — the partition key |
-| `code_hash` | `sha256(pairing code)`, partition key of a GSI |
+| `code_hash` | `sha256(pairing code)`. Rotates. A companion reservation item keyed `code#<hash>` is what enforces uniqueness and what a lookup follows — DynamoDB cannot enforce uniqueness on an index, but it can refuse a conditional write, and this removes the need for an index at all |
+| `code_expires_at` | epoch seconds; when the code rotates, distinct from the row's own TTL |
+| `owner_hint_hash` | `sha256` of the normalized owner hint, or absent |
 | `csr` | the submitted PEM |
 | `thing_name` | assigned by the server at enrollment |
 | `status` | `pending` or `ready` |
@@ -237,7 +300,15 @@ friend staring at a dead panel with no way to tell whose fault it is:
 - **Enrollment rejected or unreachable** — said plainly, with backoff. This
   must not look identical to "nobody has claimed me yet."
 - **Waiting to be claimed** — the code, large, with the site's address beneath
-  it.
+  it, and the owner's name when the card carried one. "Waiting for
+  friend@example.com" tells the friend their setup file was read, which is
+  otherwise invisible until something goes wrong.
+
+**The owner hint comes from the boot partition**, read from
+`/boot/firmware/scoreboard-setup.txt` — the same file that carries the Wi-Fi
+settings, renamed from `scoreboard-wifi.txt` now that it carries more than
+Wi-Fi. An absent or unparseable `owner=` line is not an error; the panel
+enrolls without a hint.
 
 **The keypair is generated once and reused across retries.** Regenerating per
 attempt would orphan a certificate every time somebody claimed a code the panel
@@ -254,6 +325,11 @@ One page does the real work: sign in through Cognito's hosted UI, land on a
 list of your panels. The empty state is a single field — type the code from
 your screen. That is the entire onboarding interface and it should stay that
 small.
+
+The same page produces the setup file. "Add a panel" offers a
+`scoreboard-setup.txt` containing the signed-in user's owner line, to be
+dropped on the boot partition beside the Wi-Fi settings, so the panel comes up
+pre-bound and its code is claimable by nobody else.
 
 Beyond it, v1 is what the accepted admin-site spec already settled: choose a
 game per panel, rename a panel, unbind a panel. Nothing else. §7 of that spec
@@ -317,7 +393,11 @@ In the order they matter:
 3. **Is anything trusted from the CSR?** See §8.
 4. **Does seeing the screen yield the device's identity?** The collection token
    exists to make the answer no; try to reach a certificate knowing only a code.
-5. **Does a table dump yield anything usable?** Both secrets are hashed; check
+5. **Can a pre-bound code be claimed by anybody but its owner?** Try claiming
+   one as a different invited user, and try defeating the comparison with case,
+   whitespace, a plus-addressed variant, or a Unicode homoglyph of the owner's
+   address.
+6. **Does a table dump yield anything usable?** Both secrets are hashed; check
    that raw values never reach an item, a log line, or an error message.
 
 ## 13. Dependencies and out of scope
