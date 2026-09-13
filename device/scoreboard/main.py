@@ -5,18 +5,20 @@ import logging
 import os
 import queue
 import sys
+import threading
 import time
 
 import pygame
 
 from . import buttons
+from . import enroll
 from . import screens
 from .assets import Assets
 from .config import Config, NotProvisioned, default_config_dir, parse_rotate
 from .display import display_failure, parse_size, placement, present
 from .link import Link
 from .model import GameState, parse_today, parse_config
-from .netcfg import NetworkError, NetworkManager, Status
+from .netcfg import NetworkError, NetworkManager, Status, owner_hint
 from .render import H, W, draw
 from .reset import factory_reset
 from .settings import Settings
@@ -80,6 +82,31 @@ def carry_out(panel: Settings, nm, cfg) -> Status | None:
     return None
 
 
+def enrollment_thread(config_dir, owner, events: queue.Queue,
+                      stop: threading.Event, enroller=None) -> threading.Thread:
+    """Run the enrollment state machine off the render loop.
+
+    One network call per step, with the machine's own backoff between them, so
+    a panel waiting for somebody to find their password is not hammering the
+    endpoint -- and the display keeps redrawing throughout, because nothing
+    here blocks the loop.
+    """
+    machine = enroller if enroller is not None else enroll.Enroller(config_dir, owner=owner)
+
+    def run() -> None:
+        while not stop.is_set():
+            state = machine.step()
+            events.put(("enroll", state))
+            if isinstance(state, enroll.Ready):
+                return
+            if stop.wait(machine.delay):
+                return
+
+    t = threading.Thread(target=run, name="enrollment", daemon=True)
+    t.start()
+    return t
+
+
 def should_blank(now: float, last_update: float, state: GameState | None, blank_after_s: float) -> bool:
     """Decide whether the panel should go dark.
 
@@ -111,6 +138,14 @@ def main() -> None:
             log.error("%s", e)
             sys.exit(1)
     events: queue.Queue = queue.Queue()
+    enroll_state = None
+    enroll_stop = threading.Event()
+    if cfg is None and not fixture:
+        # The owner line rides on the boot partition beside the Wi-Fi settings,
+        # so the code this panel asks for is claimable by that person alone.
+        owner = owner_hint()
+        log.info("no identity yet; enrolling%s", " for a named owner" if owner else "")
+        enrollment_thread(default_config_dir(), owner, events, enroll_stop)
     link = None
     if cfg:
         link = Link(cfg.endpoint, cfg.client_id, cfg.cert, cfg.key, cfg.ca,
@@ -262,6 +297,18 @@ def main() -> None:
                 elif kind == "brightness":
                     brightness = {1.0: 0.6, 0.6: 0.3}.get(brightness, 1.0)
                     last_update = time.time()  # a button press counts as activity too
+                elif kind == "enroll":
+                    enroll_state = item[1]
+                    if isinstance(enroll_state, enroll.Ready):
+                        # Config, Link and the display were all built at startup
+                        # from an identity that did not exist then. Restarting is
+                        # how they pick it up: systemd's Restart=always brings the
+                        # panel straight back, now provisioned. Cheaper and far
+                        # less error-prone than rebuilding half of main() in place.
+                        log.info("registered; restarting into the scoreboard")
+                        enroll_stop.set()
+                        pygame.quit()
+                        sys.exit(0)
             now_ms = int(time.time() * 1000)
             # While MQTT is connected there is demonstrably a network, so the
             # scoreboard path costs no nmcli calls at all. Only a panel that
@@ -282,8 +329,14 @@ def main() -> None:
             if panel is not None:
                 screens.draw_settings(frame, assets, panel, status, build)
             else:
-                showing = screens.screen_for(cfg is not None or bool(fixture), net_ok or bool(fixture))
-                if showing == screens.UNREGISTERED:
+                showing = screens.screen_for(cfg is not None or bool(fixture),
+                                             net_ok or bool(fixture), enroll_state)
+                if showing == screens.WAITING:
+                    screens.draw_waiting(frame, assets, enroll_state.display,
+                                         enroll.SITE, enroll_state.owner, build)
+                elif showing == screens.ENROLL_PROBLEM:
+                    screens.draw_enroll_problem(frame, assets, enroll_state.detail, build)
+                elif showing == screens.UNREGISTERED:
                     screens.draw_unregistered(frame, assets, build)
                 elif showing == screens.OFFLINE:
                     screens.draw_offline(frame, assets, build)

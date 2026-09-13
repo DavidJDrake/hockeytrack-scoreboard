@@ -164,3 +164,50 @@ def test_an_unregistered_panel_reaches_the_display_instead_of_exiting(tmp_path):
                           cwd=Path(__file__).resolve().parents[1],
                           env=env, capture_output=True, text=True, timeout=60)
     assert done.returncode == EX_CONFIG
+
+
+def test_the_enrollment_thread_reports_each_state_and_stops_when_ready(tmp_path):
+    import queue
+    import threading
+    from scoreboard import enroll, main as m
+
+    class Scripted:
+        def __init__(self):
+            self.delay = 0
+            self._steps = [enroll.Waiting("7K4M-9QX2", 0, None),
+                           enroll.Problem("down"),
+                           enroll.Ready("scoreboard-abc123")]
+
+        def step(self):
+            return self._steps.pop(0)
+
+    events: queue.Queue = queue.Queue()
+    stop = threading.Event()
+    t = m.enrollment_thread(tmp_path, None, events, stop, enroller=Scripted())
+    t.join(timeout=5)
+    assert not t.is_alive(), "the thread must stop once the panel is claimed"
+    seen = []
+    while not events.empty():
+        seen.append(events.get())
+    assert [kind for kind, _ in seen] == ["enroll", "enroll", "enroll"]
+    assert isinstance(seen[-1][1], enroll.Ready)
+
+
+def test_the_enrollment_thread_stops_when_asked(tmp_path):
+    import queue
+    import threading
+    from scoreboard import enroll, main as m
+
+    class Forever:
+        delay = 0
+
+        def step(self):
+            return enroll.Waiting("7K4M-9QX2", 0, None)
+
+    events: queue.Queue = queue.Queue()
+    stop = threading.Event()
+    t = m.enrollment_thread(tmp_path, None, events, stop, enroller=Forever())
+    events.get(timeout=5)
+    stop.set()
+    t.join(timeout=5)
+    assert not t.is_alive()
