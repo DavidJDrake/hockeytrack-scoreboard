@@ -281,7 +281,7 @@ paragraph beginning "The CSP is deliberately wider than hockeytrack's" with:
 # require-trusted-types-for 'script' makes assigning a string to an HTML sink
 # such as innerHTML throw, in browsers that implement Trusted Types. The site
 # never does that; this turns "never does" into "cannot", where supported.
-# site/tests/app.test.js enforces the same rule everywhere else.
+# site/tests/view.test.js enforces the same rule everywhere else.
 ```
 
 - [ ] **Step 5: Hand `index.html` from Terraform to `make site`, without taking the site down**
