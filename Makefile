@@ -52,8 +52,18 @@ test-py:
 # The site has no dependencies and no build step, so its test runner is Node's
 # own: nothing to install and nothing to audit. Node is found on PATH; under
 # nvm that means running make from a shell that has loaded it.
+#
+# Two things gate a deploy here, and neither alone is the whole story. No
+# test imports app.js -- it touches the DOM on load, and the test runner has
+# none -- so `node --check` parses it (and every other file under assets/)
+# for a syntax error first, failing on the first one found. `--check` does
+# not resolve imports, though, so tests/imports.test.js separately confirms
+# every name app.js imports from another module is actually exported by it.
+# Together this catches a broken or drifted app.js before it ships; it is
+# not a substitute for the module-level tests the other test files run.
 test-js:
 	@command -v node >/dev/null || { echo "node not found on PATH; the site's tests need Node 22 or later"; exit 1; }
+	cd site && for f in assets/*.js; do node --check "$$f" || exit 1; done
 	cd site && node --test tests/*.test.js
 
 fmt:
