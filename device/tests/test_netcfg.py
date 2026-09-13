@@ -94,6 +94,52 @@ def test_consume_removes_the_password(tmp_path):
     assert parse_wifi_file(left) is None
 
 
+def test_owner_line_is_read_from_the_setup_file():
+    assert netcfg.parse_owner("ssid=Home\nowner=friend@example.com\n") == "friend@example.com"
+
+
+def test_owner_is_optional_and_its_absence_is_not_an_error():
+    assert netcfg.parse_owner("ssid=Home\npsk=password123\n") is None
+    assert netcfg.parse_owner("") is None
+
+
+def test_owner_is_read_the_same_forgiving_way_as_the_wifi_lines():
+    # Written in Notepad on a FAT partition: BOM, CRLF, stray spaces, any case.
+    text = "\ufeffSSID=Home\r\n  Owner = Friend@Example.com  \r\n"
+    assert netcfg.parse_owner(text) == "Friend@Example.com"
+
+
+def test_applying_wifi_keeps_the_owner_line(tmp_path):
+    # consume() wipes the password, which is the point. It must not wipe the
+    # owner: the panel may not enroll until a later boot, and after a factory
+    # reset this file is the only record of who the card belongs to.
+    path = tmp_path / "scoreboard-setup.txt"
+    path.write_text("ssid=Home\npsk=password123\nowner=friend@example.com\n")
+
+    class FakeNM:
+        def apply(self, settings): self.applied = settings
+
+    assert netcfg.apply_boot_file(path, nm=FakeNM(), now=lambda: "2026-09-13 10:00 UTC") is True
+    left = path.read_text()
+    assert "password123" not in left
+    assert netcfg.parse_owner(left) == "friend@example.com"
+
+
+def test_the_legacy_wifi_filename_is_still_read(tmp_path):
+    legacy = tmp_path / "scoreboard-wifi.txt"
+    legacy.write_text("ssid=Home\n")
+    chosen = netcfg.boot_file(primary=tmp_path / "scoreboard-setup.txt", legacy=legacy)
+    assert chosen == legacy
+
+
+def test_the_new_filename_wins_when_both_exist(tmp_path):
+    primary = tmp_path / "scoreboard-setup.txt"
+    primary.write_text("ssid=New\n")
+    legacy = tmp_path / "scoreboard-wifi.txt"
+    legacy.write_text("ssid=Old\n")
+    assert netcfg.boot_file(primary=primary, legacy=legacy) == primary
+
+
 from scoreboard.netcfg import (NetworkManager, NetworkError, Network, Status,
                                split_terse, apply_boot_file)
 
@@ -256,7 +302,7 @@ def test_apply_boot_file_warns_but_still_succeeds_when_the_file_cannot_be_cleare
     path = tmp_path / "scoreboard-wifi.txt"
     path.write_text("ssid=HomeNet\npsk=supersecret\n")
 
-    def consume_that_fails(_path, _when):
+    def consume_that_fails(_path, _when, _owner=None):
         raise OSError("Read-only file system")
 
     monkeypatch.setattr(netcfg, "consume", consume_that_fails)

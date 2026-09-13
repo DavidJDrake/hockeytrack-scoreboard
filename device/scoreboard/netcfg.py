@@ -16,7 +16,12 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-BOOT_FILE = Path("/boot/firmware/scoreboard-wifi.txt")
+BOOT_FILE = Path("/boot/firmware/scoreboard-setup.txt")
+# The name this file had when it carried only Wi-Fi. Cards written before the
+# rename still work: a panel that refused to read the file the user was told
+# to write last month is a support call, and the file's contents are
+# unambiguous either way.
+LEGACY_BOOT_FILE = Path("/boot/firmware/scoreboard-wifi.txt")
 MAX_SSID_BYTES = 32
 MIN_PSK_CHARS, MAX_PSK_CHARS = 8, 63
 
@@ -27,6 +32,60 @@ class WifiSettings:
     psk: str | None = None
     country: str | None = None
     hidden: bool = False
+
+
+def _values(text: str) -> dict[str, str]:
+    """Key/value lines from a file a person typed on a FAT partition.
+
+    A UTF-8 BOM is stripped, CRLF is handled, surrounding whitespace is
+    ignored, keys are case-insensitive, and only the first '=' separates so
+    a password may contain more.
+    """
+    if text.startswith("\ufeff"):
+        text = text[1:]
+    values: dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        values[key.strip().lower()] = value.strip()
+    return values
+
+
+def parse_owner(text: str) -> str | None:
+    """Who this panel belongs to, if the card says.
+
+    Never raises. An absent or empty owner line is a normal state: the panel
+    enrolls without a hint and its code is claimable by any invited user. Case
+    is preserved rather than folded -- the server normalizes before hashing,
+    and a mangled address here would silently produce a code its owner cannot
+    claim.
+    """
+    return _values(text).get("owner") or None
+
+
+def boot_file(primary: Path = BOOT_FILE, legacy: Path = LEGACY_BOOT_FILE) -> Path:
+    """The setup file to read. The new name wins; the old one is a fallback."""
+    if primary.exists():
+        return primary
+    if legacy.exists():
+        return legacy
+    return primary
+
+
+def owner_hint(path: Path | None = None) -> str | None:
+    """The owner line from the boot partition, or None.
+
+    Unreadable file, unreadable bytes, no owner line -- all None. Nothing
+    about enrollment should fail because of what somebody typed here.
+    """
+    target = boot_file() if path is None else path
+    try:
+        text = target.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    return parse_owner(text)
 
 
 def parse_wifi_file(text: str) -> WifiSettings | None:
@@ -41,15 +100,7 @@ def parse_wifi_file(text: str) -> WifiSettings | None:
     ignored, keys are case-insensitive, and only the first '=' separates so
     a password may contain more.
     """
-    if text.startswith("\ufeff"):
-        text = text[1:]
-    values: dict[str, str] = {}
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        values[key.strip().lower()] = value.strip()
+    values = _values(text)
 
     ssid = values.get("ssid", "")
     if not ssid:
@@ -78,24 +129,31 @@ def parse_wifi_file(text: str) -> WifiSettings | None:
     )
 
 
-def consume(path: Path, when: str) -> None:
+def consume(path: Path, when: str, owner: str | None = None) -> None:
     """Replace the file with a note saying it was applied.
 
     The password is now in NetworkManager's own store, root-owned on the
     root partition. Leaving a copy here would mean a cleartext Wi-Fi
     password living permanently on the one partition every operating system
     mounts automatically when the card is plugged in.
+
+    The owner line is deliberately kept. It is not a secret in the way a
+    password is -- it is the address of the person holding the card -- and
+    the panel may not enroll until a later boot, or may be factory reset,
+    at which point this file is the only record of who it belongs to.
     """
+    kept = f"owner={owner}\n\n" if owner else ""
     path.write_text(
-        f"# Applied by the scoreboard on {when}.\n"
+        kept +
+        f"# Wi-Fi settings applied by the scoreboard on {when}.\n"
         "#\n"
         "# The network details that were here are stored on the device now, and\n"
         "# have been removed from this file, which any computer can read.\n"
         "#\n"
-        "# To change networks, replace all of this with:\n"
+        "# To change networks, replace the lines below with:\n"
         "#   ssid=YourNetworkName\n"
         "#   psk=YourWiFiPassword\n"
-        "# and reboot the panel.\n"
+        "# and reboot the panel. Leave the owner line alone.\n"
     )
 
 
@@ -277,7 +335,7 @@ def apply_boot_file(path: Path = BOOT_FILE, nm: "NetworkManager | None" = None, 
     manager.apply(settings)
     stamp = now() if now is not None else datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     try:
-        consume(path, stamp)
+        consume(path, stamp, parse_owner(text))
     except OSError:
         # The connect succeeded, but the file could not be rewritten -- most
         # realistically a /boot/firmware remounted read-only after an unclean
