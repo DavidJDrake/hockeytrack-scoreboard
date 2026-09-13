@@ -78,6 +78,36 @@ func reasonFailed(reasons []types.CancellationReason, i int) bool {
 	return i < len(reasons) && aws.ToString(reasons[i].Code) == "ConditionalCheckFailed"
 }
 
+// rotateError turns a failed RotateCode transaction into the right sentinel.
+// The indices are the positions in RotateCode's TransactItems and they are
+// load-bearing: 1 is the new code reservation, 2 is the enrollment update.
+// Index 2 is checked first because "already claimed" is terminal -- the
+// caller must stop -- while "code taken" is retryable, and on a double
+// failure the caller needs the answer that ends the loop. Nothing here
+// checks that RotateCode actually built its TransactItems in this order --
+// the comment on that slice is the only thing enforcing it, so keep this in
+// sync if a future change reorders or adds items there.
+func rotateError(err error) error {
+	const (
+		newReservation   = 1
+		enrollmentUpdate = 2
+	)
+	var canceled *types.TransactionCanceledException
+	if errors.As(err, &canceled) {
+		if reasonFailed(canceled.CancellationReasons, enrollmentUpdate) {
+			return ErrAlreadyClaimed
+		}
+		if reasonFailed(canceled.CancellationReasons, newReservation) {
+			return ErrCodeTaken
+		}
+		return err
+	}
+	if conditionFailed(err) {
+		return ErrCodeTaken
+	}
+	return err
+}
+
 func (x *Dynamo) Create(ctx context.Context, p Pending) error {
 	if p.ExpiresAt == 0 {
 		return errors.New("enroll: an enrollment needs an expiry")
@@ -152,24 +182,7 @@ func (x *Dynamo) RotateCode(ctx context.Context, tokenHash, newCodeHash string, 
 	if err == nil {
 		return nil
 	}
-	// TransactWriteItems reports failures as TransactionCanceledException
-	// with one CancellationReason per TransactItem, in submission order.
-	// Check index 2 (already claimed) before index 1 (code taken): if both
-	// somehow failed at once, "stop, there is nothing to rotate" is the more
-	// correct answer than "try another code."
-	var canceled *types.TransactionCanceledException
-	if errors.As(err, &canceled) {
-		if reasonFailed(canceled.CancellationReasons, 2) {
-			return ErrAlreadyClaimed
-		}
-		if reasonFailed(canceled.CancellationReasons, 1) {
-			return ErrCodeTaken
-		}
-	}
-	if conditionFailed(err) {
-		return ErrCodeTaken
-	}
-	return err
+	return rotateError(err)
 }
 
 func (x *Dynamo) ByTokenHash(ctx context.Context, tokenHash string) (Pending, bool, error) {
