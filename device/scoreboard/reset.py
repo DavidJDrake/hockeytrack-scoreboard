@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 IDENTITY_FILES = ("device.json", "device.pem.crt", "private.pem.key",
-                  "AmazonRootCA1.pem", "state.json")
+                  "AmazonRootCA1.pem", "state.json", "enrollment.json")
 
 
 def factory_reset(config_dir: Path, nm) -> None:

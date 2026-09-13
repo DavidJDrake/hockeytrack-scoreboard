@@ -43,7 +43,7 @@ SAFE_ERRORS = {
 }
 
 
-def carry_out(panel: Settings, nm, cfg) -> Status | None:
+def carry_out(panel: Settings, nm, cfg, enroll_stop: threading.Event | None = None) -> Status | None:
     """Do whatever the settings screen's ``pending`` request asked for.
 
     Only NetworkError's text is safe to put on the screen: netcfg builds it
@@ -62,6 +62,15 @@ def carry_out(panel: Settings, nm, cfg) -> Status | None:
             panel.done(f"Connected to {payload.ssid}")
             connected = True
         elif what == "reset":
+            # Before anything else: a still-running Enroller holds this
+            # panel's collection token in memory, and a reset deletes the
+            # private key it was going to install a certificate for
+            # (identity_files now includes enrollment.json, but the thread's
+            # in-memory state outlives that file). Stopping it here, ahead of
+            # the delete, is what keeps the next successful poll from
+            # writing a certificate for a key that no longer exists (I-1).
+            if enroll_stop is not None:
+                enroll_stop.set()
             factory_reset(cfg.state_file.parent if cfg else default_config_dir(), nm)
             panel.done("Panel erased. Reboot to start again.")
     except NetworkError as e:
@@ -269,6 +278,7 @@ def main() -> None:
                 log.warning("both buttons held: factory reset")
                 if panel is None:
                     panel = Settings()
+                enroll_stop.set()  # see carry_out's reset branch: same hazard, same fix
                 try:
                     factory_reset(cfg.state_file.parent if cfg else default_config_dir(), nm)
                     panel.done("Panel erased. Reboot to start again.")
@@ -332,7 +342,7 @@ def main() -> None:
                     log.debug("network status unavailable: %s", e)
                     net_ok = False
             if panel is not None and panel.pending is not None:
-                new_status = carry_out(panel, nm, cfg)
+                new_status = carry_out(panel, nm, cfg, enroll_stop)
                 if new_status is not None:
                     status = new_status
             if panel is not None:

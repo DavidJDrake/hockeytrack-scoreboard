@@ -3,6 +3,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pygame
+
 from scoreboard import main as main_module
 from scoreboard.display import EX_CONFIG
 from scoreboard.main import carry_out, should_blank
@@ -214,5 +216,39 @@ def test_the_enrollment_thread_stops_when_asked(tmp_path):
     t = m.enrollment_thread(tmp_path, None, events, stop, enroller=Forever())
     events.get(timeout=5)
     stop.set()
+    t.join(timeout=5)
+    assert not t.is_alive()
+
+
+def test_a_factory_reset_stops_the_enrollment_thread(tmp_path):
+    # I-1, the main.py side: before this, carry_out's "reset" branch never
+    # touched the enrollment thread at all, so a still-running Enroller kept
+    # polling with the token reset just made unusable and, on its next
+    # success, would install a certificate for a private key that no longer
+    # existed. If the thread is not stopped here, this test hangs on join.
+    import queue
+    import threading
+    from scoreboard import enroll, main as m
+
+    class FakeNM:
+        def forget_all(self):
+            pass
+
+    class Forever:
+        delay = 0
+
+        def step(self):
+            return enroll.Waiting("7K4M-9QX2", 0, None)
+
+    events: queue.Queue = queue.Queue()
+    stop = threading.Event()
+    t = m.enrollment_thread(tmp_path, None, events, stop, enroller=Forever())
+    events.get(timeout=5)  # the thread has started and taken at least one step
+
+    panel = Settings(networks=[])
+    panel.pending = ("reset", None)
+    m.carry_out(panel, FakeNM(), cfg=None, enroll_stop=stop)
+
+    assert stop.is_set()
     t.join(timeout=5)
     assert not t.is_alive()
