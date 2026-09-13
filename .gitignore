@@ -20,5 +20,7 @@ __pycache__/
 
 # Written by `make site-config` from terraform outputs. Nothing in it is a
 # secret -- the API URL, the Cognito domain and a public client ID -- but a
-# generated file does not belong in version control.
+# generated file does not belong in version control. The .tmp file is the
+# recipe's own staging file, moved into place only once it is complete.
 site/config.json
+site/config.json.tmp

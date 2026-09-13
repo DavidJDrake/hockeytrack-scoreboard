@@ -59,15 +59,42 @@ test-js:
 fmt:
 	cd cloud && gofmt -l . && test -z "$$(gofmt -l .)"
 
-# The admin site's runtime settings, taken from the stack itself so the page
-# can never point at an API or a Cognito domain the stack does not have.
+# The admin site's runtime settings, taken from the stack itself. Each output
+# is captured on its own, so a failed `terraform output` fails this recipe
+# instead of being swallowed by printf's exit status; each captured value is
+# then checked non-empty, so a renamed or not-yet-applied output is refused
+# by name instead of shipping a page that silently can't reach anything. The
+# JSON is built by python3 (already assumed by site-local) with real
+# escaping, and written to a temp file that is only moved into place once
+# it is complete, so a failed run never leaves a truncated or empty
+# config.json behind.
 site-config:
-	cd terraform && printf '{\n  "apiBase": "%s",\n  "cognitoDomain": "%s",\n  "clientId": "%s"\n}\n' \
-	  "$$(terraform output -raw api_endpoint)" \
-	  "$$(terraform output -raw cognito_domain)" \
-	  "$$(terraform output -raw user_pool_client_id)" > ../site/config.json
+	cd terraform && api=$$(terraform output -raw api_endpoint) \
+	  && domain=$$(terraform output -raw cognito_domain) \
+	  && client=$$(terraform output -raw user_pool_client_id) \
+	  && { [ -n "$$api" ] || { echo "site-config: terraform output api_endpoint is empty" >&2; exit 1; }; } \
+	  && { [ -n "$$domain" ] || { echo "site-config: terraform output cognito_domain is empty" >&2; exit 1; }; } \
+	  && { [ -n "$$client" ] || { echo "site-config: terraform output user_pool_client_id is empty" >&2; exit 1; }; } \
+	  && API_ENDPOINT="$$api" COGNITO_DOMAIN="$$domain" CLIENT_ID="$$client" python3 -c \
+	    'import json, os; print(json.dumps({"apiBase": os.environ["API_ENDPOINT"], "cognitoDomain": os.environ["COGNITO_DOMAIN"], "clientId": os.environ["CLIENT_ID"]}, indent=2))' \
+	    > ../site/config.json.tmp \
+	  && mv ../site/config.json.tmp ../site/config.json
 
-# Upload the admin site. Tests first, so a broken page cannot ship.
+# Upload the admin site. test-js gates the JavaScript (see its own comment
+# for exactly what that covers); site-config gates the runtime settings.
+#
+# The bucket and distribution are resolved once, up front, and refused if
+# either comes back empty -- the whole sequence below is one &&-chain, so a
+# failure at any step (including resolving those two values) stops
+# everything after it rather than running the remaining aws calls against
+# an empty bucket name.
+#
+# Upload order matters: fonts, then the other assets, then config.json,
+# then the root sync -- which carries index.html -- last, and the
+# invalidation after that. index.html references the other three, so it
+# must never be live before they are; publishing it first would let
+# CloudFront serve or even cache a 403 for a visitor who lands between the
+# two syncs.
 #
 # Cache lifetimes differ from HockeyTrack's on purpose. Its assets are cached
 # for a day; these are five minutes, because this site's JavaScript carries the
@@ -75,20 +102,27 @@ site-config:
 # promptly. config.json is never cached. Fonts never change and are immutable.
 # tests/, package.json and config.json are excluded from the main sync --
 # excluded files are also exempt from --delete, so the separate config.json
-# upload is not removed by it.
+# upload is not removed by it. Every sync also excludes dotfiles and editor
+# backups, so a stray .DS_Store, ~-file, .bak or .swp under site/ never
+# becomes public.
+DOTFILE_EXCLUDES := --exclude '.*' --exclude '*/.*' --exclude '*~' --exclude '*.bak' --exclude '*.swp'
 site: test-js site-config
-	aws s3 sync site/ s3://$$(cd terraform && terraform output -raw site_bucket)/ --exclude 'assets/*' --exclude 'tests/*' --exclude 'package.json' --exclude 'config.json' --delete --cache-control 'public, max-age=300' --region $(REGION)
-	aws s3 cp site/config.json s3://$$(cd terraform && terraform output -raw site_bucket)/config.json --cache-control 'no-store' --content-type 'application/json' --region $(REGION)
-	aws s3 sync site/assets/ s3://$$(cd terraform && terraform output -raw site_bucket)/assets/ --exclude 'fonts/*' --delete --cache-control 'public, max-age=300' --region $(REGION)
-	aws s3 sync site/assets/fonts/ s3://$$(cd terraform && terraform output -raw site_bucket)/assets/fonts/ --delete --cache-control 'public, max-age=31536000, immutable' --content-type 'font/woff2' --region $(REGION)
-	aws cloudfront create-invalidation --distribution-id $$(cd terraform && terraform output -raw site_distribution_id) --paths '/*' --query 'Invalidation.Id' --output text
+	bucket=$$(cd terraform && terraform output -raw site_bucket) \
+	  && dist=$$(cd terraform && terraform output -raw site_distribution_id) \
+	  && { [ -n "$$bucket" ] || { echo "site: terraform output site_bucket is empty" >&2; exit 1; }; } \
+	  && { [ -n "$$dist" ] || { echo "site: terraform output site_distribution_id is empty" >&2; exit 1; }; } \
+	  && aws s3 sync site/assets/fonts/ s3://$$bucket/assets/fonts/ $(DOTFILE_EXCLUDES) --delete --cache-control 'public, max-age=31536000, immutable' --content-type 'font/woff2' --region $(REGION) \
+	  && aws s3 sync site/assets/ s3://$$bucket/assets/ --exclude 'fonts/*' $(DOTFILE_EXCLUDES) --delete --cache-control 'public, max-age=300' --region $(REGION) \
+	  && aws s3 cp site/config.json s3://$$bucket/config.json --cache-control 'no-store' --content-type 'application/json' --region $(REGION) \
+	  && aws s3 sync site/ s3://$$bucket/ --exclude 'assets/*' --exclude 'tests/*' --exclude 'package.json' --exclude 'config.json' $(DOTFILE_EXCLUDES) --delete --cache-control 'public, max-age=300' --region $(REGION) \
+	  && aws cloudfront create-invalidation --distribution-id $$dist --paths '/*' --query 'Invalidation.Id' --output text
 
-# Serve the site locally on the one non-production callback URL Cognito
-# accepts. Sign-in works here; API calls do not, because the API's CORS admits
-# only the production origin, and widening production CORS for a development
-# convenience is the wrong trade.
+# Serve the site locally on 127.0.0.1 -- nothing it serves is secret, but a
+# dev server has no reason to listen on the LAN. Browse http://localhost:8000,
+# not 127.0.0.1:8000: Cognito's hosted UI has localhost, not 127.0.0.1,
+# registered as a callback URL, so the redirect_uri would not match.
 site-local: site-config
-	cd site && python3 -m http.server 8000
+	cd site && python3 -m http.server --bind 127.0.0.1 8000
 
 # Lambda zips: static arm64 binaries named `bootstrap` for provided.al2023,
 # zipped with python3's zipfile module (no `zip` binary on this machine).
