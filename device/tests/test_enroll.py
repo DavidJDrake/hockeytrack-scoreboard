@@ -118,6 +118,27 @@ def test_a_claim_reply_missing_a_field_is_a_problem_not_a_crash(tmp_path):
     assert not (tmp_path / "device.json").exists()
 
 
+def test_a_created_reply_missing_the_token_is_a_problem_not_a_crash(tmp_path):
+    # C-1, round 2: the inner try/except in _poll's 200 branch only guards
+    # that one subscript. This one pins the outer except (KeyError, ValueError)
+    # in step(), which is the only thing guarding _submit()'s unguarded
+    # out["token"]/out["display"]. By the time this 201 arrives the server
+    # has already created a pending row, so a crash here leaks it until its
+    # 24-hour TTL rather than surfacing as a retryable Problem.
+    incomplete_created = (201, {"code": "CCCCCCCC", "display": "CCCC-CCCC"})  # no token
+    state = enroll.Enroller(tmp_path, transport=FakeAPI(incomplete_created)).step()
+    assert isinstance(state, enroll.Problem)
+
+
+def test_a_malformed_json_body_is_a_problem_not_a_crash(tmp_path):
+    # C-1, round 2: json.JSONDecodeError subclasses ValueError, which is
+    # exactly why step()'s outer except names it. Driven through the
+    # transport seam rather than real bytes through urllib.
+    api = FakeAPI(json.JSONDecodeError("Expecting value", "", 0))
+    state = enroll.Enroller(tmp_path, transport=api).step()
+    assert isinstance(state, enroll.Problem)
+
+
 def test_the_token_file_is_not_group_or_world_readable(tmp_path):
     # I-3: the token is a secret written to an SD card in a stranger's house;
     # the file mode is its only protection.
