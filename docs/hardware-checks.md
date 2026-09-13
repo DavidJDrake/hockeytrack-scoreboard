@@ -103,9 +103,10 @@ lists exactly this as untestable in CI.
 0. Signed in as the owner, use *Download setup file* rather than writing
    `scoreboard-setup.txt` by hand. This also checks the file the site writes
    is one the panel reads.
-1. Flash a card. Write `scoreboard-setup.txt` on the boot partition with
-   `ssid=`, `psk=` and `owner=` set to the email address of a user who exists
-   in the Cognito pool.
+1. Flash a card. Copy the file downloaded in step 0 onto the boot partition
+   as `scoreboard-setup.txt`, and fill in `ssid=` and `psk=` for the network
+   the panel will join. `owner=` is already set, to the signed-in owner's
+   address — leave it as the site wrote it.
 2. Boot with the panel connected. Within about a minute it should show
    **Add this panel at scoreboard.davidjdrake.com**, a code in the form
    `XXXX-XXXX`, and `Waiting for <that address>`.
@@ -123,6 +124,15 @@ lists exactly this as untestable in CI.
    **`enrollment.json` gone**.
 7. Confirm in the AWS console that the thing exists, has one certificate, and
    that the certificate has the `scoreboard-device` policy attached.
+8. Sign in, then leave the tab open and idle for over an hour before touching
+   a panel control. Expect a fresh sign-in through Cognito's hosted UI, not a
+   broken page — Cognito's hosted-UI session cookie is roughly as long-lived
+   as the ID token, about one hour, and the refresh token that could silently
+   extend it is discarded by design. This is also the first real observation
+   of whether API Gateway's JWT authorizer sends CORS headers on its own 401
+   responses: if it does not, the browser reports the call as unreachable
+   rather than unauthorized, and re-auth does not fire the way it does for a
+   client-side token expiry.
 
 **The one to watch:** step 5 is the first time `Dynamo.ByCodeHash` runs against
 real DynamoDB. It has no test coverage and neither alarm would catch an

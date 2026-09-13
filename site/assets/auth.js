@@ -2,10 +2,16 @@
 //
 // The ID token lives in memory only -- never localStorage or sessionStorage --
 // so it does not survive a tab close, and no script that manages to run on this
-// page can read one back out of storage. Two values DO cross the redirect in
-// sessionStorage, and neither is a token: the PKCE verifier and the state.
-// Both are single-use, deleted the moment the callback reads them, and useless
-// without the one-time authorization code they are bound to.
+// page can read one back out of storage. Three keys go into sessionStorage,
+// and none of them is a token:
+//   - scoreboard.signin holds the PKCE verifier and the state value together,
+//     as one JSON object. Both are single-use, deleted the moment the
+//     callback reads them, and useless without the one-time authorization
+//     code they are bound to.
+//   - scoreboard.signedIn is a flag, not a credential: it tells a page
+//     reload to go back through Cognito rather than showing signed out.
+//   - scoreboard.reauthAt is a timestamp, used only to rate-limit automatic
+//     re-authentication.
 
 const PENDING_KEY = "scoreboard.signin";
 const SIGNED_IN_KEY = "scoreboard.signedIn"; // a flag, not a credential
@@ -101,8 +107,13 @@ export async function completeSignIn(cfg, { url, storage, fetchImpl = globalThis
   const body = await resp.json();
   if (!body || typeof body.id_token !== "string") throw new SignInError("sign-in could not be completed");
   // The access and refresh tokens in `body` are deliberately not kept. The
-  // API is called with the ID token, and renewal is Cognito's own session
-  // cookie, reached by sending the browser back through the hosted UI.
+  // API is called with the ID token, and renewal is reached by sending the
+  // browser back through the hosted UI while Cognito's own session cookie is
+  // still valid. That cookie lasts about as long as the ID token itself --
+  // roughly one hour -- and the 30-day refresh token this page discards is
+  // what would otherwise extend it, so a session here is effectively about
+  // one hour: a tab left open past that usually lands on Cognito's login
+  // form rather than renewing silently.
   storage.setItem(SIGNED_IN_KEY, "1");
   const lifetimeMs = (Number(body.expires_in) || 3600) * 1000;
   return new Session(body.id_token, Date.now() + lifetimeMs);
@@ -124,9 +135,14 @@ export class Session {
 }
 
 // Decodes, and does NOT verify. That is fine for what this page uses it for --
-// showing the signed-in address and writing it into a setup file -- because
-// the token came straight from Cognito's token endpoint over TLS, and the API
-// verifies it properly on every call. Never use these claims to decide what
+// showing the signed-in address, writing it into a setup file, and reading
+// email_verified to decide whether to *offer* a download -- because the
+// token came straight from Cognito's token endpoint over TLS. The
+// email_verified check here is a convenience only: it saves an unverified
+// user a wasted download, nothing more. It is not access control, and it is
+// not the check that matters -- cloud/cmd/enroll/handler.go re-checks
+// email_verified server-side before honoring a claim, and the API verifies
+// the token properly on every call. Never use these claims to decide what
 // the user may do.
 export function claimsOf(jwt) {
   const part = String(jwt).split(".")[1] ?? "";

@@ -1,8 +1,11 @@
 // The admin page's DOM layer. It builds every element with createElement and
-// text nodes and never turns a string into markup -- the CSP's
-// require-trusted-types-for enforces that where browsers support it, and
-// view.test.js enforces it everywhere. Anything worth testing belongs in
-// auth.js, api.js, setupfile.js or view.js; this file only wires them up.
+// text nodes and never turns a string into markup. view.test.js's sink scan
+// is a tripwire against an honest mistake, in every browser -- it is not a
+// wall, and it does not see every sink (a computed property access,
+// DOMParser, createContextualFragment, srcdoc, setHTMLUnsafe). The CSP's
+// require-trusted-types-for is the wall, and only in browsers that
+// implement Trusted Types. Anything worth testing belongs in auth.js,
+// api.js, setupfile.js or view.js; this file only wires them up.
 import { beginSignIn, completeSignIn, forgetSignIn, logoutUrl, mayReauth, wasSignedIn } from "./auth.js";
 import { ApiError, createApi } from "./api.js";
 import { SETUP_FILE_NAME, SetupFileError, setupFileFor } from "./setupfile.js";

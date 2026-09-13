@@ -51,9 +51,13 @@ and §10.1 (this plan), and `docs/superpowers/specs/2026-09-07-admin-site-design
 - **Nothing turns a string into markup.** No `.innerHTML`, `.outerHTML`,
   `insertAdjacentHTML`, `document.write`, `eval` or `new Function` anywhere in
   `site/assets/`. Every element is built with `document.createElement` and text
-  nodes. The CSP adds `require-trusted-types-for 'script'` as a structural
-  backstop, and a test enforces the rule in every browser, including the ones
-  that do not implement Trusted Types.
+  nodes. A test is a tripwire against an honest mistake, in every browser --
+  it is not a wall, and its regex does not see every sink (a computed
+  property access, `DOMParser`, `createContextualFragment`, `srcdoc`,
+  `setHTMLUnsafe`). The CSP's `require-trusted-types-for 'script'` is the
+  wall, and only in browsers that implement Trusted Types; `trusted-types
+  'none'` stops a script from registering a permissive `default` policy that
+  would hand those sinks back their old, unchecked behavior.
 - **The server's error text is never shown.** Every failure maps from its HTTP
   status to a fixed message in `view.js`. A 404 on a claim reads identically
   whatever the cause, preserving the API's 404-never-403 property.
@@ -1985,9 +1989,14 @@ Order matters, because the page's claim and the CSP both depend on the stack:
 1. `terraform apply` — this lands plan 1's enrollment stack if it has not
    landed yet, Task 1's CSP, the `cognito_domain` output, and the `removed`
    block that hands `index.html` over without deleting the holding page.
-2. `make site` — tests, config, upload, invalidation.
-3. Confirm the live CSP names the hosted-UI domain:
+2. Confirm the live CSP names the hosted-UI domain, and wait until it does
+   before going on to `make site`:
    `curl -sI https://scoreboard.davidjdrake.com/ | grep -i content-security-policy`.
+   The response-headers policy update from step 1 propagates to CloudFront's
+   edges after `apply` returns, not the instant it does, so this can need a
+   few retries. Deploying the real page under the old `connect-src` would
+   block the token exchange for whoever hits a stale edge.
+3. `make site` — tests, config, upload, invalidation.
 4. Sign in once, end to end, before anyone else does.
 
 **Tickets this plan generates rather than fixes:** Cognito's hosted UI is
