@@ -18,7 +18,8 @@ Spec: `docs/superpowers/specs/2026-09-12-device-image-design.md`
 
 H4, H5 and H6 need an image, so they belong to B2. H1, H2, H3 and H7 can be run
 as soon as this plan is installed on a Pi. H8 needs the enrollment path this
-plan builds, plus a Cognito user to claim with.
+plan builds, plus two invited Google accounts: the owner's, and a second one
+for step 4.
 
 ## H1 — systemd hardening against kmsdrm
 
@@ -113,7 +114,9 @@ lists exactly this as untestable in CI.
 3. Leave it for twenty minutes without claiming it. The code must change. The
    old one must then be refused.
 4. Sign in at https://scoreboard.davidjdrake.com **as a different invited
-   user** and type the code into *Claim a panel*. Expect "No panel is waiting
+   user** — a second Google account, added to the invite list for this check
+   and taken off it afterwards — and type the code into *Claim a panel*.
+   Expect "No panel is waiting
    for you with that code…" — the same message a mistyped code gets, so the
    page reveals nothing about whether the code was real.
 5. Sign out, sign in as the owner, and claim it. The panel should appear in
@@ -125,10 +128,12 @@ lists exactly this as untestable in CI.
 7. Confirm in the AWS console that the thing exists, has one certificate, and
    that the certificate has the `scoreboard-device` policy attached.
 8. Sign in, then leave the tab open and idle for over an hour before touching
-   a panel control. Expect a fresh sign-in through Cognito's hosted UI, not a
-   broken page — Cognito's hosted-UI session cookie is roughly as long-lived
-   as the ID token, about one hour, and the refresh token that could silently
-   extend it is discarded by design. This is also the first real observation
+   a panel control. Expect a trip back through Cognito and Google, not a
+   broken page. Google usually returns at once without asking anything, though
+   it may show its account chooser. Cognito's hosted-UI session cookie is
+   roughly as long-lived as the ID token, about one hour, and the refresh
+   token that could silently extend it is discarded by design. This is also
+   the first real observation
    of whether API Gateway's JWT authorizer sends CORS headers on its own 401
    responses: if it does not, the browser reports the call as unreachable
    rather than unauthorized, and re-auth does not fire the way it does for a

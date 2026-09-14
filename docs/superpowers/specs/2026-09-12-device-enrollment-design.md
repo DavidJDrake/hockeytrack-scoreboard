@@ -368,6 +368,10 @@ read as one.
 
 ### 10.1 Tokens in the browser
 
+> **Amended 2026-09-13** by `2026-09-13-google-sign-in-design.md`. The hosted
+> UI now hands sign-in to Google, so a silent re-authentication passes through
+> Google's session as well as Cognito's. Nothing else in this section changes.
+
 This deserves its own treatment because it is where a security-minded reader
 will look hardest.
 
