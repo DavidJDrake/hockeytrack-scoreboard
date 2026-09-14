@@ -102,12 +102,14 @@ function failuresTerms() {
   const filter = code(block(signin, 'resource "aws_cloudwatch_log_metric_filter" "authgate_failures" {'));
   const m = filter.match(/pattern\s*=\s*"((?:[^"\\]|\\.)*)"/);
   assert.ok(m, "authgate_failures pattern not found");
-  return [...m[1].replace(/\\"/g, '"').matchAll(/\?"([^"]+)"/g)].map((t) => t[1]);
+  const pattern = m[1].replace(/\\"/g, '"');
+  assert.match(pattern, /^\s*(\?"[^"]+"\s*)+$/, 'every term in the failures pattern must be ?"quoted" so this test can check it');
+  return [...pattern.matchAll(/\?"([^"]+)"/g)].map((t) => t[1]);
 }
 
 test("the crash filter watches the runtime's own failure lines", () => {
   const terms = failuresTerms();
-  for (const want of ["Runtime.ExitError", "Status: timeout", "panic:"]) {
+  for (const want of ["Runtime.ExitError", "Status: timeout", "panic:", "resulted in a panic"]) {
     assert.ok(terms.includes(want), `failures pattern lacks "${want}"`);
   }
 });
@@ -134,6 +136,6 @@ test("every alarm keeps the prefix HockeyTrack watches for rewriting", () => {
   const names = readdirSync(dir)
     .filter((f) => f.endsWith(".tf"))
     .flatMap((f) => [...code(readFileSync(new URL(f, dir), "utf8")).matchAll(/alarm_name\s*=\s*"([^"]+)"/g)].map((m) => m[1]));
-  assert.ok(names.length >= 11, `found only ${names.length} alarm names`);
+  assert.ok(names.length >= 13, `found only ${names.length} alarm names`);
   for (const n of names) assert.ok(n.startsWith("scoreboard-"), `alarm "${n}" lacks the scoreboard- prefix`);
 });

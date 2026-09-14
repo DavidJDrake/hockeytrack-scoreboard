@@ -202,15 +202,16 @@ resource "aws_cloudwatch_metric_alarm" "signin_refused" {
 #
 #   Runtime.ExitError, Runtime exited   the process died, including at startup
 #   Status: error, Status: timeout      the platform's verdict on the invocation
-#   Task timed out                      the older wording for a timeout
-#   panic:                              a Go panic's own first line
+#   Task timed out                      the timeout's own line
+#   resulted in a panic                 a handler panic: aws-lambda-go recovers it, logs it, then exits with this line
+#   panic:                              a panic outside the handler, which Go prints itself
 #
 # One failure can write several of these lines, so the metric counts lines, not
 # failures. The threshold is one.
 resource "aws_cloudwatch_log_metric_filter" "authgate_failures" {
   name           = "scoreboard-authgate-failures"
   log_group_name = aws_cloudwatch_log_group.authgate.name
-  pattern        = "?\"Runtime.ExitError\" ?\"Runtime exited\" ?\"Status: error\" ?\"Status: timeout\" ?\"Task timed out\" ?\"panic:\""
+  pattern        = "?\"Runtime.ExitError\" ?\"Runtime exited\" ?\"Status: error\" ?\"Status: timeout\" ?\"Task timed out\" ?\"panic:\" ?\"resulted in a panic\""
 
   metric_transformation {
     name      = "AuthgateFailures"
@@ -242,7 +243,7 @@ resource "aws_cloudwatch_metric_alarm" "authgate_failures" {
 # A throttled invocation never starts, so it writes no log line at all, and
 # Lambda counts it in neither Invocations nor Errors. Only this metric sees it.
 # The function has no reserved concurrency, so a throttle means the account's
-# concurrency is exhausted, or someone set this function's to zero.
+# concurrency is exhausted, or someone set a reserved concurrency on it.
 resource "aws_cloudwatch_metric_alarm" "authgate_throttles" {
   alarm_name          = "scoreboard-authgate-throttles"
   comparison_operator = "GreaterThanOrEqualToThreshold"
