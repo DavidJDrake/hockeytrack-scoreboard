@@ -32,8 +32,11 @@ resource "aws_ssm_parameter" "allowed_emails" {
   type        = "String"
   value       = join(",", var.invited_emails)
 
-  # Terraform seeds this once and then keeps its hands off, so no apply can
-  # quietly undo an invitation or reinstate someone who was removed.
+  # Terraform seeds this once and then leaves the value alone: no apply
+  # changes it in place, so none can quietly undo an invitation or reinstate
+  # someone who was removed. A replacement is the exception -- it would reseed
+  # the list from invited_emails -- and it shows as -/+ in a plan, which the
+  # deploy task treats as stop-and-investigate.
   lifecycle {
     ignore_changes = [value]
   }

@@ -56,7 +56,10 @@ test("Google is asked for the verified flag the gate depends on", () => {
   assert.match(idp, /authorize_scopes\s*=\s*"openid email"/);
 });
 
-test("Terraform can never overwrite the invite list", () => {
+// ignore_changes stops an apply from changing the value in place. It does not
+// survive a replacement, which would reseed the list from the variable; that
+// shows as -/+ in a plan, and the deploy task treats it as stop-and-investigate.
+test("an apply cannot change the invite list in place", () => {
   const param = code(block(signin, 'resource "aws_ssm_parameter" "allowed_emails" {'));
   assert.match(param, /ignore_changes\s*=\s*\[\s*value\s*\]/);
 });

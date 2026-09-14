@@ -136,8 +136,11 @@ resource "aws_cognito_user_pool_client" "site" {
   # allowed_oauth_scopes above grants only openid and email, so no token this
   # client issues can make that call. That scope must never be added. Behind
   # it, the pool still refuses to write a new email before it is verified
-  # (user_attribute_update_settings), Google overwrites the mapped email at
-  # every sign-in, and ownerMatches still requires email_verified.
+  # (user_attribute_update_settings), Cognito updates the mapped email from
+  # Google at sign-in whenever Google's value differs (AWS documents that for
+  # IdP attribute mapping, but not how it combines with that update setting,
+  # which nothing here has observed), and ownerMatches still requires
+  # email_verified.
   #
   # If a real profile-editing feature is ever added, give it its own client --
   # not this one.

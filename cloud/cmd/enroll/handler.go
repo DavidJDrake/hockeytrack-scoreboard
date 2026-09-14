@@ -254,8 +254,10 @@ func ownerMatches(p enroll.Pending, req events.APIGatewayV2HTTPRequest) bool {
 		return false
 	}
 	claims := req.RequestContext.Authorizer.JWT.Claims
-	// cognito:username is a UUID nobody could have typed into a file, so the
-	// comparison is against what a person would actually write.
+	// cognito:username is Google_ followed by Google's account ID for these
+	// accounts (username maps from sub, terraform/signin.tf) -- not something
+	// anyone would type into a setup file -- so the comparison is against what
+	// a person would actually write.
 	if u := claims["cognito:username"]; u != "" && enroll.HashSecret(enroll.NormalizeOwner(u)) == p.OwnerHintHash {
 		return true
 	}

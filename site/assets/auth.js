@@ -115,8 +115,8 @@ export async function completeSignIn(cfg, { url, storage, fetchImpl = globalThis
   // still valid. That cookie lasts about as long as the ID token itself --
   // roughly one hour -- and the 30-day refresh token this page discards is
   // what would otherwise extend it, so a session here is effectively about
-  // one hour: a tab left open past that usually lands on Cognito's login
-  // form rather than renewing silently.
+  // one hour: a tab left open past that usually goes back through Google's
+  // sign-in rather than renewing silently.
   storage.setItem(SIGNED_IN_KEY, "1");
   const lifetimeMs = (Number(body.expires_in) || 3600) * 1000;
   return new Session(body.id_token, Date.now() + lifetimeMs);
