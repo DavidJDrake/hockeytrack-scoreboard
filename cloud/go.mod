@@ -10,6 +10,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.67.0
 	github.com/aws/aws-sdk-go-v2/service/iot v1.84.0
 	github.com/aws/aws-sdk-go-v2/service/iotdataplane v1.39.0
+	github.com/aws/aws-sdk-go-v2/service/ssm v1.78.0
 )
 
 require (

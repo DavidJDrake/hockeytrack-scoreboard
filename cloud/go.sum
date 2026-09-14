@@ -32,6 +32,8 @@ github.com/aws/aws-sdk-go-v2/service/iotdataplane v1.39.0 h1:ho0A9ecy+L6+Mphagtf
 github.com/aws/aws-sdk-go-v2/service/iotdataplane v1.39.0/go.mod h1:0TxCH3xHTgFOqc5swdJCqlRZsmz5xiMt6K6rrwuy0ws=
 github.com/aws/aws-sdk-go-v2/service/signin v1.9.0 h1:c3k+k/CS4L+sAIH6fxikL+g5g2LpeNczaoyjjw1iMKI=
 github.com/aws/aws-sdk-go-v2/service/signin v1.9.0/go.mod h1:AGIoQg99fBrOIQnF78TLx4lj18mc4gZ0hJx1UaLIFM4=
+github.com/aws/aws-sdk-go-v2/service/ssm v1.78.0 h1:+a7gfPhZYdFvMxKwbC51PljAo4L/cdzg2tmtMusRkDE=
+github.com/aws/aws-sdk-go-v2/service/ssm v1.78.0/go.mod h1:sCtehdCzGR2L4tFbPq6qnfqX1A86h2Hna8fU10VuTaA=
 github.com/aws/aws-sdk-go-v2/service/sso v1.37.0 h1:+rqBaOq7jzInjY8M12hr+zEe85JpRll9BjMx38r33Ok=
 github.com/aws/aws-sdk-go-v2/service/sso v1.37.0/go.mod h1:XFlVwUsw3sYh8Hw37umYVJnrcWrwXWRxbNw/JY0bblw=
 github.com/aws/aws-sdk-go-v2/service/ssooidc v1.42.0 h1:hzM3GslEAOBcLn3DHH6ENToFi+vXP+n02W+x6zejAIM=
