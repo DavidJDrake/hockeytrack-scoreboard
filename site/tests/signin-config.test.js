@@ -74,8 +74,9 @@ test("the client can record the address Google sends", () => {
   const m = client.match(/write_attributes\s*=\s*\[([^\]]*)\]/);
   assert.ok(m, "write_attributes not found");
   const attrs = m[1].split(",").map((s) => s.trim()).filter(Boolean);
-  assert.ok(attrs.includes('"email"'), "write_attributes must include email");
-  assert.ok(attrs.includes('"email_verified"'), "write_attributes must include email_verified");
+  // Exactly email: Cognito rejects email_verified here, and anything more
+  // widens what a future self-service scope could reach.
+  assert.deepEqual(attrs, ['"email"']);
 });
 
 test("no token from the site's client can rewrite its own attributes", () => {

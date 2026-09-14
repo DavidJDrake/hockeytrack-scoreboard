@@ -123,9 +123,14 @@ resource "aws_cognito_user_pool_client" "site" {
   # Cognito only records an attribute mapped from an identity provider if the
   # app client can write it; otherwise it silently drops the value and signs
   # the user in anyway (AWS's documented behavior for IdP attribute mapping).
-  # email and email_verified are mapped from Google (signin.tf), and both the
-  # authgate gate and enroll's ownerMatches depend on them being present, so
-  # they must be listed here. The list must never be empty -- write_attributes
+  # email is mapped from Google (signin.tf), and both the authgate gate and
+  # enroll's ownerMatches depend on it being present, so it must be listed
+  # here. email_verified is mapped too, but cannot be: Cognito rejects it in
+  # WriteAttributes ("Invalid write attributes specified"), because it is not
+  # one of the standard attributes a client may be granted. Whether Google's
+  # verified flag still reaches the gate without it is observed at the first
+  # real sign-in; if it does not, the gate refuses, which fails closed. The
+  # list must never be empty -- write_attributes
   # is Optional+Computed, so an empty list is indistinguishable from omitting
   # the argument entirely, and the provider then leaves Cognito's default
   # writable set, which is every standard attribute.
@@ -140,11 +145,11 @@ resource "aws_cognito_user_pool_client" "site" {
   # Google at sign-in whenever Google's value differs (AWS documents that for
   # IdP attribute mapping, but not how it combines with that update setting,
   # which nothing here has observed), and ownerMatches still requires
-  # email_verified.
+  # email_verified, which no client can write at all.
   #
   # If a real profile-editing feature is ever added, give it its own client --
   # not this one.
-  write_attributes = ["email", "email_verified"]
+  write_attributes = ["email"]
 
   # Without this, AWS defaults new clients to LEGACY, which makes sign-in
   # error messages tell an unauthenticated caller whether a given email has

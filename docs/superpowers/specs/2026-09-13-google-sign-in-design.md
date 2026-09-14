@@ -121,8 +121,10 @@ defaults to us-east-2, where the parameter does not exist.
   `explicit_auth_flows = ["ALLOW_REFRESH_TOKEN_AUTH"]`, which removes
   `ALLOW_USER_SRP_AUTH`, the last password path on the client; and a
   `depends_on` on the identity provider. `write_attributes` becomes
-  `["email", "email_verified"]`, because Cognito silently drops a value an
-  identity provider maps to an attribute the client cannot write. Self-service
+  `["email"]`, because Cognito silently drops a value an identity provider maps
+  to an attribute the client cannot write. `email_verified` cannot be listed:
+  the first apply showed Cognito rejects it (`Invalid write attributes
+  specified`), since it is not a standard attribute a client may be granted. Self-service
   writes to those same attributes stay closed anyway, because the client's
   `allowed_oauth_scopes` excludes `aws.cognito.signin.user.admin`, so none of
   its tokens can call `UpdateUserAttributes`.

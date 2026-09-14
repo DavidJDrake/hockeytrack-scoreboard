@@ -1647,7 +1647,7 @@ If the pool shows a perpetual `pre_token_generation` diff alongside `pre_token_g
 A clean plan proves the state matches the code; these read the settings back from Cognito and Lambda themselves. All read-only. The client ID comes from `terraform output -raw user_pool_client_id`, run in `terraform/`.
 
 1. `aws cognito-idp describe-user-pool-client --region us-east-1 --user-pool-id us-east-1_xJ6aWqZfR --client-id <client ID> --query '{flows:ExplicitAuthFlows,idps:SupportedIdentityProviders,write:WriteAttributes,scopes:AllowedOAuthScopes}'`
-   Expected: `flows` is exactly `["ALLOW_REFRESH_TOKEN_AUTH"]`; `idps` is exactly `["Google"]`; `write` holds `email` and `email_verified` and nothing else; `scopes` holds `openid` and `email` and nothing else. Order within a list does not matter.
+   Expected: `flows` is exactly `["ALLOW_REFRESH_TOKEN_AUTH"]`; `idps` is exactly `["Google"]`; `write` is exactly `["email"]` (Cognito rejects `email_verified` there); `scopes` holds `openid` and `email` and nothing else. Order within a list does not matter.
 2. `aws cognito-idp describe-user-pool --region us-east-1 --user-pool-id us-east-1_xJ6aWqZfR --query 'UserPool.{lambda:LambdaConfig,admin:AdminCreateUserConfig}'`
    Expected: `lambda` names the `scoreboard-authgate` ARN as `PreSignUp`, and as `PreTokenGenerationConfig.LambdaArn` with `LambdaVersion` `V1_0` (Cognito may also echo it as `PreTokenGeneration`); no other trigger. `admin.AllowAdminCreateUserOnly` is `true`.
 3. `aws cognito-idp list-user-pool-clients --region us-east-1 --user-pool-id us-east-1_xJ6aWqZfR --query 'length(UserPoolClients)'`
