@@ -80,8 +80,8 @@ broken dependency must never be the reason a stranger gets in.
 
 **The allowlist is cached for 60 seconds** per warm instance, as in LitLibrary,
 so a burst of sign-ins does not become a burst of SSM reads. Removing someone
-therefore takes effect within a minute, plus the life of any ID token they
-already hold (at most one hour).
+therefore takes effect within a minute, plus the remaining life of tokens they
+already hold (ID and access tokens last one hour; a refresh is re-checked).
 
 **Refusals are logged without the address:** the trigger source, the reason,
 and the email's domain. A stranger's full email address is personal data this
@@ -139,7 +139,7 @@ discover it.
 ### 4.5 Alarm
 
 A CloudWatch metric filter counts refusals, and an alarm notifies the existing
-security SNS topic when refusals reach **3 or more in an hour**. A stranger
+`security_alerts` SNS topic when refusals reach **3 or more in an hour**. A stranger
 trying once is noise; repeated attempts are worth knowing about.
 
 ## 5. Differences from LitLibrary, and why
@@ -161,9 +161,10 @@ trying once is noise; repeated attempts are worth knowing about.
 - Google Cloud project `hockeytrack-scoreboard`, consent screen, and a Web
   OAuth client whose redirect URI is
   `https://scoreboard-admin-989232581535.auth.us-east-1.amazoncognito.com/oauth2/idpresponse`.
-- The client secret stored in Secrets Manager and the downloaded copy shredded.
-  A first secret was copied to the clipboard by mistake; it was disabled and
-  deleted, so the live secret has never been on a clipboard.
+- The client secret stored in Secrets Manager from a downloaded JSON file, and
+  that file removed. A first secret was copied to the clipboard by mistake; it
+  was disabled and deleted before anything used it, and the secret in use
+  replaced it.
 - The owner added as the one Google test user.
 
 **Still to do, in order:**
