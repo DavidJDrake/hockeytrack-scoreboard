@@ -94,11 +94,19 @@ event_pattern = jsonencode({
       { "requestParameters" = { "resource"     = [{ "wildcard" = "*:function:scoreboard-authgate*" }] } },
       { "requestParameters" = { "name"         = ["/scoreboard/allowed-emails"] } },
       { "requestParameters" = { "names"        = ["/scoreboard/allowed-emails"] } },
+      { "requestParameters" = { "resourceId"   = ["/scoreboard/allowed-emails"] } },
+      { "requestParameters" = { "resourceArn"  = [local.scoreboard_pool_arn, local.allowlist_parameter_arn] } },
     ]
   }
 })
 ```
 
+- **Fields from the service models, not only from observed events.** Planning
+  swept every non-read operation in the cognito-idp, lambda and ssm service
+  models (aws-cli 2.33.2) for input fields that name these resources, and found
+  three the observed events did not show: Cognito tagging's `resourceArn` (the
+  pool), SSM tagging's `resourceId` and SSM resource policies' `resourceArn`
+  (the parameter). They are in the pattern.
 - **No event-name list.** A misspelled CloudTrail name cannot hide a route, and
   an API AWS adds later alerts the first time it is used. That is the same
   fail-loud reasoning as the IoT rule, and it sidesteps the `$or`
