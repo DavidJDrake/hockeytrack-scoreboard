@@ -110,8 +110,9 @@ resource "aws_cognito_user_pool_client" "site" {
   generate_secret                      = false
   allowed_oauth_flows                  = ["code"]
   allowed_oauth_flows_user_pool_client = true
-  allowed_oauth_scopes                 = ["openid", "email"]
-  supported_identity_providers         = [aws_cognito_identity_provider.google.provider_name]
+  # Never add aws.cognito.signin.user.admin here; see write_attributes below.
+  allowed_oauth_scopes         = ["openid", "email"]
+  supported_identity_providers = [aws_cognito_identity_provider.google.provider_name]
 
   # No password flow of any kind, SRP included: with Google as the only way
   # in, the one thing a caller may do with this client directly is exchange a
@@ -119,21 +120,28 @@ resource "aws_cognito_user_pool_client" "site" {
   # default for a client with none is to allow SRP and custom auth.
   explicit_auth_flows = ["ALLOW_REFRESH_TOKEN_AUTH"]
 
-  # NOT empty -- the provider's write_attributes is Optional+Computed, so an
-  # empty list is indistinguishable from omitting the argument entirely: the
-  # provider leaves whatever the API already has, which is Cognito's default
-  # writable set, and that default includes email. "name" is a placeholder
-  # standard attribute with no meaning to this app; it exists only so this
-  # list is non-empty and therefore actually replaces the default. The point
-  # is what is missing: nothing on the site lets a signed-in user edit their
-  # own profile, and this pool's enroll flow trusts a caller's email claim to
-  # decide who owns a pre-bound panel (see ownerMatches,
-  # cloud/cmd/enroll/handler.go). A client that could write email would let
-  # any invited user set their own email to the owner's address and claim
-  # someone else's panel. If a real profile-editing feature is ever added,
-  # replace "name" with exactly the attributes it needs -- never email, and
-  # never an empty list.
-  write_attributes = ["name"]
+  # Cognito only records an attribute mapped from an identity provider if the
+  # app client can write it; otherwise it silently drops the value and signs
+  # the user in anyway (AWS's documented behavior for IdP attribute mapping).
+  # email and email_verified are mapped from Google (signin.tf), and both the
+  # authgate gate and enroll's ownerMatches depend on them being present, so
+  # they must be listed here. The list must never be empty -- write_attributes
+  # is Optional+Computed, so an empty list is indistinguishable from omitting
+  # the argument entirely, and the provider then leaves Cognito's default
+  # writable set, which is every standard attribute.
+  #
+  # This does not reopen the door it once took two attributes to hold shut:
+  # writing an attribute yourself means calling UpdateUserAttributes with an
+  # access token carrying the aws.cognito.signin.user.admin scope, and
+  # allowed_oauth_scopes above grants only openid and email, so no token this
+  # client issues can make that call. That scope must never be added. Behind
+  # it, the pool still refuses to write a new email before it is verified
+  # (user_attribute_update_settings), Google overwrites the mapped email at
+  # every sign-in, and ownerMatches still requires email_verified.
+  #
+  # If a real profile-editing feature is ever added, give it its own client --
+  # not this one.
+  write_attributes = ["email", "email_verified"]
 
   # Without this, AWS defaults new clients to LEGACY, which makes sign-in
   # error messages tell an unauthenticated caller whether a given email has

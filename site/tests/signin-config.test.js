@@ -65,3 +65,19 @@ test("no invited address is committed as a default", () => {
   const variable = code(block(signin, 'variable "invited_emails" {'));
   assert.doesNotMatch(variable, /default\s*=/);
 });
+
+test("the client can record the address Google sends", () => {
+  const client = code(block(admin, 'resource "aws_cognito_user_pool_client" "site" {'));
+  const m = client.match(/write_attributes\s*=\s*\[([^\]]*)\]/);
+  assert.ok(m, "write_attributes not found");
+  const attrs = m[1].split(",").map((s) => s.trim()).filter(Boolean);
+  assert.ok(attrs.includes('"email"'), "write_attributes must include email");
+  assert.ok(attrs.includes('"email_verified"'), "write_attributes must include email_verified");
+});
+
+test("no token from the site's client can rewrite its own attributes", () => {
+  const client = code(block(admin, 'resource "aws_cognito_user_pool_client" "site" {'));
+  const m = client.match(/allowed_oauth_scopes\s*=\s*\[([^\]]*)\]/);
+  assert.ok(m, "allowed_oauth_scopes not found");
+  assert.deepEqual(m[1].split(",").map((s) => s.trim()).filter(Boolean), ['"openid"', '"email"']);
+});

@@ -119,7 +119,12 @@ defaults to us-east-2, where the parameter does not exist.
 - The app client: `supported_identity_providers = ["Google"]` only;
   `explicit_auth_flows = ["ALLOW_REFRESH_TOKEN_AUTH"]`, which removes
   `ALLOW_USER_SRP_AUTH`, the last password path on the client; and a
-  `depends_on` on the identity provider.
+  `depends_on` on the identity provider. `write_attributes` becomes
+  `["email", "email_verified"]`, because Cognito silently drops a value an
+  identity provider maps to an attribute the client cannot write. Self-service
+  writes to those same attributes stay closed anyway, because the client's
+  `allowed_oauth_scopes` excludes `aws.cognito.signin.user.admin`, so none of
+  its tokens can call `UpdateUserAttributes`.
 
 **Terraform stores the Google client secret in state.** LitLibrary's CDK passes
 it to CloudFormation by dynamic reference; Terraform has no equivalent here. The

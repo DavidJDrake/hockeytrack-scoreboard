@@ -275,9 +275,13 @@ func ownerMatches(p enroll.Pending, req events.APIGatewayV2HTTPRequest) bool {
 	//     not, and the verification mail goes to the owner;
 	//   - this check, which is what keeps a misconfigured or reverted pool
 	//     safe and costs one comparison;
-	//   - write_attributes on the site client (admin.tf), which stops the
-	//     attempt earlier still but is defense in depth, not the load-bearing
-	//     control.
+	//   - the site client's OAuth scopes (admin.tf), which exclude
+	//     aws.cognito.signin.user.admin, so no token it issues can call
+	//     UpdateUserAttributes at all -- the earliest of the three to stop the
+	//     attempt, but still defense in depth, not the load-bearing control.
+	//     (write_attributes on that client must list email and
+	//     email_verified regardless, so Cognito records what Google sends;
+	//     it is not what stops a self-service rewrite.)
 	//
 	// The exact string API Gateway's JWT authorizer flattens the boolean
 	// email_verified claim into cannot be confirmed without a real token;
