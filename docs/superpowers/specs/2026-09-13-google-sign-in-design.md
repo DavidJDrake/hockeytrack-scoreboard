@@ -163,6 +163,11 @@ trying once is noise; repeated attempts are worth knowing about.
 
 ### 4.6 Known gaps
 
+> **Both closed 2026-09-14** by `2026-09-14-signin-detection-design.md`: a
+> HockeyTrack rule pages on any write naming the pool, the function or the
+> invite list, and this stack alarms on the gate crashing or being throttled.
+> The text below is kept as the record of what was open at deploy.
+
 - **Nothing pages on a change to the gate itself.** Writes to
   `/scoreboard/allowed-emails`, to the pool's `lambda_config`, clients or
   identity providers, and to the `scoreboard-authgate` function all go

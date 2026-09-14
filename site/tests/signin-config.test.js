@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 
 // Sign-in lives in Terraform, but a regression there is a regression in who
 // can reach this site, so -- like csp.test.js -- its tripwires run with the
@@ -84,4 +84,56 @@ test("no token from the site's client can rewrite its own attributes", () => {
   const m = client.match(/allowed_oauth_scopes\s*=\s*\[([^\]]*)\]/);
   assert.ok(m, "allowed_oauth_scopes not found");
   assert.deepEqual(m[1].split(",").map((s) => s.trim()).filter(Boolean), ['"openid"', '"email"']);
+});
+
+// The gate refuses by returning an error, so Lambda's Errors metric counts
+// every refusal and cannot tell a crash from a stranger. The failures filter
+// matches only lines the Lambda runtime writes when the function itself fails.
+// These lines are what a refusal really writes, taken from the live log
+// group on 2026-09-14 (address and request ID replaced). If any term of the
+// filter occurs in one of them, the alarm would page on every refusal.
+const refusalLines = [
+  '2026/09/14 22:25:42 WARN sign-in refused trigger=PreSignUp_ExternalProvider reason="not invited" domain=example.com',
+  '2026/09/14 22:25:42 {"errorMessage":"this account is not invited","errorType":"errorString"}',
+  "REPORT RequestId: 00000000-0000-0000-0000-000000000000\tDuration: 1.31 ms\tBilled Duration: 2 ms\tMemory Size: 128 MB\tMax Memory Used: 41 MB",
+];
+
+function failuresTerms() {
+  const filter = code(block(signin, 'resource "aws_cloudwatch_log_metric_filter" "authgate_failures" {'));
+  const m = filter.match(/pattern\s*=\s*"((?:[^"\\]|\\.)*)"/);
+  assert.ok(m, "authgate_failures pattern not found");
+  return [...m[1].replace(/\\"/g, '"').matchAll(/\?"([^"]+)"/g)].map((t) => t[1]);
+}
+
+test("the crash filter watches the runtime's own failure lines", () => {
+  const terms = failuresTerms();
+  for (const want of ["Runtime.ExitError", "Status: timeout", "panic:"]) {
+    assert.ok(terms.includes(want), `failures pattern lacks "${want}"`);
+  }
+});
+
+test("the crash filter never matches what a refusal writes", () => {
+  for (const line of refusalLines) {
+    for (const term of failuresTerms()) {
+      assert.ok(!line.includes(term), `"${term}" occurs in a refusal line: ${line}`);
+    }
+  }
+});
+
+test("the gate's crash and throttle alarms notify the security topic", () => {
+  for (const name of ["authgate_failures", "authgate_throttles"]) {
+    const alarm = code(block(signin, `resource "aws_cloudwatch_metric_alarm" "${name}" {`));
+    assert.match(alarm, /alarm_actions\s*=\s*\[data\.aws_sns_topic\.security_alerts\.arn\]/);
+  }
+});
+
+// HockeyTrack's rewrite-detection rule finds this stack's security alarms by
+// the "scoreboard-" prefix. An alarm without it can be silently rewritten.
+test("every alarm keeps the prefix HockeyTrack watches for rewriting", () => {
+  const dir = new URL("../../terraform/", import.meta.url);
+  const names = readdirSync(dir)
+    .filter((f) => f.endsWith(".tf"))
+    .flatMap((f) => [...code(readFileSync(new URL(f, dir), "utf8")).matchAll(/alarm_name\s*=\s*"([^"]+)"/g)].map((m) => m[1]));
+  assert.ok(names.length >= 11, `found only ${names.length} alarm names`);
+  for (const n of names) assert.ok(n.startsWith("scoreboard-"), `alarm "${n}" lacks the scoreboard- prefix`);
 });
