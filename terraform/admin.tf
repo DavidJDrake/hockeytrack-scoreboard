@@ -32,9 +32,11 @@ resource "aws_dynamodb_table" "devices" {
 resource "aws_cognito_user_pool" "admin" {
   name = "scoreboard-admins"
 
-  # Invite-only: nobody can create their own account. Users are created by the
-  # administrator. An open sign-up form on a hobby project is an invitation to
-  # abuse it, and this project hands panels to family, not to the public.
+  # Invite-only -- but this setting only closes the SignUp operation. It does
+  # not stop a Google account's first sign-in from creating a profile; the
+  # authgate function in lambda_config below does that, by admitting only
+  # invited addresses (signin.tf). This stays true anyway, so the password
+  # sign-up path is shut twice rather than once.
   admin_create_user_config {
     allow_admin_create_user_only = true
   }
@@ -78,6 +80,18 @@ resource "aws_cognito_user_pool" "admin" {
   software_token_mfa_configuration {
     enabled = true
   }
+
+  # Both triggers are the same function, which tells them apart by the
+  # event's triggerSource. V1_0 is the token generation event every Cognito
+  # feature plan offers; the function changes no claims, so it needs nothing
+  # newer.
+  lambda_config {
+    pre_sign_up = aws_lambda_function.authgate.arn
+    pre_token_generation_config {
+      lambda_arn     = aws_lambda_function.authgate.arn
+      lambda_version = "V1_0"
+    }
+  }
 }
 
 resource "aws_cognito_user_pool_domain" "admin" {
@@ -87,7 +101,8 @@ resource "aws_cognito_user_pool_domain" "admin" {
 
 # A public client with no secret: the site is static, so a secret would be
 # readable by anyone who views source. Authorization code with PKCE is the
-# flow that does not need one.
+# flow that does not need one. Google is its only identity provider, so there
+# is no password here to phish, guess or reset.
 resource "aws_cognito_user_pool_client" "site" {
   name         = "scoreboard-site"
   user_pool_id = aws_cognito_user_pool.admin.id
@@ -96,12 +111,13 @@ resource "aws_cognito_user_pool_client" "site" {
   allowed_oauth_flows                  = ["code"]
   allowed_oauth_flows_user_pool_client = true
   allowed_oauth_scopes                 = ["openid", "email"]
-  supported_identity_providers         = ["COGNITO"]
+  supported_identity_providers         = [aws_cognito_identity_provider.google.provider_name]
 
-  # SRP proves a password without sending it, and refresh keeps a session
-  # alive between the two; nothing here needs USER_PASSWORD_AUTH, which
-  # would let a caller submit a password straight to Cognito for guessing.
-  explicit_auth_flows = ["ALLOW_USER_SRP_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"]
+  # No password flow of any kind, SRP included: with Google as the only way
+  # in, the one thing a caller may do with this client directly is exchange a
+  # refresh token. The list cannot simply be left out, because Cognito's
+  # default for a client with none is to allow SRP and custom auth.
+  explicit_auth_flows = ["ALLOW_REFRESH_TOKEN_AUTH"]
 
   # NOT empty -- the provider's write_attributes is Optional+Computed, so an
   # empty list is indistinguishable from omitting the argument entirely: the
