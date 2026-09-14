@@ -203,15 +203,20 @@ trying once is noise; repeated attempts are worth knowing about.
   replaced it.
 - The owner added as the one Google test user.
 
-**Still to do, in order:**
+**Done at deploy, 2026-09-14,** in this order (results in §9):
 1. Delete the email/password account created on 2026-09-13
    (`admin-delete-user`). It could not sign in once password flows are off,
    and its email would collide with the owner's Google profile.
 2. `terraform apply`, then `make site`.
 3. The owner signs in with Google, and §8 tests 1, 3 and 5 run.
 4. Complete Google's Branding page — home page, privacy policy link, and both
-   `davidjdrake.com` and `amazoncognito.com` as authorized domains (Google
-   redirects back to Cognito's domain) — and **Publish app**.
+   `davidjdrake.com` and Cognito's full hostname,
+   `scoreboard-admin-989232581535.auth.us-east-1.amazoncognito.com`, as
+   authorized domains — and **Publish app**. The full hostname, not
+   `amazoncognito.com`: `auth.us-east-1.amazoncognito.com` is on the Public
+   Suffix List, so the hostname itself is the registrable domain Google
+   checks. The design text originally said `amazoncognito.com`; the console
+   already held the full hostname, which is correct.
 5. §8 tests 2 and 4. They need the app published: while it is in Testing,
    Google itself turns away any account that is not a listed test user, so an
    uninvited account would never reach Cognito and the gate would go untested.
@@ -249,3 +254,105 @@ verification or a logo.
 4. The alarm fires after three refusals in an hour.
 5. `cognito-idp sign-up` against the client ID is refused (the native path is
    closed at both the client and the trigger).
+
+## 9. Verification record (2026-09-14)
+
+Run from branch `google-sign-in` (PR #9) against the live stack, following the
+plan's Task 5. Addresses and the Google account identifier are left out, and
+log lines keep only the domain the gate logs.
+
+**Two findings from the deploy itself, both fixed in this PR:**
+- **`email_verified` cannot be a write attribute.** The first apply created
+  everything except the client update, which Cognito refused with
+  `InvalidParameterException: Invalid write attributes specified while
+  updating a client`. `write_attributes` became `["email"]`. The half-applied
+  state admitted nobody: the pool had no users, and the gate already refused
+  native sign-up.
+- **Cognito adds six keys to a Google provider's `provider_details`**
+  (`attributes_url`, `attributes_url_add_attributes`, `authorize_url`,
+  `oidc_issuer`, `token_request_method`, `token_url`). Until they were stated in
+  `signin.tf`, every plan wanted to remove them. After both fixes, a plan
+  showed no changes.
+
+**Deployed configuration, read back from AWS, not from Terraform:**
+- **Client:** flows exactly `ALLOW_REFRESH_TOKEN_AUTH`; identity providers
+  exactly `Google`; write attributes exactly `email`; scopes `openid` and
+  `email`; user-existence errors suppressed.
+- **Pool:** `PreSignUp` and `PreTokenGenerationConfig` (`V1_0`) both point at
+  `scoreboard-authgate`, and `AllowAdminCreateUserOnly` is `true`.
+- **Clients:** exactly one in the pool.
+- **Google provider:** maps `email`, `email_verified` and `username` ← `sub`,
+  with scopes `openid email`.
+- **The function's resource policy:** one statement, principal
+  `cognito-idp.amazonaws.com`, conditioned on this pool's ARN.
+
+**§8 tests:**
+1. **The owner signs in: pass.**
+   - The page showed the address and loaded the (empty) panel list.
+   - *Download setup file* was enabled with no "Verify your email address" note,
+     so the ID token carries `email_verified` true.
+   - Cognito holds one user, `Google_<sub>`, status `EXTERNAL_PROVIDER`,
+     `email_verified` `true`.
+   - The gate ran twice (account creation, then tokens) and logged no refusal
+     and no malformed event.
+   - Google's verified flag reached the gate even though no client can write
+     `email_verified`. Mapping it was enough.
+   - **Not exercised:** the server-side owner-hint check (`ownerMatches`). That
+     waits for hardware check H8.
+2. **An uninvited Google account is refused: pass.**
+   - With the app published, a second Google account got
+     `trigger=PreSignUp_ExternalProvider reason="not invited"`. The log carries
+     that account's domain, which is not recorded here.
+   - The pool still holds exactly one user.
+   - **This answers fact 1's inference.** Cognito invoked pre sign-up to create a
+     profile for that account despite `allow_admin_create_user_only = true`. The
+     admin-only setting does not stop federated creation; the trigger is the
+     control.
+3. **Removal ends access: pass.**
+   - The owner was replaced on the list with a placeholder, and 70 seconds
+     passed.
+   - **Reloading the open, signed-in tab without signing out** was refused with
+     "Sign-in could not be completed. Try again." The log showed
+     `trigger=TokenGeneration_HostedAuth reason="not invited" domain=gmail.com`.
+     Cognito's session issued a code, and the token exchange was refused.
+   - **After signing out of Cognito** and signing in through Google: refused the
+     same way, with one refusal line.
+   - **Restoring the list** (the value compared byte for byte against a private
+     saved copy, never printed) and signing in: admitted.
+   - The owner's several attempts produced four refusal lines, one per attempt.
+     Cognito did not retry a refused trigger.
+   - **Not exercised live:** the refresh-token path of the token check. The site
+     discards refresh tokens by design.
+4. **The alarm fires: pass.**
+   - `scoreboard-signin-refused` went to `ALARM` at 22:14 UTC on three refusals,
+     and the security-alerts email arrived.
+   - Its datapoint window ran 21:14–22:14 UTC, a rolling hour, not a clock hour.
+5. **Native sign-up and every password path are refused: pass.**
+   - `sign-up`: `NotAuthorizedException: SignUp is not permitted for this user
+     pool`, rejected before the trigger.
+   - `initiate-auth USER_PASSWORD_AUTH`: `InvalidParameterException:
+     USER_PASSWORD_AUTH flow not enabled for this client`.
+   - `initiate-auth USER_SRP_AUTH`: `InvalidParameterException: USER_SRP_AUTH is
+     not enabled for the client.`
+   - `initiate-auth USER_AUTH`: `NotAuthorizedException: The app client only
+     supports federated authentication through external identity providers.`
+   - The hosted `/login` returned 200 with a Google option only: no form, no
+     username field, no password field.
+   - `/signup` redirected (302) to Cognito's `/error` page.
+
+**Audit log.** CloudTrail recorded all three writes to
+`/scoreboard/allowed-emails` (Terraform's creation, the removal, the
+restore). In each one the `value` is masked, so invite-list addresses do not
+reach the audit log through `PutParameter`. The privacy page still says
+account changes "may include the email address involved", because other
+account changes were not checked.
+
+**Google.** Branding now has the home page and privacy policy links, and
+the authorized domains `davidjdrake.com` and Cognito's full hostname (see §6).
+The app was published "In production" with no verification required: two
+domains, no logo, non-sensitive scopes only.
+
+**Found here, tracked separately:** Google's consent screen names the app by
+Cognito's hostname, including the AWS account ID, because the app's branding
+is unverified. It needs a custom sign-in domain on `davidjdrake.com` and
+Google brand verification. That work is SCO-27.

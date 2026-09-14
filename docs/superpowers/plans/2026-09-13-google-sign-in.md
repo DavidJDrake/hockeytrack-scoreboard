@@ -1646,7 +1646,7 @@ If the pool shows a perpetual `pre_token_generation` diff alongside `pre_token_g
 
 A clean plan proves the state matches the code; these read the settings back from Cognito and Lambda themselves. All read-only. The client ID comes from `terraform output -raw user_pool_client_id`, run in `terraform/`.
 
-1. `aws cognito-idp describe-user-pool-client --region us-east-1 --user-pool-id us-east-1_xJ6aWqZfR --client-id <client ID> --query '{flows:ExplicitAuthFlows,idps:SupportedIdentityProviders,write:WriteAttributes,scopes:AllowedOAuthScopes}'`
+1. `aws cognito-idp describe-user-pool-client --region us-east-1 --user-pool-id us-east-1_xJ6aWqZfR --client-id <client ID> --query 'UserPoolClient.{flows:ExplicitAuthFlows,idps:SupportedIdentityProviders,write:WriteAttributes,scopes:AllowedOAuthScopes}'`
    Expected: `flows` is exactly `["ALLOW_REFRESH_TOKEN_AUTH"]`; `idps` is exactly `["Google"]`; `write` is exactly `["email"]` (Cognito rejects `email_verified` there); `scopes` holds `openid` and `email` and nothing else. Order within a list does not matter.
 2. `aws cognito-idp describe-user-pool --region us-east-1 --user-pool-id us-east-1_xJ6aWqZfR --query 'UserPool.{lambda:LambdaConfig,admin:AdminCreateUserConfig}'`
    Expected: `lambda` names the `scoreboard-authgate` ARN as `PreSignUp`, and as `PreTokenGenerationConfig.LambdaArn` with `LambdaVersion` `V1_0` (Cognito may also echo it as `PreTokenGeneration`); no other trigger. `admin.AllowAdminCreateUserOnly` is `true`.
@@ -1700,7 +1700,7 @@ If sign-in fails, read `aws logs tail /aws/lambda/scoreboard-authgate --region u
 2. The owner signs in and leaves that tab open.
 3. Hand the user: `! aws ssm put-parameter --region us-east-1 --name /scoreboard/allowed-emails --type String --overwrite --value removed@example.invalid`
 4. Wait 70 seconds. **The realistic case first:** the owner does not sign out, and reloads the open tab. The site sends the browser back through sign-in on its own, using the sessions Cognito and Google still hold, so new tokens are requested without the owner signing in again. If Google shows an account chooser, the owner picks their account; record that it appeared. Expected: refused. Accept either "Sign-in did not finish…" (Cognito redirected back with an error) or "Sign-in could not be completed…" (the token exchange failed). Record which message appeared, and the trigger source on the authgate log's refusal line, `reason="not invited" domain=<owner's domain>`.
-5. **Then the sign-out case:** the owner signs out, then signs in. Expected: the page shows "Sign-in did not finish…", and the authgate log shows `trigger=TokenGeneration_HostedAuth reason="not invited" domain=<owner's domain>`.
+5. **Then the sign-out case:** the owner signs out, then signs in. Expected: refused. On 2026-09-14 the page showed "Sign-in could not be completed…" in both cases, because the token check runs when the site exchanges its code, after Cognito and Google have already redirected back; and the authgate log shows `trigger=TokenGeneration_HostedAuth reason="not invited" domain=<owner's domain>`.
 6. Hand the user: `! aws ssm put-parameter --region us-east-1 --name /scoreboard/allowed-emails --type String --overwrite --value "file://<scratchpad>/allowlist-before.txt"`
 7. Wait 70 seconds. The owner signs in. Expected: admitted. Then delete `<scratchpad>/allowlist-before.txt`.
 8. Learn whether invite-list values reach the audit log, printing key names and never a value. CloudTrail can take several minutes to show an event, so if nothing matches, wait five minutes and rerun:
@@ -1722,13 +1722,13 @@ If sign-in fails, read `aws logs tail /aws/lambda/scoreboard-authgate --region u
 In Google Cloud console, project `hockeytrack-scoreboard`, open **Google Auth Platform → Branding**:
 - Application home page: `https://scoreboard.davidjdrake.com/`
 - Application privacy policy link: `https://scoreboard.davidjdrake.com/privacy/`
-- Authorized domains: `davidjdrake.com` and `amazoncognito.com`
+- Authorized domains: `davidjdrake.com` and Cognito's full hostname, `scoreboard-admin-989232581535.auth.us-east-1.amazoncognito.com` (not `amazoncognito.com`: `auth.us-east-1.amazoncognito.com` is a public suffix)
 
 Save. Then open **Audience → Publish app** and confirm. The app requests only `openid` and `email`, which Google treats as non-sensitive scopes, so publishing should not require verification. If Google asks for verification anyway, stop and report what it asks for.
 
 - [ ] **Step 12: Spec §8 tests 2 and 4, a stranger is refused and the alarm fires**
 
-The alarm sums refusals over a 3600-second period, which is likely aligned to the clock hour, so refusals from earlier steps may sit in a different period. Do not count them. Produce three fresh refusals inside one clock hour: if it is less than fifteen minutes to the hour, wait for the hour to turn first.
+The alarm sums refusals over a 3600-second period. On 2026-09-14 it evaluated a rolling hour, not a clock hour (its datapoint window ran 21:14–22:14 UTC), so Step 10's refusals may already have fired it. If the alarm is already in `ALARM` with its email received, test 4 has passed and one stranger attempt is enough for test 2.
 
 1. The user signs in with a Google account that is **not** on the invite list. Use a private window, so the owner's Google session is not reused. Expected: the refusal message on the page; the log shows `trigger=PreSignUp_ExternalProvider reason="not invited"` and the account's domain; `list-users` still shows exactly one user.
 2. The user repeats that attempt twice more from the same private window, inside the same clock hour. Expected: three refusal lines from this step in `aws logs tail /aws/lambda/scoreboard-authgate --region us-east-1 --since 30m`.
