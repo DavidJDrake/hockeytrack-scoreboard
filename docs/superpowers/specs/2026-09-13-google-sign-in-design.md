@@ -98,17 +98,20 @@ creates it once, seeded from a gitignored `terraform.tfvars` variable, with
 made from the CLI (Difference 3, §5). The value never enters this public
 repository.
 
-Invite: `aws ssm put-parameter --name /scoreboard/allowed-emails --type String
---overwrite --value "a@example.com,b@example.com"`. Remove: the same command,
-without the address.
+Invite: `aws ssm put-parameter --region us-east-1 --name /scoreboard/allowed-emails
+--type String --overwrite --value "a@example.com,b@example.com"`. Remove: the same
+command, without the address. The region is explicit because this machine's CLI
+defaults to us-east-2, where the parameter does not exist.
 
 ### 4.3 Cognito
 
 - `aws_cognito_identity_provider` named `Google`: client ID and secret read
   from the Secrets Manager secret, `authorize_scopes = "openid email"`, attribute
   mapping `email`, `email_verified`, and `username ← sub`.
-- The pool gains `lambda_config` for both triggers, plus two
-  `aws_lambda_permission`s scoped to this pool's ARN.
+- The pool gains `lambda_config` for both triggers, plus one
+  `aws_lambda_permission` for `cognito-idp.amazonaws.com`, scoped to this pool's
+  ARN and account. One grant covers both triggers, because both invoke the same
+  function from the same pool.
 - `allow_admin_create_user_only` stays `true` as defense in depth. If §8's
   first real Google sign-in shows it blocks federated creation, the fallback is
   LitLibrary's exact setting, with the trigger as the gate. That is a finding
@@ -172,10 +175,13 @@ trying once is noise; repeated attempts are worth knowing about.
    (`admin-delete-user`). It could not sign in once password flows are off,
    and its email would collide with the owner's Google profile.
 2. `terraform apply`, then `make site`.
-3. Sign in with Google (§8).
-4. Complete Google's Branding page — home page, privacy policy link,
-   `davidjdrake.com` as an authorized domain — and **Publish app**, before
-   inviting anyone else.
+3. The owner signs in with Google, and §8 tests 1, 3 and 5 run.
+4. Complete Google's Branding page — home page, privacy policy link, and both
+   `davidjdrake.com` and `amazoncognito.com` as authorized domains (Google
+   redirects back to Cognito's domain) — and **Publish app**.
+5. §8 tests 2 and 4. They need the app published: while it is in Testing,
+   Google itself turns away any account that is not a listed test user, so an
+   uninvited account would never reach Cognito and the gate would go untested.
 
 ## 7. Out of scope
 
