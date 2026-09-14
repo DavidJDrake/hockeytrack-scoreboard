@@ -162,6 +162,28 @@ func TestTokenGenerationPassesAnInvitedAccountThroughUnchanged(t *testing.T) {
 	}
 }
 
+// The gate reads two fields of a token generation event and no others, so a
+// shape it does not care about must not become a refusal. AWS's example test
+// events for this trigger show preferredRole as an array, which a typed decode
+// into aws-lambda-go's string field rejects -- refusing every sign-in.
+func TestTokenGenerationIgnoresFieldsItDoesNotRead(t *testing.T) {
+	g := newGate(invited)
+	in := json.RawMessage(`{"version":"1","region":"us-east-1","userPoolId":"us-east-1_example",` +
+		`"userName":"Google_117000000000000000000",` +
+		`"callerContext":{"awsSdkVersion":"aws-sdk-unknown-unknown","clientId":"client123"},` +
+		`"triggerSource":"TokenGeneration_HostedAuth",` +
+		`"request":{"userAttributes":{"email":"owner@example.com","email_verified":"true"},` +
+		`"groupConfiguration":{"groupsToOverride":[],"iamRolesToOverride":[],"preferredRole":[]}},` +
+		`"response":{"claimsOverrideDetails":null}}`)
+	out, err := g.Handle(context.Background(), in)
+	if err != nil {
+		t.Fatalf("refused: %v\nlog: %s", err, g.logs)
+	}
+	if !bytes.Equal(out, in) {
+		t.Fatalf("event changed:\n in: %s\nout: %s", in, out)
+	}
+}
+
 func TestTokenGenerationRefusesAnAddressTakenOffTheList(t *testing.T) {
 	g := newGate(invited)
 	if _, err := g.Handle(context.Background(), event(t, "TokenGeneration_HostedAuth", verified(invited))); err != nil {

@@ -80,12 +80,25 @@ func (h *Handler) preSignUp(ctx context.Context, event json.RawMessage) (json.Ra
 	return json.Marshal(ev)
 }
 
+// tokenGenerationEvent is the part of a token generation event the gate reads,
+// and deliberately nothing more. aws-lambda-go's full type also decodes
+// request.groupConfiguration.preferredRole as a string, which is what AWS's
+// syntax reference says it is -- yet the example test events on the same
+// documentation page show it as an array. A field this function never looks at
+// must not be able to turn every sign-in into a refusal.
+type tokenGenerationEvent struct {
+	TriggerSource string `json:"triggerSource"`
+	Request       struct {
+		UserAttributes map[string]string `json:"userAttributes"`
+	} `json:"request"`
+}
+
 // tokenGeneration refuses tokens to an account whose address has since been
 // taken off the invite list. Checking only at sign-up would leave a removed
 // person's account working indefinitely. It changes no claim: the event goes
 // back exactly as it came.
 func (h *Handler) tokenGeneration(ctx context.Context, event json.RawMessage) (json.RawMessage, error) {
-	var ev events.CognitoEventUserPoolsPreTokenGen
+	var ev tokenGenerationEvent
 	if err := json.Unmarshal(event, &ev); err != nil {
 		return h.refuse("", "malformed event", "")
 	}
