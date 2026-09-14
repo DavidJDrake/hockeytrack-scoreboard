@@ -109,9 +109,10 @@ defaults to us-east-2, where the parameter does not exist.
   from the Secrets Manager secret, `authorize_scopes = "openid email"`, attribute
   mapping `email`, `email_verified`, and `username ← sub`.
 - The pool gains `lambda_config` for both triggers, plus one
-  `aws_lambda_permission` for `cognito-idp.amazonaws.com`, scoped to this pool's
-  ARN and account. One grant covers both triggers, because both invoke the same
-  function from the same pool.
+  `aws_lambda_permission` for `cognito-idp.amazonaws.com`, scoped by
+  `source_arn` to this pool's ARN. The ARN already names the account, so there
+  is no separate `source_account`. One grant covers both triggers, because both
+  invoke the same function from the same pool.
 - `allow_admin_create_user_only` stays `true` as defense in depth. If §8's
   first real Google sign-in shows it blocks federated creation, the fallback is
   LitLibrary's exact setting, with the trigger as the gate. That is a finding
@@ -139,16 +140,41 @@ discover it.
 - The button reads **Sign in with Google**. The "Accounts are by invitation"
   line stays.
 - **A privacy policy page at `/privacy/`**, which Google requires before an
-  External app can be published. It says plainly what the site keeps: the email
-  address Google provides, panel names and which account owns which panel, and
-  ordinary AWS service logs. No advertising, no sharing, no sale, and a contact
-  address.
+  External app can be published. It says plainly what the site keeps and for
+  how long: the email address Google provides; panel names and which account
+  owns which panel; a pending panel's owner hint, an unsalted SHA-256 that
+  confirms a correct guess, kept a day plus DynamoDB's few days of TTL lag and
+  up to 35 days of point-in-time-recovery backups; service logs kept 30 days;
+  and the account's CloudTrail audit log, which records Cognito's hosted-UI
+  sign-in requests with source IP and, for some, the user's `sub`, and is kept
+  for a year plus 90 days of noncurrent versions (HockeyTrack's
+  `terraform/cloudtrail.tf`). No advertising, no sharing, no sale.
+- Its contact is the repository's GitHub issues page rather than an email
+  address, so no personal address is published on a public page. The page asks
+  people to leave their address out of the issue.
 
 ### 4.5 Alarm
 
 A CloudWatch metric filter counts refusals, and an alarm notifies the existing
 `security_alerts` SNS topic when refusals reach **3 or more in an hour**. A stranger
 trying once is noise; repeated attempts are worth knowing about.
+
+### 4.6 Known gaps
+
+- **Nothing pages on a change to the gate itself.** Writes to
+  `/scoreboard/allowed-emails`, to the pool's `lambda_config`, clients or
+  identity providers, and to the `scoreboard-authgate` function all go
+  unalerted. The sharpest case: an `UpdateUserPool` that drops the triggers
+  fails open, admitting every Google account, and nobody is told. The fix is an
+  EventBridge rule on those management events, sending to the security-alerts
+  topic, alongside HockeyTrack's account security rules.
+- **A gate that fails without logging is not counted.** A crash, throttle or
+  timeout still refuses the sign-in, but writes no `sign-in refused` line, so
+  `scoreboard-signin-refused` never sees it. The fix is an alarm on the
+  function's Lambda `Errors` metric, which counts crashes and timeouts. A
+  throttled invocation is not an error to Lambda (AWS: throttled requests
+  "don't count as either `Invocations` or `Errors`"), so the same alarm needs
+  `Throttles` beside it.
 
 ## 5. Differences from LitLibrary, and why
 
