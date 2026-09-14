@@ -1610,7 +1610,7 @@ that amends them."
 
 This task runs after the branch's final review and before it merges, so any fix the real stack forces lands in the same pull request. Run it from the main checkout, `/home/jay/projects/hockeytrack-scoreboard`, with this branch checked out. Build paths are part of a Go binary's build ID, so building in a worktree would show every other function as changed.
 
-The controller does every read-only step and hands the user exact commands for every write, which the user runs with `!`. The owner's address appears only in the gitignored tfvars and in commands typed into the session, never in a committed file.
+The controller does every read-only step and hands the user exact commands for every write, which the user runs with `!`. The owner's address appears only in the gitignored tfvars and in commands typed into the session, never in a committed file. Nobody prints the Google client secret: every `describe-identity-provider` call below carries a `--query` that names the keys it returns, and none of them is `client_secret`.
 
 - [ ] **Step 1: Seed the invite list's first value**
 
@@ -1638,40 +1638,86 @@ Hand the user: `! cd /home/jay/projects/hockeytrack-scoreboard/terraform && terr
 
 Run: `cd terraform && terraform plan -input=false -detailed-exitcode`. Expected: exit 0, `No changes.`
 
-If it shows a perpetual change to `aws_cognito_identity_provider.google`'s `provider_details`, Cognito has added keys of its own. List their **names only** with `aws cognito-idp describe-identity-provider --region us-east-1 --user-pool-id us-east-1_xJ6aWqZfR --provider-name Google --query 'keys(IdentityProvider.ProviderDetails)'`. Then fetch the values of everything except `client_id` and `client_secret` by name, with a `--query` that selects only those keys. Add them to `provider_details` in `signin.tf` and replan until clean. Commit that as its own change, explaining why.
+If it shows a perpetual change to `aws_cognito_identity_provider.google`'s `provider_details`, Cognito has added keys of its own. List their **names only** with `aws cognito-idp describe-identity-provider --region us-east-1 --user-pool-id us-east-1_xJ6aWqZfR --provider-name Google --query 'keys(IdentityProvider.ProviderDetails)'`. Then fetch the values of the added keys by naming each one in a multi-select, and nothing else: `aws cognito-idp describe-identity-provider --region us-east-1 --user-pool-id us-east-1_xJ6aWqZfR --provider-name Google --query 'IdentityProvider.ProviderDetails.{authorize_url:authorize_url,token_url:token_url}'`, with the key names the first command printed in place of those two. Never `client_id`, never `client_secret`, never `ProviderDetails` whole and never a wildcard. Add them to `provider_details` in `signin.tf` and replan until clean. Commit that as its own change, explaining why.
 
 If the pool shows a perpetual `pre_token_generation` diff alongside `pre_token_generation_config`, handle it the same way: describe it read-only, record the ruling, fix it, commit.
 
-- [ ] **Step 6: The user publishes the site; the controller checks it**
+- [ ] **Step 6: Confirm the deployed configuration, not just the Terraform text**
+
+A clean plan proves the state matches the code; these read the settings back from Cognito and Lambda themselves. All read-only. The client ID comes from `terraform output -raw user_pool_client_id`, run in `terraform/`.
+
+1. `aws cognito-idp describe-user-pool-client --region us-east-1 --user-pool-id us-east-1_xJ6aWqZfR --client-id <client ID> --query '{flows:ExplicitAuthFlows,idps:SupportedIdentityProviders,write:WriteAttributes,scopes:AllowedOAuthScopes}'`
+   Expected: `flows` is exactly `["ALLOW_REFRESH_TOKEN_AUTH"]`; `idps` is exactly `["Google"]`; `write` holds `email` and `email_verified` and nothing else; `scopes` holds `openid` and `email` and nothing else. Order within a list does not matter.
+2. `aws cognito-idp describe-user-pool --region us-east-1 --user-pool-id us-east-1_xJ6aWqZfR --query 'UserPool.{lambda:LambdaConfig,admin:AdminCreateUserConfig}'`
+   Expected: `lambda` names the `scoreboard-authgate` ARN as `PreSignUp`, and as `PreTokenGenerationConfig.LambdaArn` with `LambdaVersion` `V1_0` (Cognito may also echo it as `PreTokenGeneration`); no other trigger. `admin.AllowAdminCreateUserOnly` is `true`.
+3. `aws cognito-idp list-user-pool-clients --region us-east-1 --user-pool-id us-east-1_xJ6aWqZfR --query 'length(UserPoolClients)'`
+   Expected: `1`. A second client would be a second door the first one's settings do not govern.
+4. `aws cognito-idp describe-identity-provider --region us-east-1 --user-pool-id us-east-1_xJ6aWqZfR --provider-name Google --query 'IdentityProvider.{type:ProviderType,mapping:AttributeMapping,scopes:ProviderDetails.authorize_scopes}'`
+   Expected: `type` `Google`; `mapping` maps `email`, `email_verified` and `username` (to `sub`); `scopes` `openid email`.
+5. `aws lambda get-policy --region us-east-1 --function-name scoreboard-authgate --query Policy --output text | python3 -c 'import json,sys; p=json.load(sys.stdin); print(len(p["Statement"])); [print(s["Principal"], s.get("Condition")) for s in p["Statement"]]'`
+   Expected: `1`, then one statement whose principal is `{'Service': 'cognito-idp.amazonaws.com'}` and whose condition is an `ArnLike` `AWS:SourceArn` equal to the pool's ARN, `arn:aws:cognito-idp:us-east-1:<account>:userpool/us-east-1_xJ6aWqZfR`.
+
+Any difference is a stop-and-investigate. Record the results for Step 13.
+
+- [ ] **Step 7: The user publishes the site; the controller checks it**
 
 Hand the user: `! cd /home/jay/projects/hockeytrack-scoreboard && make site`
 
 Verify: `curl -sI https://scoreboard.davidjdrake.com/privacy/` shows `200`, `content-type: text/html` and the `content-security-policy` header. Then `curl -s https://scoreboard.davidjdrake.com/ | grep -c 'Sign in with Google'` prints `1`.
 
-- [ ] **Step 7: Spec §8 test 1, the owner signs in**
+- [ ] **Step 8: Spec §8 test 1, the owner signs in**
 
-The owner signs in at https://scoreboard.davidjdrake.com with Google. Expected: the page shows their address and loads the panel list without an error, which proves an authorized API call succeeded.
+The owner signs in at https://scoreboard.davidjdrake.com with Google. Expected: the page shows their address and loads the panel list without an error, which proves an authorized API call succeeded. The **Download setup file** button is enabled, with no "Verify your email address before setting up a panel." note beside it. That note is what the site shows when the ID token's `email_verified` is not true (`renderAdd` in `site/assets/app.js`), so its absence is the site's evidence that the token carries a verified email. The owner-hint check on the server (`ownerMatches` in `cloud/cmd/enroll/handler.go`) is not exercised here; only hardware check H8 exercises it.
 
 Verify read-only: `aws cognito-idp list-users --region us-east-1 --user-pool-id us-east-1_xJ6aWqZfR --query 'Users[].{user:Username,status:UserStatus,verified:Attributes[?Name==\`email_verified\`]|[0].Value}'`. Expected: one user, a `Google_…` username, status `EXTERNAL_PROVIDER`, verified `true`.
 
+Then `aws logs tail /aws/lambda/scoreboard-authgate --region us-east-1 --since 15m | grep -c 'reason="malformed event"'`. Expected: `0`. Any such line means Cognito sent an event the gate could not decode, even if the sign-in that followed succeeded.
+
 If sign-in fails, read `aws logs tail /aws/lambda/scoreboard-authgate --region us-east-1 --since 15m` before changing anything:
 - `reason="email not verified by Google"` means the `email_verified` mapping is not reaching the trigger as `"true"`. Record what the event actually carries, which the log does not show, by adding a temporary log of the attribute's value only, never the address. Then rule on the fix.
+- `reason="malformed event"` means the gate could not decode Cognito's event. Record the trigger source and the decode error, never the event body, which carries the address. Then rule on the fix.
 - No refusal logged, with Cognito's own error in the redirect mentioning sign-up or admin-only creation, means `allow_admin_create_user_only` blocks federated creation. That is the §4.3 fallback: set it to `false`, with the trigger as the gate, and record it as a finding in the spec. It is a security-relevant change, so confirm it with the user first.
 
-- [ ] **Step 8: Spec §8 test 5, native sign-up is refused**
+- [ ] **Step 9: Spec §8 test 5, native sign-up and every password path are refused**
 
-Hand the user: `! aws cognito-idp sign-up --region us-east-1 --client-id "$(cd /home/jay/projects/hockeytrack-scoreboard/terraform && terraform output -raw user_pool_client_id)" --username probe@example.com --password 'Probe-only-never-used-1'`
-Expected: `NotAuthorizedException` saying SignUp is not permitted. Confirm with `list-users` (Step 7's command) that there is still exactly one user.
+1. Hand the user: `! aws cognito-idp sign-up --region us-east-1 --client-id "$(cd /home/jay/projects/hockeytrack-scoreboard/terraform && terraform output -raw user_pool_client_id)" --username probe@example.com --password 'Probe-only-never-used-1'`
+   Expected: `NotAuthorizedException` saying SignUp is not permitted. If Step 8 forced `allow_admin_create_user_only` to `false`, the expectation instead is a `UserLambdaValidationException` carrying the gate's refusal, and exactly one new authgate log line, `trigger=PreSignUp_SignUp reason="not a Google sign-in" domain=example.com`. Either way, confirm with `list-users` (Step 8's command) that there is still exactly one user.
+2. Hand the user these three, one at a time, each with the same client ID:
+   `! aws cognito-idp initiate-auth --region us-east-1 --client-id <client ID> --auth-flow USER_PASSWORD_AUTH --auth-parameters USERNAME=probe@example.com,PASSWORD=Probe-only-never-used-1`
+   `! aws cognito-idp initiate-auth --region us-east-1 --client-id <client ID> --auth-flow USER_SRP_AUTH --auth-parameters USERNAME=probe@example.com,SRP_A=00`
+   `! aws cognito-idp initiate-auth --region us-east-1 --client-id <client ID> --auth-flow USER_AUTH --auth-parameters USERNAME=probe@example.com`
+   Expected: each fails with an error saying that flow is not enabled for this client. Record each exact error code and message. An error about the user, the password or a challenge instead means Cognito looked past the flow check: stop and investigate before calling that path closed. An error about the pool's feature plan (`USER_AUTH` needs Essentials or Plus) also leaves the flow closed; record it as such.
+3. Probe the hosted pages, read-only. Set `DOMAIN=$(python3 -c 'import json; print(json.load(open("site/config.json"))["cognitoDomain"])')` from the repository root, and `Q="client_id=<client ID>&response_type=code&redirect_uri=https%3A%2F%2Fscoreboard.davidjdrake.com%2F"`. Then:
+   `curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' "https://$DOMAIN/login?$Q"`
+   `curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' "https://$DOMAIN/signup?$Q"`
+   `curl -s "https://$DOMAIN/login?$Q" | grep -ci 'type="password"'`
+   `curl -s "https://$DOMAIN/signup?$Q" | grep -ci 'type="password"'`
+   Record the status and redirect each page returns; there is no fixed expectation for those. Expected for both `grep -ci` lines: `0`, so no password field is served for this client.
 
-- [ ] **Step 9: Spec §8 test 3, removal ends access**
+- [ ] **Step 10: Spec §8 test 3, removal ends access**
 
 1. Save the current list without printing it: `aws ssm get-parameter --region us-east-1 --name /scoreboard/allowed-emails --query Parameter.Value --output text | tr -d '\n' > <scratchpad>/allowlist-before.txt && chmod 600 <scratchpad>/allowlist-before.txt`
-2. Hand the user: `! aws ssm put-parameter --region us-east-1 --name /scoreboard/allowed-emails --type String --overwrite --value removed@example.invalid`
-3. Wait 70 seconds. The owner signs out, then signs in. Expected: the page shows "Sign-in did not finish…", and the authgate log shows `trigger=TokenGeneration_HostedAuth reason="not invited" domain=<owner's domain>`.
-4. Hand the user: `! aws ssm put-parameter --region us-east-1 --name /scoreboard/allowed-emails --type String --overwrite --value "file://<scratchpad>/allowlist-before.txt"`
-5. Wait 70 seconds. The owner signs in. Expected: admitted. Then delete `<scratchpad>/allowlist-before.txt`.
+2. The owner signs in and leaves that tab open.
+3. Hand the user: `! aws ssm put-parameter --region us-east-1 --name /scoreboard/allowed-emails --type String --overwrite --value removed@example.invalid`
+4. Wait 70 seconds. **The realistic case first:** the owner does not sign out, and reloads the open tab. The site sends the browser back through sign-in on its own, using the sessions Cognito and Google still hold, so new tokens are requested without the owner signing in again. If Google shows an account chooser, the owner picks their account; record that it appeared. Expected: refused. Accept either "Sign-in did not finish…" (Cognito redirected back with an error) or "Sign-in could not be completed…" (the token exchange failed). Record which message appeared, and the trigger source on the authgate log's refusal line, `reason="not invited" domain=<owner's domain>`.
+5. **Then the sign-out case:** the owner signs out, then signs in. Expected: the page shows "Sign-in did not finish…", and the authgate log shows `trigger=TokenGeneration_HostedAuth reason="not invited" domain=<owner's domain>`.
+6. Hand the user: `! aws ssm put-parameter --region us-east-1 --name /scoreboard/allowed-emails --type String --overwrite --value "file://<scratchpad>/allowlist-before.txt"`
+7. Wait 70 seconds. The owner signs in. Expected: admitted. Then delete `<scratchpad>/allowlist-before.txt`.
+8. Learn whether invite-list values reach the audit log, printing key names and never a value. CloudTrail can take several minutes to show an event, so if nothing matches, wait five minutes and rerun:
+   ```bash
+   aws cloudtrail lookup-events --region us-east-1 \
+     --lookup-attributes AttributeKey=EventName,AttributeValue=PutParameter \
+     --max-results 10 --query 'Events[].CloudTrailEvent' --output json |
+   python3 -c 'import json,sys
+   for raw in json.load(sys.stdin):
+       e = json.loads(raw); rp = e.get("requestParameters") or {}
+       if rp.get("name") == "/scoreboard/allowed-emails":
+           v = rp.get("value")
+           print(e["eventTime"], sorted(rp.keys()), "no value key" if v is None else ("value masked" if str(v).startswith("HIDDEN") else "value in clear"))'
+   ```
+   Expected: one or more lines for this step's `put-parameter` calls. Record what they show. If `value` appears in clear, record that in §9: the audit log then holds every invited and removed address for its full retention. The privacy page's audit-log bullet already says changes to the invite list "may include the email address involved"; confirm that sentence is still on the page, and keep it even if the value is masked, because other account changes have not been checked.
 
-- [ ] **Step 10: Complete Google's Branding page and publish**
+- [ ] **Step 11: Complete Google's Branding page and publish**
 
 In Google Cloud console, project `hockeytrack-scoreboard`, open **Google Auth Platform → Branding**:
 - Application home page: `https://scoreboard.davidjdrake.com/`
@@ -1680,15 +1726,26 @@ In Google Cloud console, project `hockeytrack-scoreboard`, open **Google Auth Pl
 
 Save. Then open **Audience → Publish app** and confirm. The app requests only `openid` and `email`, which Google treats as non-sensitive scopes, so publishing should not require verification. If Google asks for verification anyway, stop and report what it asks for.
 
-- [ ] **Step 11: Spec §8 tests 2 and 4, a stranger is refused and the alarm fires**
+- [ ] **Step 12: Spec §8 tests 2 and 4, a stranger is refused and the alarm fires**
+
+The alarm sums refusals over a 3600-second period, which is likely aligned to the clock hour, so refusals from earlier steps may sit in a different period. Do not count them. Produce three fresh refusals inside one clock hour: if it is less than fifteen minutes to the hour, wait for the hour to turn first.
 
 1. The user signs in with a Google account that is **not** on the invite list. Use a private window, so the owner's Google session is not reused. Expected: the refusal message on the page; the log shows `trigger=PreSignUp_ExternalProvider reason="not invited"` and the account's domain; `list-users` still shows exactly one user.
-2. The user repeats that attempt once more. With Step 9's refusal, that makes at least three refusals within the hour.
-3. Check it: `aws cloudwatch describe-alarms --region us-east-1 --alarm-names scoreboard-signin-refused --query 'MetricAlarms[].{state:StateValue,reason:StateReason}'`. Expected: `ALARM` within a few minutes, and the security-alerts email arrives. If it is still `OK` after fifteen minutes, check the metric itself: `aws cloudwatch get-metric-statistics --region us-east-1 --namespace Scoreboard --metric-name SignInRefused --statistics Sum --period 3600 --start-time <an hour ago, ISO 8601> --end-time <now>`. Also record whether Cognito retried any refused trigger, which would show as more refusal lines than attempts.
+2. The user repeats that attempt twice more from the same private window, inside the same clock hour. Expected: three refusal lines from this step in `aws logs tail /aws/lambda/scoreboard-authgate --region us-east-1 --since 30m`.
+3. Check it: `aws cloudwatch describe-alarms --region us-east-1 --alarm-names scoreboard-signin-refused --query 'MetricAlarms[].{state:StateValue,reason:StateReason}'`. Expected: `ALARM` within a few minutes, and the security-alerts email arrives. If it is still `OK` after fifteen minutes, check the metric itself: `aws cloudwatch get-metric-statistics --region us-east-1 --namespace Scoreboard --metric-name SignInRefused --statistics Sum --period 3600 --start-time <the start of this clock hour, ISO 8601> --end-time <now>`. Also record whether Cognito retried any refused trigger, which would show as more refusal lines than attempts.
 
-- [ ] **Step 12: Record what the real stack showed**
+- [ ] **Step 13: Record what the real stack showed**
 
-Append a section `## 9. Verification record (2026-09-13)` to `docs/superpowers/specs/2026-09-13-google-sign-in-design.md`. Give each test in §8 its outcome and its evidence: log lines with the domain only, the `list-users` shape, the alarm state. Include every ruling made in Steps 5, 7 and 11. Two things must be stated plainly: whether `allow_admin_create_user_only` interfered, which answers fact 1's inference, and that the refresh-token path of the token check was not exercised live, because the site discards refresh tokens by design. Commit it: `docs: record what the real stack showed for Google sign-in`.
+Append a section `## 9. Verification record (2026-09-13)` to `docs/superpowers/specs/2026-09-13-google-sign-in-design.md`. Give each test in §8 its outcome and its evidence: log lines with the domain only, the `list-users` shape, the alarm state. Include every ruling made in Steps 5, 8 and 12. State these plainly:
+- whether `allow_admin_create_user_only` interfered, which answers fact 1's inference;
+- that the refresh-token path of the token check was not exercised live, because the site discards refresh tokens by design;
+- that the server-side owner-hint check was not exercised, and waits for hardware check H8; Step 8 showed only the site's own `email_verified` evidence;
+- which message the no-sign-out removal in Step 10 produced, and the trigger source its refusal logged;
+- the deployed-configuration results from Step 6;
+- the closed-path probe results from Step 9: each `initiate-auth` error, what `/login` and `/signup` returned, and the password-field counts;
+- whether the audit log holds invite-list values, from Step 10.
+
+Commit it: `docs: record what the real stack showed for Google sign-in`.
 
 ---
 
@@ -1697,3 +1754,5 @@ Append a section `## 9. Verification record (2026-09-13)` to `docs/superpowers/s
 - **Alarm-modification coverage.** HockeyTrack's `hockeytrack-sec-alerting-modification` rule watches alarms by the `scoreboard-iot-` prefix, so neither `scoreboard-signin-refused` nor the three `scoreboard-enroll-*` alarms page if rewritten or deleted. Widening that rule is a change in the other repository.
 - **LitLibrary's revocation gap.** Its trigger checks the invite list only at sign-up, so removing someone there leaves their account working. It deserves a ticket in that project.
 - **The pool's password settings** (`password_policy`, `account_recovery_setting`, TOTP MFA) now govern nothing, but they are left in place. Removing them buys nothing, and `username_attributes`, which sits beside them, forces replacement if touched.
+- **Nothing pages on a change to the gate.** Writes to `/scoreboard/allowed-emails`, to the pool's `lambda_config`, clients or identity providers, and to the `scoreboard-authgate` function raise no alert. An `UpdateUserPool` that drops the triggers would fail open to every Google account, silently. The fix is an EventBridge rule on those management events, sending to the security-alerts topic, alongside HockeyTrack's account security rules.
+- **Gate failures that log nothing.** A crash or timeout refuses the sign-in without a `sign-in refused` line, so `scoreboard-signin-refused` never counts it. Add an alarm on `scoreboard-authgate`'s Lambda `Errors` metric, with `Throttles` beside it, because Lambda counts a throttled invocation as neither an invocation nor an error.
