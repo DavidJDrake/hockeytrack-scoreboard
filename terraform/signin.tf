@@ -12,7 +12,7 @@ variable "invited_emails" {
   type        = list(string)
   sensitive   = true
   nullable    = false
-  description = "Addresses the invite list starts with. Read ONCE, when /scoreboard/allowed-emails is first created; after that the list is edited with aws ssm put-parameter and this variable changes nothing. Set it in the gitignored terraform.tfvars, never in this public repository."
+  description = "Addresses the invite list starts with. Read ONCE, when /scoreboard/allowed-emails is first created; after that the list is edited with aws ssm put-parameter, and this variable matters again only if the parameter is replaced, which reseeds it. Set it in the gitignored terraform.tfvars, never in this public repository."
 
   validation {
     condition = length(var.invited_emails) > 0 && alltrue([
@@ -28,7 +28,7 @@ variable "invited_emails" {
 # stack does.
 resource "aws_ssm_parameter" "allowed_emails" {
   name        = "/scoreboard/allowed-emails"
-  description = "Addresses allowed to sign in to ${var.site_domain}, comma-separated. Edit with aws ssm put-parameter --overwrite; Terraform never changes the value."
+  description = "Addresses allowed to sign in to ${var.site_domain}, comma-separated. Edit with aws ssm put-parameter --overwrite; Terraform does not change the value in place."
   type        = "String"
   value       = join(",", var.invited_emails)
 

@@ -145,8 +145,8 @@ discover it.
   owns which panel; a pending panel's owner hint, an unsalted SHA-256 that
   confirms a correct guess, kept a day plus DynamoDB's few days of TTL lag and
   up to 35 days of point-in-time-recovery backups; service logs kept 30 days;
-  and the account's CloudTrail audit log, which records Cognito's hosted-UI
-  sign-in requests with source IP and, for some, the user's `sub`, and is kept
+  and the account's CloudTrail audit log, which keeps the write-type hosted-UI
+  sign-in requests (the trail records write management events only) with source IP and, for some, the user's `sub`, and is kept
   for a year plus 90 days of noncurrent versions (HockeyTrack's
   `terraform/cloudtrail.tf`). No advertising, no sharing, no sale.
 - Its contact is the repository's GitHub issues page rather than an email
