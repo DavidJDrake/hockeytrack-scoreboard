@@ -65,6 +65,16 @@ resource "aws_cognito_identity_provider" "google" {
     client_id        = local.google_oauth.client_id
     client_secret    = local.google_oauth.client_secret
     authorize_scopes = "openid email"
+
+    # Cognito fills these in for a Google provider whether or not they are
+    # sent, so leaving them out gives a plan that always wants to remove them.
+    # They are Google's public endpoints, copied from what Cognito stored.
+    attributes_url                = "https://people.googleapis.com/v1/people/me?personFields="
+    attributes_url_add_attributes = "true"
+    authorize_url                 = "https://accounts.google.com/o/oauth2/v2/auth"
+    oidc_issuer                   = "https://accounts.google.com"
+    token_request_method          = "POST"
+    token_url                     = "https://www.googleapis.com/oauth2/v4/token"
   }
 
   # email_verified is mapped so the gate can refuse an address Google itself
