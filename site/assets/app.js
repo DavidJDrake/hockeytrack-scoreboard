@@ -315,7 +315,12 @@ async function start() {
   if (isCallback) {
     if (here.searchParams.has("error")) {
       forgetSignIn(sessionStorage);
-      showSignedOut("Sign-in was cancelled.");
+      // Cognito sends an error back both when someone cancels at Google and
+      // when the gate refuses an uninvited account. They are not told apart:
+      // the only clue is error_description, text taken from the URL, and this
+      // page does not repeat what a URL tells it to say. One message covers
+      // both.
+      showSignedOut("Sign-in did not finish. If you cancelled it, sign in again. If you did not, this Google account may not be invited.");
       return;
     }
     try {

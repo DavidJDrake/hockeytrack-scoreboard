@@ -50,7 +50,7 @@ test("two verifiers are never the same", () => {
   assert.notEqual(auth.randomString(32), auth.randomString(32));
 });
 
-test("the authorize URL asks for a code with PKCE, for exactly openid and email", () => {
+test("the authorize URL asks Google for a code with PKCE, for exactly openid and email", () => {
   const u = new URL(auth.authorizeUrl(cfg, ORIGIN, { state: "s1", challenge: "c1" }));
   assert.equal(u.origin + u.pathname, "https://example.auth.us-east-1.amazoncognito.com/oauth2/authorize");
   const p = u.searchParams;
@@ -61,6 +61,9 @@ test("the authorize URL asks for a code with PKCE, for exactly openid and email"
   assert.equal(p.get("code_challenge"), "c1");
   assert.equal(p.get("code_challenge_method"), "S256");
   assert.equal(p.get("state"), "s1");
+  // Straight to Google: without it Cognito first shows a page of its own
+  // with a single button on it.
+  assert.equal(p.get("identity_provider"), "Google");
 });
 
 test("beginning sign-in navigates with a challenge that matches the stored verifier", async () => {

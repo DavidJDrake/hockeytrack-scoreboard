@@ -55,6 +55,9 @@ export function authorizeUrl(cfg, origin, { state, challenge }) {
     client_id: cfg.clientId,
     redirect_uri: redirectUri(origin),
     scope: "openid email",
+    // The client supports Google alone. Naming it skips a Cognito page whose
+    // only content would be a button that says Google.
+    identity_provider: "Google",
     state,
     code_challenge: challenge,
     code_challenge_method: "S256",

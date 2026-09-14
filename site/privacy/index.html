@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="What the HockeyTrack scoreboard site keeps about the people who sign in to it, and why.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%8F%92%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/assets/site.css">
+<link rel="stylesheet" href="/assets/admin.css">
+<title>Privacy · HockeyTrack Scoreboards</title>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<nav class="nav" aria-label="Site">
+  <div class="wrap">
+    <a class="wordmark" href="/">HOCKEYTRACK</a>
+  </div>
+</nav>
+
+<main class="wrap" id="main">
+  <h1>Privacy</h1>
+  <p class="lede">scoreboard.davidjdrake.com lets a few invited people manage HockeyTrack scoreboard panels. It is a personal project run by David Drake, and it keeps as little about you as it can while doing that.</p>
+
+  <section class="card">
+    <h2>What Google tells this site</h2>
+    <p>When you sign in with Google, this site asks Google for your email address and nothing more. Google sends that address, whether Google has verified it, and an identifier for your Google account. The site never sees your Google password, your name, your photo, your contacts, or anything else in your Google account.</p>
+  </section>
+
+  <section class="card">
+    <h2>What is kept</h2>
+    <ul>
+      <li><strong>Your account:</strong> your email address, Google's identifier for your account, and whether the address is verified, held by Amazon Cognito.</li>
+      <li><strong>The invite list:</strong> the email addresses allowed to sign in.</li>
+      <li><strong>Your panels:</strong> for each panel you claim, the name you give it, the game it follows, and which account owns it.</li>
+      <li><strong>A panel waiting to be claimed:</strong> if its setup file names an owner, a one-way hash of that address, which expires after a day.</li>
+      <li><strong>Service logs:</strong> requests to the site's API are logged with the requesting IP address and your account identifier, and deleted after 30 days. A refused sign-in is logged with only the domain of the email address, such as gmail.com.</li>
+    </ul>
+  </section>
+
+  <section class="card">
+    <h2>What is not done with it</h2>
+    <p>Information received from Google is used only to sign you in and to work out which panels are yours, in line with the Google API Services User Data Policy. None of it is sold, shared, or used for advertising. The site has no analytics and sets no cookies of its own. Signing in does set cookies on Google's and Amazon Cognito's sign-in pages, which they use to keep you signed in. While you sign in, this page keeps a short-lived code in your browser's session storage, which is cleared when you close the tab.</p>
+  </section>
+
+  <section class="card">
+    <h2>Who handles it</h2>
+    <p>The site runs on Amazon Web Services in the United States, and Google handles signing in. No one else receives any of it.</p>
+  </section>
+
+  <section class="card">
+    <h2>Removing your information</h2>
+    <p>Ask the person who invited you, and your account, your place on the invite list, and your ownership of any panels will be deleted. Logs age out within 30 days. For anything else, open an issue at <a href="https://github.com/DavidJDrake/hockeytrack-scoreboard/issues">github.com/DavidJDrake/hockeytrack-scoreboard</a>, where the site's source code is public. Leave your email address out of the issue.</p>
+  </section>
+
+  <p>Last updated September 13, 2026.</p>
+</main>
+
+<footer class="site-foot">
+  <div class="wrap">
+    <p>Part of <a href="https://hockeytrack.davidjdrake.com/">HockeyTrack</a>.</p>
+  </div>
+</footer>
+</body>
+</html>
