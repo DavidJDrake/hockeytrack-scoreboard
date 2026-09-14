@@ -315,7 +315,12 @@ async function start() {
   if (isCallback) {
     if (here.searchParams.has("error")) {
       forgetSignIn(sessionStorage);
-      showSignedOut("Sign-in was cancelled.");
+      // Cognito sends an error back both when someone cancels at Google and
+      // when the gate refuses an uninvited account. They are not told apart:
+      // the only clue is error_description, text taken from the URL, and this
+      // page does not repeat what a URL tells it to say. One message covers
+      // both.
+      showSignedOut("Sign-in did not finish. If you cancelled it, sign in again. If you did not, this Google account may not be invited.");
       return;
     }
     try {
@@ -332,8 +337,8 @@ async function start() {
   // A refresh drops the in-memory token by design. A page that was signed in
   // goes back through Cognito, which returns straight away while its own
   // session cookie is valid. The signed-in flag is cleared before that
-  // redirect: if Cognito's own session has lapsed, it shows a login form
-  // instead of bouncing straight back, and clearing the flag first means
+  // redirect: if Cognito's own session has lapsed, it sends the browser on to
+  // Google's sign-in instead of bouncing straight back, and clearing the flag first means
   // Back from there lands on this site's signed-out page rather than being
   // sent through Cognito again. completeSignIn sets the flag again on
   // success. This guarantees a stuck Back button cannot happen; it does not

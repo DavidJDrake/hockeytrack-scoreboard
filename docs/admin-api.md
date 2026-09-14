@@ -22,10 +22,15 @@ separate check the Lambda makes itself, by reading an ownership row out of
 DynamoDB. `GET /api/games` is exempt from this second check, because the
 schedule isn't owned by anyone; it still requires the first one.
 
-Sign-up is closed. There is no self-registration endpoint or hosted sign-up
-flow — users are created by the administrator in the Cognito console
-(`aws_cognito_user_pool.admin`, `admin_create_user_config.allow_admin_create_user_only
-= true`). If you don't already have an account, the API can't give you one.
+Sign-up is closed. The only way in is Sign in with Google, and only for an
+address on the invite list: the SSM parameter `/scoreboard/allowed-emails`,
+which the `scoreboard-authgate` function checks when Cognito is about to
+create an account and again every time it issues tokens
+(`terraform/signin.tf`; design in
+`docs/superpowers/specs/2026-09-13-google-sign-in-design.md`). An uninvited
+Google account gets no account and no token, so there is nothing for the API
+to authorize. Inviting someone is one `aws ssm put-parameter` call, given in
+section 4.2 of that spec.
 
 ### A non-owner gets 404, never 403
 
@@ -194,8 +199,9 @@ trigger.
 
 The client is a public Cognito app client (no secret — anything shipped to a
 browser can't keep one), using Authorization Code with PKCE against the
-hosted UI. There's no token endpoint you can hit with a single `curl` and a
-password; a human has to sign in through the hosted UI once per session. The
+hosted UI, with Google as its only identity provider. There is no password to
+send anywhere, so there is no token endpoint you can hit with a single `curl`;
+a human signs in with an invited Google account once per session. The
 outline, with the pool's domain, client id and this deployment's API
 endpoint left as environment variables you fill in from your own Terraform
 outputs:
@@ -205,9 +211,9 @@ outputs:
 CODE_VERIFIER=$(openssl rand -base64 96 | tr -d '=+/\n' | cut -c1-64)
 CODE_CHALLENGE=$(printf '%s' "$CODE_VERIFIER" | openssl dgst -sha256 -binary | openssl base64 | tr -d '=' | tr '/+' '_-')
 
-# 2. Open this URL in a browser and sign in. It redirects to
+# 2. Open this URL in a browser and sign in with Google. It redirects to
 #    http://localhost:8000/?code=... on success.
-echo "https://${USER_POOL_DOMAIN}.auth.${REGION}.amazoncognito.com/login?client_id=${CLIENT_ID}&response_type=code&scope=openid+email&redirect_uri=http://localhost:8000/&code_challenge_method=S256&code_challenge=${CODE_CHALLENGE}"
+echo "https://${USER_POOL_DOMAIN}.auth.${REGION}.amazoncognito.com/oauth2/authorize?identity_provider=Google&client_id=${CLIENT_ID}&response_type=code&scope=openid+email&redirect_uri=http://localhost:8000/&code_challenge_method=S256&code_challenge=${CODE_CHALLENGE}"
 
 # 3. Exchange the code from that redirect for tokens.
 read -p "code from the redirect: " AUTH_CODE

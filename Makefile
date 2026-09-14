@@ -137,7 +137,7 @@ site-local: site-config
 # Lambda zips: static arm64 binaries named `bootstrap` for provided.al2023,
 # zipped with python3's zipfile module (no `zip` binary on this machine).
 build:
-	mkdir -p build/reducer build/today build/api build/enroll
+	mkdir -p build/reducer build/today build/api build/enroll build/authgate
 	cd cloud && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -ldflags="-s -w" -o ../build/reducer/bootstrap ./cmd/reducer
 	cd cloud && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -ldflags="-s -w" -o ../build/today/bootstrap ./cmd/today
 	cd build/reducer && python3 -m zipfile -c ../reducer.zip bootstrap
@@ -146,6 +146,8 @@ build:
 	cd build/api && python3 -m zipfile -c ../api.zip bootstrap
 	cd cloud && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -ldflags="-s -w" -o ../build/enroll/bootstrap ./cmd/enroll
 	cd build/enroll && python3 -m zipfile -c ../enroll.zip bootstrap
+	cd cloud && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -ldflags="-s -w" -o ../build/authgate/bootstrap ./cmd/authgate
+	cd build/authgate && python3 -m zipfile -c ../authgate.zip bootstrap
 
 deploy: test build
 	mkdir -p $(XDG_RUNTIME_DIR)

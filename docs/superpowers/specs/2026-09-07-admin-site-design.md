@@ -73,6 +73,11 @@ checks a DynamoDB row is plainer.
 
 ### 3.1 Identity — Cognito user pool, hosted UI
 
+> **Amended 2026-09-13** by `2026-09-13-google-sign-in-design.md`. People now
+> sign in with Google only. Invite-only is enforced by an allowlist that a
+> Cognito trigger checks, because the pool's admin-only setting does not stop
+> a federated account from being created.
+
 No custom sign-in pages, no password handling of our own. The hosted UI is
 ugly but free, correct, and supports the account recovery flows that are
 tedious and unrewarding to build.
