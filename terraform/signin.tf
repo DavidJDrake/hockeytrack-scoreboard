@@ -208,6 +208,17 @@ resource "aws_cloudwatch_metric_alarm" "signin_refused" {
 #
 # One failure can write several of these lines, so the metric counts lines, not
 # failures. The threshold is one.
+#
+# Neither log alarm can see its own inputs taken away, and HockeyTrack's
+# hockeytrack-sec-scoreboard-signin rule watches neither CloudWatch Logs nor
+# IAM. Deleting or rewriting this log group's metric filters silences the
+# refusal and failures alarms. Removing the role's logs permissions silences
+# both while the gate keeps deciding; removing its ssm:GetParameter fails the
+# gate closed, and each refusal is logged as "invite list unavailable" but
+# pages only at three in an hour. This filter also assumes Lambda's default
+# text log format -- the function sets no logging_config -- so switching it to
+# JSON would change how the runtime writes these lines. That switch is itself
+# an UpdateFunctionConfiguration, which the HockeyTrack rule does page on.
 resource "aws_cloudwatch_log_metric_filter" "authgate_failures" {
   name           = "scoreboard-authgate-failures"
   log_group_name = aws_cloudwatch_log_group.authgate.name

@@ -89,13 +89,18 @@ test("no token from the site's client can rewrite its own attributes", () => {
 // The gate refuses by returning an error, so Lambda's Errors metric counts
 // every refusal and cannot tell a crash from a stranger. The failures filter
 // matches only lines the Lambda runtime writes when the function itself fails.
-// These lines are what a refusal really writes, taken from the live log
-// group on 2026-09-14 (address and request ID replaced). If any term of the
-// filter occurs in one of them, the alarm would page on every refusal.
+// The first three lines are what a refusal really writes, taken from the live
+// log group on 2026-09-14 (address and request ID replaced). The fourth is the
+// refusal when the invite list cannot be read, in the shape refuse() logs it
+// (cloud/cmd/authgate/handler.go) with an AWS SDK v2 error attached; it has not
+// been observed live, and it is the one most likely to carry a word like
+// "Status" or "error". If any term of the filter occurs in one of them, the
+// alarm would page on every refusal.
 const refusalLines = [
   '2026/09/14 22:25:42 WARN sign-in refused trigger=PreSignUp_ExternalProvider reason="not invited" domain=example.com',
   '2026/09/14 22:25:42 {"errorMessage":"this account is not invited","errorType":"errorString"}',
   "REPORT RequestId: 00000000-0000-0000-0000-000000000000\tDuration: 1.31 ms\tBilled Duration: 2 ms\tMemory Size: 128 MB\tMax Memory Used: 41 MB",
+  '2026/09/14 22:25:42 WARN sign-in refused trigger=TokenGeneration_RefreshTokens reason="invite list unavailable" domain=example.com err="operation error SSM: GetParameter, https response error StatusCode: 400, RequestID: 00000000-0000-0000-0000-000000000000, ParameterNotFound: "',
 ];
 
 function failuresTerms() {
@@ -109,7 +114,17 @@ function failuresTerms() {
 
 test("the crash filter watches the runtime's own failure lines", () => {
   const terms = failuresTerms();
-  for (const want of ["Runtime.ExitError", "Status: timeout", "panic:", "resulted in a panic"]) {
+  // Every term signin.tf's comment explains. Dropping one silently narrows what
+  // the alarm can see, so each is required by name.
+  for (const want of [
+    "Runtime.ExitError",
+    "Runtime exited",
+    "Status: error",
+    "Status: timeout",
+    "Task timed out",
+    "panic:",
+    "resulted in a panic",
+  ]) {
     assert.ok(terms.includes(want), `failures pattern lacks "${want}"`);
   }
 });
@@ -129,13 +144,19 @@ test("the gate's crash and throttle alarms notify the security topic", () => {
   }
 });
 
-// HockeyTrack's rewrite-detection rule finds this stack's security alarms by
-// the "scoreboard-" prefix. An alarm without it can be silently rewritten.
+// HockeyTrack's rewrite-detection rule finds this stack's alarms by the
+// "scoreboard-" prefix. An alarm without it can be silently rewritten. Only a
+// literal name can be checked here, so every alarm must have one: a name built
+// from a variable or an interpolation would escape the prefix check, and
+// instead fails the count.
 test("every alarm keeps the prefix HockeyTrack watches for rewriting", () => {
   const dir = new URL("../../terraform/", import.meta.url);
-  const names = readdirSync(dir)
+  const sources = readdirSync(dir)
     .filter((f) => f.endsWith(".tf"))
-    .flatMap((f) => [...code(readFileSync(new URL(f, dir), "utf8")).matchAll(/alarm_name\s*=\s*"([^"]+)"/g)].map((m) => m[1]));
-  assert.ok(names.length >= 13, `found only ${names.length} alarm names`);
+    .map((f) => code(readFileSync(new URL(f, dir), "utf8")));
+  const alarms = sources.flatMap((src) => [...src.matchAll(/resource\s+"aws_cloudwatch_metric_alarm"\s+"[^"]+"/g)]).length;
+  const names = sources.flatMap((src) => [...src.matchAll(/alarm_name\s*=\s*"([^"$]+)"/g)].map((m) => m[1]));
+  assert.ok(alarms >= 13, `found only ${alarms} aws_cloudwatch_metric_alarm resources`);
+  assert.equal(names.length, alarms, "every aws_cloudwatch_metric_alarm needs a literal alarm_name, with no interpolation");
   for (const n of names) assert.ok(n.startsWith("scoreboard-"), `alarm "${n}" lacks the scoreboard- prefix`);
 });
