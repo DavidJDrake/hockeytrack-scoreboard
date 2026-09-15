@@ -64,7 +64,7 @@ Alert sentence: *If this was not you, assume the scoreboard admin API may accept
 
 ### 4.2 Stop redeploying unchanged functions (this repository)
 
-`make build` passes `-buildvcs=false` and `-trimpath` to every `go build`: Go otherwise stamps the commit and the checkout's absolute path into each binary. An unchanged function then builds to the same bytes at any commit, so `archive_file`'s hash, and with it the apply and the page, only moves when code moves. Proven in implementation by building at two different commits and comparing hashes.
+`make build` passes `-buildvcs=false` and `-trimpath` to every `go build`: Go otherwise stamps the commit and the checkout's absolute path into each binary. An unchanged function then builds to the same bytes at any commit, so `archive_file`'s hash, and with it the apply and the page, only moves when code moves. Terraform's archive_file also pins `output_file_mode = "0755"`, so the zip does not inherit the build host's umask. Proven in implementation by building at two different commits and comparing hashes.
 
 ### 4.3 The threat model and the sign-in spec
 

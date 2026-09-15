@@ -2,16 +2,20 @@ data "aws_iot_endpoint" "data" {
   endpoint_type = "iot:Data-ATS"
 }
 
+# output_file_mode pins the zip's file mode so the code hash does not depend
+# on the build host's umask. See Makefile build target comment.
 data "archive_file" "reducer" {
-  type        = "zip"
-  source_file = "${path.module}/../build/reducer/bootstrap"
-  output_path = "${path.module}/../build/reducer.zip"
+  type             = "zip"
+  source_file      = "${path.module}/../build/reducer/bootstrap"
+  output_path      = "${path.module}/../build/reducer.zip"
+  output_file_mode = "0755"
 }
 
 data "archive_file" "today" {
-  type        = "zip"
-  source_file = "${path.module}/../build/today/bootstrap"
-  output_path = "${path.module}/../build/today.zip"
+  type             = "zip"
+  source_file      = "${path.module}/../build/today/bootstrap"
+  output_path      = "${path.module}/../build/today.zip"
+  output_file_mode = "0755"
 }
 
 # The log groups' names are literals, not interpolated from the Lambda

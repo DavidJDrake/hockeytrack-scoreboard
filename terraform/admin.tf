@@ -174,9 +174,10 @@ resource "aws_cognito_user_pool_client" "site" {
 }
 
 data "archive_file" "api" {
-  type        = "zip"
-  source_file = "${path.module}/../build/api/bootstrap"
-  output_path = "${path.module}/../build/api.zip"
+  type             = "zip"
+  source_file      = "${path.module}/../build/api/bootstrap"
+  output_path      = "${path.module}/../build/api.zip"
+  output_file_mode = "0755"
 }
 
 # See the comment on the reducer/today log groups in lambda.tf: the name here

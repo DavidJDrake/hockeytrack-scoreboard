@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 
 // Lambda deploys are driven by the zip's hash, and HockeyTrack's security rules
 // page on every Lambda code update. Go stamps each binary with the commit it
@@ -18,4 +19,28 @@ test("every Lambda build is reproducible across commits and checkouts", () => {
     assert.match(line, /(^|\s)-buildvcs=false(\s|$)/, `missing -buildvcs=false: ${line.trim()}`);
     assert.match(line, /(^|\s)-trimpath(\s|$)/, `missing -trimpath: ${line.trim()}`);
   }
+});
+
+// The zip entry's file mode also comes from the build host's umask. Without
+// pinning output_file_mode, source_code_hash can differ for byte-identical
+// code on another machine, causing the same "redeploy and page on unchanged
+// code" problem. This keeps the zip reproducible.
+test("every archive_file block pins output_file_mode to avoid umask drift", () => {
+  const terraformDir = new URL("../../terraform", import.meta.url);
+  const files = readdirSync(terraformDir).filter((f) => f.endsWith(".tf"));
+  let archiveCount = 0;
+
+  for (const filename of files) {
+    const content = readFileSync(join(terraformDir.pathname, filename), "utf8");
+    // Match archive_file blocks with DOTALL to handle multi-line content
+    const archiveBlocks = content.match(/data\s+"archive_file"\s+"[^"]+"\s*\{[\s\S]*?\n\}/g) || [];
+    archiveCount += archiveBlocks.length;
+
+    for (const block of archiveBlocks) {
+      assert.match(block, /output_file_mode\s*=\s*"0755"/,
+        `archive_file in ${filename} missing output_file_mode = "0755"`);
+    }
+  }
+
+  assert.ok(archiveCount >= 5, `found only ${archiveCount} archive_file blocks, expected at least 5`);
 });

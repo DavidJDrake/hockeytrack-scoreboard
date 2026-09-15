@@ -117,9 +117,10 @@ resource "aws_iam_role_policy" "authgate" {
 }
 
 data "archive_file" "authgate" {
-  type        = "zip"
-  source_file = "${path.module}/../build/authgate/bootstrap"
-  output_path = "${path.module}/../build/authgate.zip"
+  type             = "zip"
+  source_file      = "${path.module}/../build/authgate/bootstrap"
+  output_path      = "${path.module}/../build/authgate.zip"
+  output_file_mode = "0755"
 }
 
 # Cognito gives a trigger five seconds and then fails the sign-in, so a longer
