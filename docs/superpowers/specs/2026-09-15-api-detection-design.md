@@ -97,3 +97,60 @@ Alert sentence: *If this was not you, assume the scoreboard admin API may accept
 - **The devices table's ownership rows.** Writes to them are DynamoDB data events, which the trail does not log.
 - **The static site** (S3 and CloudFront), which could serve a look-alike page from the real domain. It remains its own gap.
 - **The IoT publish path** that the API uses to push configuration, which sections 7 and 8 already cover.
+
+## 7. Verification record (2026-09-15)
+
+Run from the unmerged branches (HockeyTrack `scoreboard-api-detection`, this repository's `api-detection`) against the live account, following plan Task 3.
+
+**Before applying, against real CloudTrail history:**
+- **Pattern.** The rendered pattern is 531 of 2,048 characters. The data source resolved the API to `dk3k7p41e2`.
+- **`test-event-pattern`: 18 of 18 correct.**
+  - *Match:* `CreateRoute`, `CreateAuthorizer`, `CreateIntegration`, `CreateStage` and `UpdateStage` on `dk3k7p41e2`; `CreateFunction20150331`, `AddPermission20150331v2` and `UpdateFunctionCode20150331v2` for both `scoreboard-api` and `scoreboard-enroll`.
+  - *No match:* `GetRoute` and `GetAuthorizer` on `dk3k7p41e2`; `CreateRoute` on `bjmqkenm95` (healthtracker-api); `TagResource` and `CreateAuthorizer` on `op8gfgqr8f`; `UpdateFunctionCode20150331v2` on `scoreboard-authgate` and on `healthtracker-api`.
+  - *Not tested:* a HealthTracker Lambda `TagResource`, because none existed in the window.
+- **90-day sweep** with a local matcher; six spot checks with `test-event-pattern` agreed with it.
+  - 1,427 API Gateway and 5,039 Lambda events, 25 matches in all. Every one was the scoreboard API's own setup and deploys between 2026-09-12 and 09-15: routes, integrations, the authorizer, the stage and its update, the functions' creation, permissions and code updates.
+  - `CreateApi` did not match, because it names the API, not an ID. This is the replacement window §4.1 names.
+  - No event naming these resources lacked a `readOnly` key.
+
+**Deploy.**
+- **HockeyTrack:** the apply added 2 and changed 2 (the topic and queue policies).
+  - The deployed pattern equals the rendered one as parsed JSON, and the rule is `ENABLED` with one target, the security topic plus its DLQ.
+  - Section 9 paged `PutRule`, `PutTargets` and `SetTopicAttributes`, as expected.
+  - A refresh note showed section 10's rule tags reading `{}` instead of null, which is not a change.
+- **Reproducible builds.**
+  - Two separate clones at two commits with identical `cloud/` code (`17b8e9d` and `4e56bd4`) built byte-identical bootstraps for all five functions, with `-trimpath=true` and no vcs stamp.
+  - The one-time redeploy changed the five functions' code hash and nothing else.
+  - Afterwards, every function's `CodeSha256` equaled base64 SHA-256 of the zip Terraform regenerates, which is the check the threat model's recovery steps now use.
+  - A later commit changing no Go code (`e7cd61e`), rebuilt, planned **no changes**.
+- **The redeploy's pages,** the rules' first real positives: section 11 sent `UpdateFunctionCode20150331v2` for `scoreboard-api` and `scoreboard-enroll`, each carrying section 11's admin-API sentence. Section 10 sent it for `scoreboard-authgate`, carrying the sign-in-gate sentence. The `reducer` and `today` redeploys paged nothing.
+
+**Break tests.** The rule's metrics recorded 9 matches, 9 invocations and 0 failed. All 9 emails arrived 1–22 seconds after their CloudTrail event, and the security DLQ stayed at 0.
+
+| Branch | Real write | Email |
+|---|---|---|
+| `resource-arn` | `apigatewayv2 tag-resource` / `untag-resource` on the API | `TagResource`, `UntagResource` |
+| `apiId` | `update-stage` re-saving the stage's current defaults (burst 40, rate 20) | `UpdateStage` |
+| `resource` | `lambda tag-resource` / `untag-resource` on each function | four |
+| `functionName` | `update-function-configuration` re-saving each timeout (10, 15) | two |
+
+**Negatives.**
+- An enroll collect poll with a bogus token (404) and an unauthenticated games call (401) sent no email.
+- Plans in both repositories showed no drift after the breaks, and the API holds no probe tag.
+
+**The recovery procedure, run once read-only.** Every command and expectation in the threat model's new §7 entry matched the live stack:
+- **Authorizer:** one JWT authorizer, issuer `https://cognito-idp.us-east-1.amazonaws.com/us-east-1_xJ6aWqZfR`, the site client as its only audience.
+- **Routes:** 8, with only `POST` and `GET /api/enroll` set to `NONE`, and each route on its expected integration.
+- **Integrations:** `AWS_PROXY`, with the documented invoke-URI form.
+- **Function resource policies:** allow only `apigateway.amazonaws.com` from `dk3k7p41e2/*/*`.
+- **Functions:** no function URLs, event source mappings or aliases, and `$LATEST` only.
+- **Roles:** trust `lambda.amazonaws.com` only, with no permissions boundary.
+- **IoT:** one certificate, the hand-provisioned `scoreboard-01`.
+- **What changed:** the log comparison showed 4 access-log entries against 1 function invocation over two hours, because refused requests never reach the function. The threat model now says the comparison is by count and time (HockeyTrack `4bc82d8`).
+
+**Known and unwatched,** stated as §6 does:
+- direct invocation of either function;
+- the functions' IAM roles and trust policies;
+- the API and function log groups;
+- the devices table's data plane;
+- a custom domain rerouted away from the API, of which there is none today.
