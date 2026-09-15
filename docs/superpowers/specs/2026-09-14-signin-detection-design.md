@@ -227,3 +227,70 @@ against a real event, and the record says so.
 - **A second AWS account for the alerting.** A rewrite of this rule's own pattern is caught
   only minutes later, by which time the pattern is the attacker's. That residual
   is the same one HockeyTrack's section 5 already accepts.
+
+## 7. Verification record (2026-09-15)
+
+Run from the unmerged branches (hockeytrack `scoreboard-signin-detection`, this repository's `signin-detection`) against the live account, following plan Task 4. Addresses and the invite list never appear here or in any command's output.
+
+**Before applying, against real CloudTrail history:**
+- **Pattern.** The rendered pattern is 775 of 2,048 characters. The pool was resolved by the data source to `us-east-1_xJ6aWqZfR`. `terraform console` cannot evaluate a data source outside a plan, so the pattern was rebuilt from the plan's own rendering.
+- **`test-event-pattern`, 16 of 16 correct.**
+  - *Match:* `UpdateUserPool`, `UpdateUserPoolClient`, `CreateIdentityProvider` and `AdminDeleteUser` on the pool; `CreateFunction20150331` and `AddPermission20150331v2` on the gate; `PutParameter` on the list.
+  - *No match:* `DescribeUserPool` and `ListUsers` on the pool; `Token_POST` and `OAuth2Response_GET`; the `InitiateAuth` and `SignUp` probes; `PutParameter` on LitLibrary's list; `UpdateFunctionCode20150331v2` on `scoreboard-api`; `GetFunction20150331v2` on the gate.
+- **90-day sweep** with a local matcher. Six spot checks with `test-event-pattern` agreed with it.
+  - **cognito-idp:** 1,732 events, 11 matches, all changes to this pool (its creation-day setup on 2026-09-12, and the 2026-09-13/14 sign-in deploy and user changes). The account's other pools had 13 writes in the window; none match.
+  - **lambda:** 4,890 events, 2 matches (the gate's creation and permission).
+  - **ssm:** 391 events, 3 matches (the invite-list writes).
+  - **No `readOnly` key:** no event naming the three resources lacked the key, so `readOnly: [false]` hides nothing.
+- **Synthetic events, labeled as such.** No real event of these shapes existed. A real SSM envelope was re-used with the event name and request parameters substituted, and `test-event-pattern` returned `True` for all three:
+  - `DeleteParameters` with `names` containing the list;
+  - `DeleteParameter` with `name` equal to the list;
+  - `PutResourcePolicy` with the list's ARN.
+
+  The same calls naming LitLibrary's parameter returned `False`.
+- **Failures filter proven with CloudWatch's own matcher.**
+  - `filter-log-events` over the log group's 30-day retention matched 0 lines.
+  - `test-metric-filter` on all 40 real lines matched none. The 40 are 5 refusals, 5 error records, 9 each of START, END and REPORT, and 3 INIT_START.
+  - Six documented failure lines all matched: a timeout, a timeout REPORT, a runtime exit, an INIT_REPORT error, aws-lambda-go's panic line and a raw Go panic.
+
+**Deploy.**
+- **HockeyTrack:**
+  - The apply added 2 and changed 4. The fourth change, not in the plan's list, is the `alerting_modify` target, because its alert sentence changed.
+  - `image_tag` was pinned to the deployed `0af1697`.
+  - The deployed pattern equals the rendered one as parsed JSON. The rule is `ENABLED` with one target, the security topic plus its DLQ.
+- **This repository:**
+  - The apply added 3 and changed 5. The five were every Lambda, redeployed with identical code: Go stamps `vcs.revision` and `vcs.time` into each binary, so every commit changes every code hash. That is a finding, worth `-buildvcs=false` in `make build`.
+- **Drift:** plans in both repositories showed no changes, after the apply and again after all breaks.
+
+**Break tests.** Every expected email arrived, 5–25 seconds after its CloudTrail event, and the security DLQ stayed empty.
+
+| Branch | Real write | Email |
+|---|---|---|
+| Lambda `functionName` | the redeploy's `UpdateFunctionCode20150331v2`; `update-function-configuration --timeout 5` | both |
+| Lambda `resource` | `tag-resource` / `untag-resource` | `TagResource20170331v2`, `UntagResource20170331v2` |
+| Cognito `userPoolId` | `create-group` / `delete-group` | both |
+| Cognito `resourceArn` | pool `tag-resource` / `untag-resource` | both |
+| SSM `name` | `put-parameter --overwrite` with the same value and description, compared afterwards without printing | `PutParameter` |
+| SSM `resourceId` | `add-tags-to-resource` / `remove-tags-from-resource` | both |
+
+**Rewrite coverage.** The widened `scoreboard-` prefix paged on real events: `PutMetricAlarm` at the creation of `scoreboard-authgate-failures` and `-throttles`, names the old prefix could not match. That made the plan's separate re-save of `scoreboard-signin-refused` redundant, so it was not run.
+
+**Negatives.**
+- Scoreboard and HockeyTrack plans sent no rule email.
+- The owner's sign-in was admitted with no rule email.
+- An uninvited account was refused, logged as `PreSignUp_ExternalProvider reason="not invited"`. `scoreboard-authgate-failures` stayed `OK` with no datapoint.
+
+**Gate alarms.**
+- **Crash.**
+  - With `ALLOWLIST_PARAMETER` emptied, one sign-in attempt failed.
+  - The runtime wrote `ERROR ALLOWLIST_PARAMETER is required`, then `INIT_REPORT … Phase: init Status: error Error Type: Runtime.ExitError`, `INIT_REPORT … Phase: invoke Status: error Error Type: Runtime.ExitError` and `REPORT … Status: error Error Type: Runtime.ExitError`.
+  - The metric counted 3. The alarm went to `ALARM` at 01:44:53 UTC, and its email arrived.
+  - The environment was restored from a saved copy.
+- **Throttle.**
+  - With reserved concurrency 0, one sign-in attempt produced 4 throttles, so Cognito retries a throttled trigger.
+  - The alarm went to `ALARM` at 01:47:37 UTC, and its email arrived. The limit was removed.
+- **Not observed:** the timeout lines (`Status: timeout`, `Task timed out`) cannot be induced safely. Their terms match AWS's documented wording and CloudWatch's matcher, not a real event.
+
+**Section 9 re-measured** (HockeyTrack 2bfcc27). Over the same window, as far as CloudTrail still held it (2026-06-20 to 2026-09-11, the same 109 writes), the old matcher reproduces the published 33. The new prefix matches 34; the extra one is `scoreboard-dlq-depth`.
+
+**Known, unwatched authorization roots.** Stated here as §6 does: the admin API's JWT authorizer, its routes and integrations, and the `scoreboard-api` and `scoreboard-enroll` functions. A change to any of them can grant identity or panel control without touching the gate, and nothing pages on it.
