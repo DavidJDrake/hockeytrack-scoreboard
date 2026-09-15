@@ -1,35 +1,47 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"strings"
 	"testing"
 
 	"github.com/aws/aws-lambda-go/events"
 
 	"hockeytrack-scoreboard/internal/devices"
+	"hockeytrack-scoreboard/internal/idtoken"
+	"hockeytrack-scoreboard/internal/idtoken/idtokentest"
 	"hockeytrack-scoreboard/internal/iotpub"
 )
 
+// req builds a request the way API Gateway delivers a signed-in call: the
+// token in the header and, because the authorizer accepted it, its claims in
+// the authorizer block. The handler must believe only the header.
 func req(method, route, sub, body string, params map[string]string) events.APIGatewayV2HTTPRequest {
-	r := events.APIGatewayV2HTTPRequest{Body: body, PathParameters: params}
+	r := events.APIGatewayV2HTTPRequest{Body: body, PathParameters: params, Headers: map[string]string{}}
 	r.RequestContext.HTTP.Method = method
 	r.RequestContext.RouteKey = route
 	r.RouteKey = route
 	if sub != "" {
-		r.RequestContext.Authorizer = &events.APIGatewayV2HTTPRequestContextAuthorizerDescription{
-			JWT: &events.APIGatewayV2HTTPRequestContextAuthorizerJWTDescription{Claims: map[string]string{"sub": sub}},
-		}
+		r.Headers["authorization"] = idtokentest.Header(idtoken.Claims{Sub: sub})
+		r.RequestContext.Authorizer = authorizer(sub)
 	}
 	return r
+}
+
+func authorizer(sub string) *events.APIGatewayV2HTTPRequestContextAuthorizerDescription {
+	return &events.APIGatewayV2HTTPRequestContextAuthorizerDescription{
+		JWT: &events.APIGatewayV2HTTPRequestContextAuthorizerJWTDescription{Claims: map[string]string{"sub": sub}},
+	}
 }
 
 func handlerWith(t *testing.T) (*Handler, *devices.Fake, *iotpub.Fake) {
 	t.Helper()
 	st, pub := devices.NewFake(), &iotpub.Fake{}
 	_ = st.Register(context.Background(), "scoreboard-7qf2")
-	return &Handler{Store: st, Pub: pub}, st, pub
+	return &Handler{Store: st, Pub: pub, Tokens: idtokentest.Fake{}}, st, pub
 }
 
 func TestSettingAGamePublishesRetainedConfigToThatDevicesTopic(t *testing.T) {
@@ -149,5 +161,72 @@ func TestAnUnauthenticatedRequestIsRejectedWithoutTouchingTheStore(t *testing.T)
 	}
 	if len(pub.Messages) != 0 {
 		t.Error("an unauthenticated request caused a publish")
+	}
+}
+
+func TestForgedAuthorizerClaimsWithoutATokenAreRefusedAndLogged(t *testing.T) {
+	// A hand-built event sent straight to the function: the owner's sub in
+	// the authorizer block, and no token.
+	h, st, pub := handlerWith(t)
+	ctx := context.Background()
+	_ = st.Claim(ctx, "scoreboard-7qf2", "sub-a")
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	r := req("PUT", "PUT /api/devices/{thing}/game", "", `{"gameId":2026020001}`, map[string]string{"thing": "scoreboard-7qf2"})
+	r.RequestContext.Authorizer = authorizer("sub-a")
+	res, err := h.Handle(ctx, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.StatusCode != 401 {
+		t.Errorf("status = %d, want 401", res.StatusCode)
+	}
+	if len(pub.Messages) != 0 {
+		t.Error("a forged event published a config")
+	}
+	if !strings.Contains(buf.String(), idtoken.MismatchMessage) {
+		t.Errorf("no mismatch line logged: %s", buf.String())
+	}
+}
+
+func TestIdentityComesFromTheTokenNotTheAuthorizerBlock(t *testing.T) {
+	h, st, pub := handlerWith(t)
+	ctx := context.Background()
+	_ = st.Claim(ctx, "scoreboard-7qf2", "sub-a")
+
+	r := req("PUT", "PUT /api/devices/{thing}/game", "sub-b", `{"gameId":2026020001}`, map[string]string{"thing": "scoreboard-7qf2"})
+	r.RequestContext.Authorizer = authorizer("sub-a")
+	res, _ := h.Handle(ctx, r)
+	if res.StatusCode != 404 {
+		t.Errorf("status = %d, want 404: the token says sub-b, who does not own the panel", res.StatusCode)
+	}
+	if len(pub.Messages) != 0 {
+		t.Error("published on the authorizer block's say-so")
+	}
+}
+
+func TestAValidTokenWithoutAnAuthorizerBlockIsServed(t *testing.T) {
+	// A direct invoke carrying a genuine token. Verification accepts it by
+	// design; HockeyTrack's section 12 rule is what sees the invoke.
+	h, st, _ := handlerWith(t)
+	ctx := context.Background()
+	_ = st.Claim(ctx, "scoreboard-7qf2", "sub-a")
+	r := req("GET", "GET /api/devices", "sub-a", "", nil)
+	r.RequestContext.Authorizer = nil
+	res, _ := h.Handle(ctx, r)
+	if res.StatusCode != 200 {
+		t.Errorf("status = %d, want 200", res.StatusCode)
+	}
+}
+
+func TestUnavailableSigningKeysAre503(t *testing.T) {
+	h, _, _ := handlerWith(t)
+	h.Tokens = idtokentest.Fake{Unavailable: true}
+	res, _ := h.Handle(context.Background(), req("GET", "GET /api/devices", "sub-a", "", nil))
+	if res.StatusCode != 503 || !strings.Contains(res.Body, "sign-in check unavailable") {
+		t.Errorf("got %d %s, want 503 sign-in check unavailable", res.StatusCode, res.Body)
 	}
 }

@@ -13,6 +13,7 @@ import (
 
 	"hockeytrack-scoreboard/internal/devices"
 	"hockeytrack-scoreboard/internal/enroll"
+	"hockeytrack-scoreboard/internal/idtoken"
 )
 
 func main() {
@@ -30,6 +31,11 @@ func main() {
 		slog.Error("ENROLLMENTS_TABLE, DEVICES_TABLE, IOT_ENDPOINT and DEVICE_POLICY are required")
 		os.Exit(1)
 	}
+	pool, client := os.Getenv("USER_POOL_ID"), os.Getenv("APP_CLIENT_ID")
+	if pool == "" || client == "" {
+		slog.Error("USER_POOL_ID and APP_CLIENT_ID are required")
+		os.Exit(1)
+	}
 	ddb := dynamodb.NewFromConfig(cfg)
 	h := &Handler{
 		Enrollments: enroll.NewDynamo(ddb, enrollments),
@@ -38,6 +44,7 @@ func main() {
 		IoTEndpoint: endpoint,
 		TTL:         24 * time.Hour,
 		CodeTTL:     15 * time.Minute,
+		Tokens:      idtoken.New(cfg.Region, pool, client),
 	}
 	lambda.Start(h.Handle)
 }

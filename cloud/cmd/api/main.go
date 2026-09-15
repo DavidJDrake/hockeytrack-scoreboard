@@ -1,6 +1,7 @@
 // Command api serves the scoreboard admin API behind an API Gateway HTTP API
-// with a Cognito JWT authorizer. The authorizer proves the caller signed in;
-// this process decides what they may touch.
+// with a Cognito JWT authorizer. This process verifies the caller's ID token
+// again itself (internal/idtoken), because an event can reach it without
+// passing the authorizer, and decides what they may touch.
 package main
 
 import (
@@ -20,6 +21,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/iotdataplane"
 
 	"hockeytrack-scoreboard/internal/devices"
+	"hockeytrack-scoreboard/internal/idtoken"
 	"hockeytrack-scoreboard/internal/iotpub"
 	"hockeytrack-scoreboard/internal/today"
 )
@@ -65,11 +67,17 @@ func main() {
 		slog.Error("DEVICES_TABLE, IOT_ENDPOINT and SCHEDULE_URL are required")
 		os.Exit(1)
 	}
+	pool, client := os.Getenv("USER_POOL_ID"), os.Getenv("APP_CLIENT_ID")
+	if pool == "" || client == "" {
+		slog.Error("USER_POOL_ID and APP_CLIENT_ID are required")
+		os.Exit(1)
+	}
 	iot := iotdataplane.NewFromConfig(cfg, func(o *iotdataplane.Options) { o.BaseEndpoint = &endpoint })
 	h := &Handler{
-		Store: devices.NewDynamo(dynamodb.NewFromConfig(cfg), table),
-		Pub:   iotpub.NewIoT(iot),
-		Games: func(ctx context.Context) ([]byte, error) { return games(ctx, scheduleURL) },
+		Store:  devices.NewDynamo(dynamodb.NewFromConfig(cfg), table),
+		Pub:    iotpub.NewIoT(iot),
+		Games:  func(ctx context.Context) ([]byte, error) { return games(ctx, scheduleURL) },
+		Tokens: idtoken.New(cfg.Region, pool, client),
 	}
 	lambda.Start(h.Handle)
 }

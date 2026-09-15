@@ -21,6 +21,7 @@ import (
 
 	"hockeytrack-scoreboard/internal/devices"
 	"hockeytrack-scoreboard/internal/enroll"
+	"hockeytrack-scoreboard/internal/idtoken"
 )
 
 // maxCodeAttempts bounds retrying a colliding code. A collision is a
@@ -36,6 +37,7 @@ type Handler struct {
 	IoTEndpoint string
 	TTL         time.Duration
 	CodeTTL     time.Duration
+	Tokens      idtoken.Tokens
 }
 
 func respond(status int, body any) (events.APIGatewayV2HTTPResponse, error) {
@@ -52,13 +54,6 @@ func respond(status int, body any) (events.APIGatewayV2HTTPResponse, error) {
 
 func fail(status int, msg string) (events.APIGatewayV2HTTPResponse, error) {
 	return respond(status, map[string]string{"error": msg})
-}
-
-func subject(req events.APIGatewayV2HTTPRequest) string {
-	if req.RequestContext.Authorizer == nil || req.RequestContext.Authorizer.JWT == nil {
-		return ""
-	}
-	return req.RequestContext.Authorizer.JWT.Claims["sub"]
 }
 
 func body(req events.APIGatewayV2HTTPRequest) []byte {
@@ -246,19 +241,15 @@ func (h *Handler) rotate(ctx context.Context, p enroll.Pending) (string, error) 
 // ownerMatches decides whether this caller may claim this enrollment. An
 // enrollment with no hint may be claimed by any invited user; one with a hint
 // may be claimed only by the person the card named.
-func ownerMatches(p enroll.Pending, req events.APIGatewayV2HTTPRequest) bool {
+func ownerMatches(p enroll.Pending, caller idtoken.Claims) bool {
 	if p.OwnerHintHash == "" {
 		return true
 	}
-	if req.RequestContext.Authorizer == nil || req.RequestContext.Authorizer.JWT == nil {
-		return false
-	}
-	claims := req.RequestContext.Authorizer.JWT.Claims
 	// cognito:username is Google_ followed by Google's account ID for these
 	// accounts (username maps from sub, terraform/signin.tf) -- not something
 	// anyone would type into a setup file -- so the comparison is against what
 	// a person would actually write.
-	if u := claims["cognito:username"]; u != "" && enroll.HashSecret(enroll.NormalizeOwner(u)) == p.OwnerHintHash {
+	if u := caller.CognitoUsername; u != "" && enroll.HashSecret(enroll.NormalizeOwner(u)) == p.OwnerHintHash {
 		return true
 	}
 	// email is mutable by the signed-in user themselves (Cognito's
@@ -285,22 +276,18 @@ func ownerMatches(p enroll.Pending, req events.APIGatewayV2HTTPRequest) bool {
 	//     email_verified regardless, so Cognito records what Google sends;
 	//     it is not what stops a self-service rewrite.)
 	//
-	// The exact string API Gateway's JWT authorizer flattens the boolean
-	// email_verified claim into cannot be confirmed without a real token;
-	// this assumes "true". A wrong guess fails closed -- a legitimate owner
-	// gets a 404, never an impostor a certificate -- but a 404 here is
-	// indistinguishable from every other 404 in this handler, so the near
-	// miss is logged rather than left to be diagnosed at hardware-test time.
-	if e := claims["email"]; e != "" {
+	// email_verified is read from the verified token (internal/idtoken), which
+	// accepts JSON true or the string "true" and nothing else. A near miss --
+	// the hint matches but the flag is not set -- fails closed with the same
+	// 404 as every other refusal here, so it is logged rather than left to be
+	// diagnosed at hardware-test time.
+	if e := caller.Email; e != "" {
 		matches := enroll.HashSecret(enroll.NormalizeOwner(e)) == p.OwnerHintHash
-		if matches && claims["email_verified"] == "true" {
+		if matches && caller.EmailVerified {
 			return true
 		}
 		if matches {
-			// The address itself is never logged; only the flag's raw form,
-			// which is the thing in doubt.
-			slog.Warn("owner hint matched an email claim that is not verified",
-				"email_verified", claims["email_verified"])
+			slog.Warn("owner hint matched an email claim that is not verified")
 		}
 	}
 	return false
@@ -310,10 +297,14 @@ func ownerMatches(p enroll.Pending, req events.APIGatewayV2HTTPRequest) bool {
 // certificate. Reserve runs first, before any AWS call, so two people racing
 // the same code cannot both mint one.
 func (h *Handler) claim(ctx context.Context, req events.APIGatewayV2HTTPRequest) (events.APIGatewayV2HTTPResponse, error) {
-	sub := subject(req)
-	if sub == "" {
+	caller, err := idtoken.Authenticate(ctx, h.Tokens, req)
+	if errors.Is(err, idtoken.ErrUnavailable) {
+		return fail(http.StatusServiceUnavailable, "sign-in check unavailable")
+	}
+	if err != nil {
 		return fail(http.StatusUnauthorized, "unauthenticated")
 	}
+	sub := caller.Sub
 	var in struct {
 		Code string `json:"code"`
 	}
@@ -341,7 +332,7 @@ func (h *Handler) claim(ctx context.Context, req events.APIGatewayV2HTTPRequest)
 	// 404, not 403: somebody who read the code off a screen learns nothing
 	// about whether it was real. Checked before Reserve, so a stranger's
 	// attempt cannot consume the one-time claim.
-	if !ownerMatches(p, req) {
+	if !ownerMatches(p, caller) {
 		return fail(http.StatusNotFound, "no enrollment with that code")
 	}
 	if err := h.Enrollments.Reserve(ctx, p.TokenHash, sub); err != nil {
