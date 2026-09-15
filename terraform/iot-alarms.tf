@@ -74,10 +74,10 @@
 # These alarm names are load-bearing outside this repository. HockeyTrack's
 # hockeytrack-sec-alerting-modification rule pages when a security alarm is
 # rewritten rather than deleted, and it finds this stack's alarms by the
-# "scoreboard-iot-" prefix, because they publish to its security topic.
-# Renaming them here silently drops that coverage: nothing fails, no plan
-# shows a difference, and the alarms simply stop being watched. Rename them
-# only alongside that rule.
+# "scoreboard-" prefix. An alarm anywhere in this stack without that prefix is
+# silently unwatched: nothing fails in AWS and no plan shows a difference.
+# site/tests/signin-config.test.js fails instead, so keep the prefix on every
+# alarm.
 variable "security_alerts_topic_name" {
   type        = string
   default     = "hockeytrack-security-alerts"

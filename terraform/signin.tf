@@ -186,3 +186,91 @@ resource "aws_cloudwatch_metric_alarm" "signin_refused" {
   alarm_actions       = [data.aws_sns_topic.security_alerts.arn]
   treat_missing_data  = "notBreaching"
 }
+
+# The gate fails closed when it cannot run, which is the right failure and a
+# silent one. A crash, a timeout or a throttle refuses the sign-in without
+# writing "sign-in refused", so scoreboard-signin-refused never counts it, and
+# the owner simply cannot get in.
+#
+# Lambda's Errors metric is not the answer, because every refusal is an Errors
+# datapoint: the gate refuses by returning an error. Metric math subtracting
+# refusals was rejected too, because a refusal's error and its log line can fall
+# in adjacent five-minute periods and page on nothing. This filter matches only
+# lines the Lambda runtime writes when the function itself fails. A refusal
+# writes none of them: its REPORT line carries no Status field, which was
+# checked against the live log group, and a test holds the pattern to that.
+#
+#   Runtime.ExitError, Runtime exited   the process died, including at startup
+#   Status: error, Status: timeout      the platform's verdict on the invocation
+#   Task timed out                      the timeout's own line
+#   resulted in a panic                 a handler panic: aws-lambda-go recovers it, logs it, then exits with this line
+#   panic:                              a panic outside the handler, which Go prints itself
+#
+# One failure can write several of these lines, so the metric counts lines, not
+# failures. The threshold is one.
+#
+# Neither log alarm can see its own inputs taken away, and HockeyTrack's
+# hockeytrack-sec-scoreboard-signin rule watches neither CloudWatch Logs nor
+# IAM. Deleting or rewriting this log group's metric filters silences the
+# refusal and failures alarms. Removing the role's logs permissions silences
+# both while the gate keeps deciding; removing its ssm:GetParameter fails the
+# gate closed, and each refusal is logged as "invite list unavailable" but
+# pages only at three in an hour. This filter also assumes Lambda's default
+# text log format -- the function sets no logging_config -- so switching it to
+# JSON would change how the runtime writes these lines. That switch is itself
+# an UpdateFunctionConfiguration, which the HockeyTrack rule does page on.
+resource "aws_cloudwatch_log_metric_filter" "authgate_failures" {
+  name           = "scoreboard-authgate-failures"
+  log_group_name = aws_cloudwatch_log_group.authgate.name
+  pattern        = "?\"Runtime.ExitError\" ?\"Runtime exited\" ?\"Status: error\" ?\"Status: timeout\" ?\"Task timed out\" ?\"panic:\" ?\"resulted in a panic\""
+
+  metric_transformation {
+    name      = "AuthgateFailures"
+    namespace = "Scoreboard"
+    value     = "1"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "authgate_failures" {
+  alarm_name          = "scoreboard-authgate-failures"
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  evaluation_periods  = 1
+  threshold           = 1
+  period              = 300
+  statistic           = "Sum"
+  namespace           = "Scoreboard"
+  metric_name         = "AuthgateFailures"
+  alarm_description   = <<-EOT
+    The scoreboard sign-in gate (scoreboard-authgate) crashed or timed out. It
+    fails closed, so nobody, the owner included, can sign in to the admin site
+    while this lasts. Read /aws/lambda/scoreboard-authgate for the failing
+    lines, and check the function's configuration against the scoreboard
+    repository: an emptied ALLOWLIST_PARAMETER makes it exit at startup.
+  EOT
+  alarm_actions       = [data.aws_sns_topic.security_alerts.arn]
+  treat_missing_data  = "notBreaching"
+}
+
+# A throttled invocation never starts, so it writes no log line at all, and
+# Lambda counts it in neither Invocations nor Errors. Only this metric sees it.
+# The function has no reserved concurrency, so a throttle means the account's
+# concurrency is exhausted, or someone set a reserved concurrency on it.
+resource "aws_cloudwatch_metric_alarm" "authgate_throttles" {
+  alarm_name          = "scoreboard-authgate-throttles"
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  evaluation_periods  = 1
+  threshold           = 1
+  period              = 300
+  statistic           = "Sum"
+  namespace           = "AWS/Lambda"
+  metric_name         = "Throttles"
+  dimensions          = { FunctionName = aws_lambda_function.authgate.function_name }
+  alarm_description   = <<-EOT
+    The scoreboard sign-in gate (scoreboard-authgate) was throttled. It fails
+    closed, so sign-in to the admin site is refused while this lasts. Check
+    `aws lambda get-function-concurrency --function-name scoreboard-authgate`
+    (it should have none) and the account's concurrent executions.
+  EOT
+  alarm_actions       = [data.aws_sns_topic.security_alerts.arn]
+  treat_missing_data  = "notBreaching"
+}
