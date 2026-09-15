@@ -136,17 +136,29 @@ site-local: site-config
 
 # Lambda zips: static arm64 binaries named `bootstrap` for provided.al2023,
 # zipped with python3's zipfile module (no `zip` binary on this machine).
+#
+# -buildvcs=false and -trimpath make the binaries reproducible: Go otherwise
+# stamps each one with the commit and the checkout's absolute path, so every
+# commit changes every function's hash, and Terraform redeploys -- and
+# HockeyTrack's security rules page on -- code that did not change.
+# site/tests/build-config.test.js keeps both flags on every build line.
+#
+# The zips the python3 lines below write are neither reproducible nor what
+# Terraform deploys: each archive_file data source (lambda.tf, admin.tf,
+# enroll.tf, signin.tf) rewrites its zip from the bootstrap whenever Terraform
+# plans (an apply plans first), with a pinned file mode, and that regenerated
+# zip is the one uploaded.
 build:
 	mkdir -p build/reducer build/today build/api build/enroll build/authgate
-	cd cloud && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -ldflags="-s -w" -o ../build/reducer/bootstrap ./cmd/reducer
-	cd cloud && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -ldflags="-s -w" -o ../build/today/bootstrap ./cmd/today
+	cd cloud && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -buildvcs=false -trimpath -ldflags="-s -w" -o ../build/reducer/bootstrap ./cmd/reducer
+	cd cloud && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -buildvcs=false -trimpath -ldflags="-s -w" -o ../build/today/bootstrap ./cmd/today
 	cd build/reducer && python3 -m zipfile -c ../reducer.zip bootstrap
 	cd build/today && python3 -m zipfile -c ../today.zip bootstrap
-	cd cloud && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -ldflags="-s -w" -o ../build/api/bootstrap ./cmd/api
+	cd cloud && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -buildvcs=false -trimpath -ldflags="-s -w" -o ../build/api/bootstrap ./cmd/api
 	cd build/api && python3 -m zipfile -c ../api.zip bootstrap
-	cd cloud && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -ldflags="-s -w" -o ../build/enroll/bootstrap ./cmd/enroll
+	cd cloud && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -buildvcs=false -trimpath -ldflags="-s -w" -o ../build/enroll/bootstrap ./cmd/enroll
 	cd build/enroll && python3 -m zipfile -c ../enroll.zip bootstrap
-	cd cloud && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -ldflags="-s -w" -o ../build/authgate/bootstrap ./cmd/authgate
+	cd cloud && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -buildvcs=false -trimpath -ldflags="-s -w" -o ../build/authgate/bootstrap ./cmd/authgate
 	cd build/authgate && python3 -m zipfile -c ../authgate.zip bootstrap
 
 deploy: test build

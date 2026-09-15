@@ -144,9 +144,10 @@ resource "aws_cloudwatch_log_group" "enroll" {
 }
 
 data "archive_file" "enroll" {
-  type        = "zip"
-  source_file = "${path.module}/../build/enroll/bootstrap"
-  output_path = "${path.module}/../build/enroll.zip"
+  type             = "zip"
+  source_file      = "${path.module}/../build/enroll/bootstrap"
+  output_path      = "${path.module}/../build/enroll.zip"
+  output_file_mode = "0755"
 }
 
 resource "aws_lambda_function" "enroll" {
