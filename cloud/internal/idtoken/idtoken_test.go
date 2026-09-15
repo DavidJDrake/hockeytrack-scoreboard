@@ -295,6 +295,48 @@ func TestAKeyFetchFailureIsUnavailableNotInvalid(t *testing.T) {
 	}
 }
 
+func TestAFailedRefetchForAnUnknownKeyIsUnavailable(t *testing.T) {
+	v, j, c, key := setup(t)
+	ctx := context.Background()
+
+	// The first use fetches successfully and caches k1.
+	if _, err := v.Verify(ctx, sign(t, key, "k1", goodClaims(c.t))); err != nil {
+		t.Fatal(err)
+	}
+
+	c.t = c.t.Add(5 * time.Minute)
+	j.mu.Lock()
+	j.fail = true
+	j.mu.Unlock()
+
+	// Past the refetch window, an unknown kid triggers a refetch. That
+	// refetch fails, so this is an outage, not proof the kid is bogus.
+	_, other := keys(t)
+	unknown := sign(t, other, "unknown-kid", goodClaims(c.t))
+	if _, err := v.Verify(ctx, unknown); !errors.Is(err, ErrUnavailable) || errors.Is(err, ErrInvalid) {
+		t.Fatalf("err = %v, want ErrUnavailable only", err)
+	}
+
+	// The already-cached key still verifies while the server is down.
+	known := sign(t, key, "k1", goodClaims(c.t))
+	if _, err := v.Verify(ctx, known); err != nil {
+		t.Errorf("a token under the already-known kid was refused during the outage: %v", err)
+	}
+}
+
+func TestAClaimValueNeverAppearsInAnErrorMessage(t *testing.T) {
+	v, _, c, key := setup(t)
+	m := goodClaims(c.t)
+	m["exp"] = "attacker-text-XYZ"
+	_, err := v.Verify(context.Background(), sign(t, key, "k1", m))
+	if !errors.Is(err, ErrInvalid) {
+		t.Fatalf("err = %v, want ErrInvalid", err)
+	}
+	if strings.Contains(err.Error(), "attacker-text-XYZ") {
+		t.Errorf("err = %v leaks the claim's raw value", err)
+	}
+}
+
 func TestAnOversizedKeySetIsUnavailable(t *testing.T) {
 	v, j, c, key := setup(t)
 	j.mu.Lock()

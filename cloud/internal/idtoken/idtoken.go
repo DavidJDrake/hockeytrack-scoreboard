@@ -119,7 +119,7 @@ func (v *Verifier) Verify(ctx context.Context, header string) (Claims, error) {
 		return Claims{}, fmt.Errorf("%w: no token", ErrInvalid)
 	}
 
-	var unavailable error
+	var keyErr error
 	parser := jwt.NewParser(
 		// Checked before the key is looked up, so "none" and an HMAC token
 		// signed with the public key never reach a verification step.
@@ -136,17 +136,22 @@ func (v *Verifier) Verify(ctx context.Context, header string) (Claims, error) {
 		if kid == "" {
 			return nil, errors.New("no key id")
 		}
-		key, err := v.keyFor(ctx, kid)
-		if errors.Is(err, ErrUnavailable) {
-			unavailable = err
-		}
-		return key, err
+		key, kerr := v.keyFor(ctx, kid)
+		keyErr = kerr
+		return key, kerr
 	})
-	if unavailable != nil {
-		return Claims{}, unavailable
+	// keyFor's own error already says exactly what happened - an outage or
+	// an unknown key id - without ever touching attacker-controlled claim
+	// text, so it is returned as-is instead of folded into the generic
+	// mapping below, which would otherwise double its "idtoken: ..." prefix.
+	if errors.Is(keyErr, ErrUnavailable) || errors.Is(keyErr, ErrInvalid) {
+		return Claims{}, keyErr
 	}
 	if err != nil {
-		return Claims{}, fmt.Errorf("%w: %v", ErrInvalid, err)
+		// golang-jwt's own message can echo a claim's raw value (for
+		// example a non-numeric "exp"), so only a fixed message naming the
+		// failed check is used here, never err.Error() itself.
+		return Claims{}, fmt.Errorf("%w: %s", ErrInvalid, jwtErrorMessage(err))
 	}
 	// WithAudience accepts a token whose aud merely includes the client.
 	// Cognito's ID tokens carry exactly one.
@@ -167,6 +172,33 @@ func (v *Verifier) Verify(ctx context.Context, header string) (Claims, error) {
 	}, nil
 }
 
+// jwtErrorMessage maps a golang-jwt parse or validation error to a fixed
+// message naming the check that failed. golang-jwt's own error text can
+// include a claim's raw value (for example a non-numeric "exp"), so the
+// message is never derived from err.Error() itself.
+func jwtErrorMessage(err error) string {
+	switch {
+	case errors.Is(err, jwt.ErrTokenMalformed):
+		return "malformed token"
+	case errors.Is(err, jwt.ErrTokenSignatureInvalid):
+		return "invalid signature or signing method"
+	case errors.Is(err, jwt.ErrTokenUnverifiable):
+		return "unverifiable token"
+	case errors.Is(err, jwt.ErrTokenExpired):
+		return "expired"
+	case errors.Is(err, jwt.ErrTokenNotValidYet):
+		return "not valid yet"
+	case errors.Is(err, jwt.ErrTokenInvalidIssuer):
+		return "wrong issuer"
+	case errors.Is(err, jwt.ErrTokenInvalidAudience):
+		return "wrong audience"
+	case errors.Is(err, jwt.ErrTokenRequiredClaimMissing):
+		return "required claim missing"
+	default:
+		return "token rejected"
+	}
+}
+
 // keyFor returns the signing key with this ID. Until the first successful
 // fetch, every call fetches. After that, an unknown ID fetches again at most
 // once per refetchInterval, so a stream of junk key IDs costs Cognito one
@@ -183,13 +215,18 @@ func (v *Verifier) keyFor(ctx context.Context, kid string) (*rsa.PublicKey, erro
 		return k, nil
 	}
 	if v.now().Sub(v.fetchedAt) >= refetchInterval {
-		// A failed refresh keeps the keys already held; the token is refused
-		// below either way.
-		if err := v.fetchLocked(ctx); err != nil {
-			slog.Error("refreshing signing keys", "err", err)
-		}
+		// The old keys stay in place either way; fetchLocked updates
+		// fetchedAt itself, so a failed refresh still rate-limits the next
+		// try.
+		fetchErr := v.fetchLocked(ctx)
 		if k, ok := v.keys[kid]; ok {
 			return k, nil
+		}
+		if fetchErr != nil {
+			// The refresh itself failed - an outage, not merely "this kid
+			// is unknown" - so say that instead of blaming the caller.
+			slog.Error("refreshing signing keys", "err", fetchErr)
+			return nil, fetchErr
 		}
 	}
 	return nil, fmt.Errorf("%w: unknown key id", ErrInvalid)
