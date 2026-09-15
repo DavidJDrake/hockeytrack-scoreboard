@@ -738,17 +738,59 @@ where `<service>` is the eventSource without `.amazonaws.com`. It then calls `aw
 
 Then sweep: for each event source (`cognito-idp`, `lambda`, `ssm`), pull 90 days of events and count how many a local re-implementation of this pattern would match. The pattern is `readOnly` false, and any of the seven fields equal to its values, or satisfying its wildcard. Name each match by eventName and date. Every match must be a change to one of the three resources. Spot-check three of the matches and three non-matches with `test-event-pattern` so the local matcher agrees with AWS. Record the counts for the commit and PR.
 
+In the same sweep, list separately every event that names one of the three resources in any of the seven fields but has no `readOnly` key at all. `readOnly` [false] cannot match such an event, so each is a call this rule is blind to. Name each by eventSource, eventName and date; if any of them is a change rather than a read, stop and report it before applying.
+
 Any mismatch stops the task: fix the pattern, return to Task 1's review, and replan.
 
 - [ ] **Step 3: The user applies HockeyTrack**
 
 Hand the user: `! cd /home/jay/projects/hockeytrack/terraform && XDG_RUNTIME_DIR="$HOME/.cache/xdg-runtime" terraform apply <scratchpad>/hockeytrack-detection.tfplan`
 
-Then run `terraform plan -detailed-exitcode`, which must exit 0. Read the deployed rule back with `aws events describe-rule --region us-east-1 --name hockeytrack-sec-scoreboard-signin`: its pattern must equal the rendered one. Then run `list-targets-by-rule`, which should show one target, the security topic, with its DLQ.
+Then run `terraform plan -detailed-exitcode`, which must exit 0. Read the deployed rule back with `aws events describe-rule --region us-east-1 --name hockeytrack-sec-scoreboard-signin > <scratchpad>/deployed-rule.json`, and compare its pattern with the rendered one as parsed JSON, not as strings, because EventBridge may store the same pattern with different spacing or key order:
+
+```
+python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); d=json.loads(json.load(open(sys.argv[2]))["EventPattern"]); print(r == d)' <scratchpad>/signin-pattern.json <scratchpad>/deployed-rule.json
+```
+
+It must print `True`. Then run `list-targets-by-rule`, which should show one target, the security topic, with its DLQ.
 
 Applying HockeyTrack's own rules writes EventBridge resources, which section 9 may page on. That is expected.
 
 - [ ] **Step 4: Plan and apply the scoreboard alarms**
+
+Before planning, prove the failures filter with AWS's own matcher rather than only the Node tripwire. The pattern below is `authgate_failures`'s from `terraform/signin.tf`, unescaped; copy it from there if the two ever differ.
+
+1. **No real line matches.** The log group keeps 30 days (`retention_in_days`), so this covers all of it:
+
+   ```
+   aws logs filter-log-events --region us-east-1 --log-group-name /aws/lambda/scoreboard-authgate --filter-pattern '?"Runtime.ExitError" ?"Runtime exited" ?"Status: error" ?"Status: timeout" ?"Task timed out" ?"panic:" ?"resulted in a panic"' --start-time "$(( ($(date +%s) - 30*86400) * 1000 ))" --query 'events[].[timestamp,message]' --output text
+   ```
+
+   Expected: no events, or only crashes that can be accounted for, each named in the record. A refusal or an admission here means the filter would page on normal traffic: stop.
+2. **Real refusal and admission lines do not match.** Save up to 50 real lines from a day with sign-ins, which include the `sign-in refused` lines, their `errorMessage` lines, and the `START`/`END`/`REPORT` lines of refusals and admissions alike:
+
+   ```
+   aws logs filter-log-events --region us-east-1 --log-group-name /aws/lambda/scoreboard-authgate --start-time 1789344000000 --max-items 50 --query 'events[].message' --output json > <scratchpad>/authgate-lines.json
+   ```
+
+   These carry a domain at most, never an address (`refuse` logs `domainOf(email)`), but keep the file in the scratchpad and do not paste it into the record. Build `<scratchpad>/tmf-real.json` as `{"filterPattern": <the pattern>, "logEventMessages": <those lines>}` with Python, then:
+
+   ```
+   aws logs test-metric-filter --region us-east-1 --cli-input-json file://<scratchpad>/tmf-real.json
+   ```
+
+   Expected: `matches` is empty.
+3. **Failure lines do match.** Build `<scratchpad>/tmf-failures.json` the same way from lines in the shape the Lambda runtime and aws-lambda-go write them, checking the timeout wording against AWS's Lambda documentation for text-format logs first:
+   - `REPORT RequestId: 00000000-0000-0000-0000-000000000000\tDuration: 5000.00 ms\tBilled Duration: 5000 ms\tMemory Size: 128 MB\tMax Memory Used: 20 MB\tStatus: timeout` (each `\t` a tab, as JSON writes it)
+   - `2026-09-14T00:00:00.000Z 00000000-0000-0000-0000-000000000000 Task timed out after 5.00 seconds`
+   - `RequestId: 00000000-0000-0000-0000-000000000000 Error: Runtime exited with error: exit status 1`
+   - `Runtime.ExitError`
+   - `2026/09/14 00:00:00 calling the handler function resulted in a panic, the process should exit`
+   - `panic: runtime error: invalid memory address or nil pointer dereference`
+
+   Run `test-metric-filter` on it. Expected: every line matches. Record these as documented shapes, not observed lines; Step 6's crash supplies the observed ones.
+
+Any unexpected result stops the task before anything is applied.
 
 Build first: `cd /home/jay/projects/hockeytrack-scoreboard && make build`. Then `cd terraform && terraform plan -input=false -out=<scratchpad>/scoreboard-detection.tfplan`. Expected: 3 to add (the metric filter and two alarms), and no other change. The other functions' code hashes should be unchanged, because `go.mod` did not change. Hand the user the apply of the saved plan, then confirm `terraform plan -detailed-exitcode` exits 0.
 
@@ -762,13 +804,19 @@ Read the security email after each step; the user confirms it arrived. After all
    aws ssm get-parameter … --query Parameter.Value --output text | tr -d '\n' > <scratchpad>/list.txt; chmod 600
    ```
 
-   Hand the user:
+   Read the description Terraform manages, so the re-put does not change it:
 
    ```
-   ! aws ssm put-parameter --region us-east-1 --name /scoreboard/allowed-emails --type String --overwrite --value "file://<scratchpad>/list.txt"
+   aws ssm describe-parameters --region us-east-1 --parameter-filters Key=Name,Values=/scoreboard/allowed-emails --query 'Parameters[0].Description' --output text | tr -d '\n' > <scratchpad>/list-description.txt
    ```
 
-   Expected: an email naming `PutParameter`. Compare the value afterwards without printing it, then delete the file.
+   It must read as `aws_ssm_parameter.allowed_emails`'s `description` in `terraform/signin.tf` renders; it names the site's domain, not an address. Hand the user:
+
+   ```
+   ! aws ssm put-parameter --region us-east-1 --name /scoreboard/allowed-emails --type String --overwrite --value "file://<scratchpad>/list.txt" --description "file://<scratchpad>/list-description.txt"
+   ```
+
+   Expected: an email naming `PutParameter`. Compare the value afterwards without printing it, then delete both files. Step 6's drift check must show no change to the parameter's `description`.
 2. **Lambda `functionName`.** Hand the user:
 
    ```
@@ -802,12 +850,46 @@ Read the security email after each step; the user confirms it arrived. After all
    ```
 
    Expected: two emails.
-5. **Negatives.** Run a scoreboard `terraform plan`, and the owner signs in once. Expected: no email from this rule.
+5. **Cognito `resourceArn`.** Read the pool's ARN with `aws cognito-idp describe-user-pool --region us-east-1 --user-pool-id us-east-1_xJ6aWqZfR --query UserPool.Arn --output text`. Hand the user:
+
+   ```
+   ! aws cognito-idp tag-resource --region us-east-1 --resource-arn <pool ARN> --tags detection-probe=1
+   ```
+
+   then
+
+   ```
+   ! aws cognito-idp untag-resource --region us-east-1 --resource-arn <pool ARN> --tag-keys detection-probe
+   ```
+
+   Expected: two emails.
+6. **SSM `resourceId`.** Hand the user:
+
+   ```
+   ! aws ssm add-tags-to-resource --region us-east-1 --resource-type Parameter --resource-id /scoreboard/allowed-emails --tags Key=detection-probe,Value=1
+   ```
+
+   then
+
+   ```
+   ! aws ssm remove-tags-from-resource --region us-east-1 --resource-type Parameter --resource-id /scoreboard/allowed-emails --tag-keys detection-probe
+   ```
+
+   Expected: two emails. Then run a scoreboard `terraform plan -detailed-exitcode`, which must exit 0: the tags are gone.
+7. **SSM `names` and SSM `resourceArn`, synthetically.** `DeleteParameters` and `PutResourcePolicy` on the real parameter are not harmless, so do not make them. Find a real `DeleteParameters` event and a real SSM `PutResourcePolicy` event on any other parameter in 90 days of `lookup-events`. For each, run `test-event-pattern` twice through `proof.py`: as recorded (expected `false`), and with `/scoreboard/allowed-emails` substituted into `requestParameters.names`, or the parameter's ARN into `requestParameters.resourceArn` (expected `true`). Label both results "synthetic" in the record. If the window holds no such event, record that branch as unproven, not as passed.
+8. **Negatives.** Run a scoreboard `terraform plan`, and the owner signs in once. Expected: no email from this rule.
 
 If an email does not arrive within 15 minutes, find out why before going on. CloudTrail delivery to EventBridge usually takes under five minutes. Read `aws cloudwatch get-metric-statistics --namespace AWS/Events --metric-name MatchedEvents --dimensions Name=RuleName,Value=hockeytrack-sec-scoreboard-signin …`, and the `FailedInvocations` metric, before touching the pattern.
 
 - [ ] **Step 6: Break the gate's alarms**
 
+0. **Negative for the failures alarm.** An uninvited Google account attempts one sign-in: refused. Its address is never written into the record. Wait ten minutes, then:
+
+   ```
+   aws cloudwatch get-metric-statistics --region us-east-1 --namespace Scoreboard --metric-name SignInRefused --statistics Sum --period 300 --start-time "$(date -u -d '-15 min' +%FT%TZ)" --end-time "$(date -u +%FT%TZ)"
+   ```
+
+   Expected: a datapoint of at least 1, because the refusal was counted. The same call for `--metric-name AuthgateFailures` must return no datapoints, and `aws cloudwatch describe-alarms --region us-east-1 --alarm-names scoreboard-authgate-failures --query 'MetricAlarms[0].StateValue'` must read `OK`. A refusal that moves the failures alarm means the filter matches refusals: stop.
 1. **Crash.** Save the function's current environment privately:
 
    ```
@@ -852,6 +934,10 @@ Both the crash and throttle breaks also fire Step 5's rule, because they are Lam
 
 The timeout line (`Status: timeout` / `Task timed out`) cannot be induced safely. Confirm its wording against AWS's Lambda documentation for text-format logs, and record that this term is documented, not observed.
 
+- [ ] **Step 6a: Re-measure section 9's noise under the `scoreboard-` prefix (hockeytrack)**
+
+Section 9 of HockeyTrack's `terraform/security-alarms.tf`, and the matching limit in `docs/threat-model.md` §4, still give the noise figures measured while the prefix was `scoreboard-iot-`: 33 matching writes, 10 of them `PutMetricAlarm`, six on the scoreboard's alarms. Re-run that sweep: 90 days of `events.amazonaws.com`, `sns.amazonaws.com` and `monitoring.amazonaws.com` CloudTrail from `lookup-events`, matched locally against `local.alerting_modify_pattern` as it is now deployed, with three matches and three non-matches spot-checked by `test-event-pattern`. Update the totals and per-call counts in both files, and the scope of "four of this repository's alarms and all thirteen of the scoreboard's" if either count has changed. Commit in hockeytrack: `security: re-measure the alerting rule's noise under the scoreboard- prefix`.
+
 - [ ] **Step 7: Record and hand off**
 
 Append `## 7. Verification record (2026-09-14)` to `docs/superpowers/specs/2026-09-14-signin-detection-design.md`. Include:
@@ -862,6 +948,10 @@ Append `## 7. Verification record (2026-09-14)` to `docs/superpowers/specs/2026-
 - the exact runtime failure lines from the crash;
 - the throttle result;
 - the drift checks;
-- that the timeout term is documented rather than observed.
+- the failures filter's AWS-matcher results from Step 4, and which of its lines were documented rather than observed;
+- which branches were proven by a real break and which only synthetically, or not at all;
+- any event from the sweep that had no `readOnly` key;
+- that the timeout term is documented rather than observed;
+- that the admin API's JWT authorizer, its routes and integrations, and the `scoreboard-api` and `scoreboard-enroll` functions are known authorization roots that no rule watches (spec §6).
 
 Commit it in hockeytrack-scoreboard: `docs: record the sign-in detection proof`. Then offer the user the finishing choice for both branches: two pull requests, one per repository, each description linking the other.

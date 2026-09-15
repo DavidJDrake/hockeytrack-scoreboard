@@ -150,10 +150,16 @@ The pattern gets shorter, not longer. The comment in this repository's
 
 - **`scoreboard-authgate-failures`:** a CloudWatch Logs metric filter on
   `/aws/lambda/scoreboard-authgate` for the Lambda runtime's own failure lines,
-  which a refusal never produces:
-  - a runtime exit (`Runtime.ExitError` / `Runtime exited`);
-  - a timeout (`Task timed out`);
-  - a Go `panic:`.
+  which a refusal never produces. The implementation's pattern has seven
+  terms:
+  - a runtime exit, including at startup (`Runtime.ExitError`, `Runtime exited`);
+  - the platform's verdict on a failed invocation (`Status: error`,
+    `Status: timeout`);
+  - a timeout's own line (`Task timed out`);
+  - a handler panic (`resulted in a panic`): aws-lambda-go recovers the panic,
+    reports it, and exits the process with the message `calling the handler
+    function resulted in a panic, the process should exit`;
+  - a panic outside the handler (`panic:`), which Go prints itself.
 
   It counts into `Scoreboard/AuthgateFailures`. The alarm fires at 1 or more in 5
   minutes and goes to the security-alerts topic. Metric math on
@@ -193,10 +199,25 @@ against a real event, and the record says so.
 
 ## 6. Out of scope
 
+- **The admin API's authorization, the most important gap this leaves.** The
+  gate decides who gets a token; the admin API decides what a token is worth.
+  `scoreboard-api` and `scoreboard-enroll` take the caller's identity entirely
+  from the claims API Gateway's JWT authorizer passes them (`sub`, and for a
+  claim `cognito:username`, `email` and `email_verified`), and
+  `aws_apigatewayv2_authorizer.cognito` (`terraform/admin.tf`) sets which
+  issuer and audience are believed. An `UpdateAuthorizer` naming an issuer the
+  attacker runs, an `UpdateRoute` or `UpdateIntegration` that moves a route to
+  another authorizer or other code, or a code change to either function, can
+  claim or control panels without touching the gate, and no rule in either
+  repository watches `apigateway.amazonaws.com` or those functions. The fix
+  has §4.1's shape: a rule on writes naming the admin API's authorizer, routes
+  and integrations, and on writes naming the two functions.
 - **The static site.** S3 and CloudFront writes that could serve a
   phishing page from the real domain need their own rule.
-- **The gate's IAM role.** An edit to `scoreboard-authgate`'s role can only
-  break the gate, making it fail closed, not bypass it. HockeyTrack's identity
+- **The gate's IAM role.** An edit to `scoreboard-authgate`'s role cannot
+  bypass the gate, but it can break or blind it: losing `ssm:GetParameter`
+  fails it closed, and losing its logs permissions silences the refusal and
+  failures alarms, as does deleting their metric filters. HockeyTrack's identity
   rule deliberately excludes role-policy churn, for the reasons recorded there.
 - **Requiring `Google_` usernames in the gate.** This would close the rogue
   identity provider route at the source instead of detecting it. It is worth
