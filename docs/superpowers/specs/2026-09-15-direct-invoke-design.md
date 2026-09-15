@@ -232,3 +232,49 @@ Every apply is planned to a saved file and run by the user with `!`. No agent or
   - the devices table's data plane;
   - the static site;
   - SCO-27.
+
+## 8. Verification record (2026-09-15)
+
+All times UTC. Both applies ran from saved plans that were read before applying. Direct invokes ran as `funandgames` with the user's go-ahead.
+
+### Step 1: the scoreboard apply (verification in the functions)
+
+- **Plan:** `3 to add, 2 to change, 0 to destroy`. The additions were the two `TokenMismatch` filters and `scoreboard-token-mismatch`. The changes were `scoreboard-api` and `scoreboard-enroll`: their code hash, plus `USER_POOL_ID` and `APP_CLIENT_ID`. No other function changed.
+- **Apply at 09:55.** HockeyTrack emailed five alerts between 09:55:33 and 09:56:09: `PutMetricAlarm` from the alerting-modification rule, and `UpdateFunctionCode` and `UpdateFunctionConfiguration` for each function from section 11.
+- **A real sign-in worked afterwards.** The access log shows `GET /api/devices` 200 and `GET /api/games` 200, and the function logged no verification error.
+- **The forged event was refused.** Its authorizer claims carried `sub` `forged-sub` and its header `Bearer not-a-token`. It got `401 {"error":"unauthenticated"}` and logged exactly one line: `WARN token rejected after authorizer accepted route="GET /api/devices" check="idtoken: invalid token: malformed token"`.
+- **The bare event was refused silently.** With no authorizer block and no header, it got 401 and logged no mismatch line.
+- **The alarm fired.** `scoreboard-token-mismatch` went to ALARM, and its email arrived at 09:59:49.
+
+### Step 2: HockeyTrack apply A (trail selector and category guards)
+
+- **Plan:** `0 to add, 4 to change`. It covered the trail, sections 10 and 11 (each adding only `eventCategory`), and `hockeytrack-foreign-project-deny`. The deny policy's document names the trail's ARN, which Terraform treats as unknown while the trail has pending changes. The apply reported 3 changed, and the policy stayed at `v1`.
+- **The trail now has two selectors.** One logs S3 `WriteOnly` events plus management events. The other logs Lambda `All` events, without management events, for the three function ARNs.
+- **A1 is confirmed.** A real sign-in at 12:28 produced two kinds of `Invoke` record:
+  - authgate, with `userIdentity.type` `AWSService` and `invokedBy` `cognito-idp.amazonaws.com`;
+  - api, for `/api/devices` and `/api/games`, with `AWSService` and `invokedBy` `apigateway.amazonaws.com`.
+
+  A direct invoke at 12:37:48 was recorded with `userIdentity.type` `IAMUser`, no `invokedBy`, and `sourceIPAddress` set.
+- **A2 is confirmed.** `requestParameters.functionName` is the unqualified ARN in every record.
+- **Logging did not start immediately.** A direct invoke at 11:03:06, about 40 seconds after `PutEventSelectors`, was never logged. The likely cause is the delay before a new selector takes effect; the later invokes were all logged.
+
+### Step 3: HockeyTrack apply B (section 12)
+
+- **The rule changed before applying.** During review, a gap came to light: an invoke through a separate API Gateway API that uses its own role would carry `AssumedRole` with `invokedBy` set to API Gateway, and would match nothing. The two `exists: false` branches were replaced by a single branch: `userIdentity.type` anything-but `AWSService` over all three functions.
+  - **Length:** the pattern is 1,456 characters.
+  - **Captured records:** `test-event-pattern` returned false for the three real service invocations and true for the direct invoke. An API Gateway record with `invokedBy` changed to `events.amazonaws.com` also returned true.
+  - **Synthetic truth table:** 12 of 12 cases gave the expected result. `AssumedRole` via API Gateway, and a service calling a function it doesn't own, both match. `scoreboard-api-v2` does not.
+- **Plan:** `2 to add, 2 to change`. The additions were the rule and its target; the changes were the topic and DLQ policies. Applied at about 15:40, and the rule-rewrite email arrived.
+- **Four breaks at 19:36:45–51**, each refused:
+  - `scoreboard-api` with `{}` returned 401.
+  - `scoreboard-enroll` `GET /api/enroll` with no token returned 404.
+  - `scoreboard-authgate` with a pre sign-up event for `break-test@example.com` returned "this account is not invited".
+  - `scoreboard-api --qualifier '$LATEST'` returned 401.
+- **All four paged, and delivery was clean.** `MatchedEvents` 4, `Invocations` 4, and no `FailedInvocations`. SNS delivered 4 and failed 0, and the DLQ held 0. Four emails arrived between 19:36:48 and 19:37:03, each reading "HOCKEYTRACK SECURITY: Invoke … Actor: …user/funandgames".
+- **A3 is confirmed:** EventBridge does receive these data events.
+- **The qualified invoke was logged and matched.** It was recorded with `functionName` set to `…:function:scoreboard-api:$LATEST`, even though the selector lists the unqualified ARN, and the colon prefix matched it.
+- **Normal use stayed silent.** The user signed in again after the breaks (access log 200s, authgate invoked). Sections 10, 11 and 12 recorded no matches after the break window.
+- **Recovery entry, run read-only against the breaks:**
+  - **Step 3 works.** The api window shows the `START` lines. The authgate window shows `WARN sign-in refused trigger=PreSignUp_ExternalProvider reason="not invited" domain=example.com`.
+  - **Step 1 was broken as first written, and is now fixed.** It searched five minutes either side of the alert's time and found nothing, because the trail's log group timestamps each record when CloudTrail delivers it: 19:41:53 for an `eventTime` of 19:36:46. The step now starts one minute before the alert's time and ends at least twenty minutes after it. The same filter over that window returns all four records.
+- **Drift checks:** `terraform plan -detailed-exitcode` exited 0 in both repositories after the applies.
