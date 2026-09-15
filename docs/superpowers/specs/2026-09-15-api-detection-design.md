@@ -46,7 +46,7 @@ event_pattern = jsonencode({
     "readOnly"    = [false]
     "$or" = [
       { "requestParameters" = { "apiId"        = local.scoreboard_api_ids } },
-      { "requestParameters" = { "resource-arn" = [{ "prefix" = "arn:aws:apigateway:${var.region}::/apis/${one(local.scoreboard_api_ids)}" }] } },
+      { "requestParameters" = { "resource-arn" = [for id in local.scoreboard_api_ids : { "prefix" = "arn:aws:apigateway:${var.region}::/apis/${id}" }] } },
       { "requestParameters" = { "functionName" = [{ "wildcard" = "*scoreboard-api*" }, { "wildcard" = "*scoreboard-enroll*" }] } },
       { "requestParameters" = { "resource"     = [{ "wildcard" = "*:function:scoreboard-api*" }, { "wildcard" = "*:function:scoreboard-enroll*" }] } },
     ]
@@ -54,7 +54,7 @@ event_pattern = jsonencode({
 })
 ```
 
-- **The API ID is looked up by name.** `data "aws_apigatewayv2_apis"` looks up `scoreboard-admin`, with a precondition that exactly one matches. `one()` in the pattern fails the plan by itself on zero or several matches, so the precondition's message is the readable half of the same guard. A replaced API is picked up at HockeyTrack's next apply, the same window section 10 already names for the pool.
+- **The API ID is looked up by name.** `data "aws_apigatewayv2_apis"` looks up `scoreboard-admin`, with a precondition that exactly one matches. A `for` expression over the looked-up IDs, rather than `one()`, lets zero or several matches reach the precondition's readable message instead of failing inside the pattern. A replaced API is picked up at HockeyTrack's next apply, the same window section 10 already names for the pool.
 - **No event names, scoped by resource, over-matching wildcards.** The reasoning is section 10's. Implementation confirms the complete field list from the apigatewayv2 and lambda service models; §3 is what the observed events show.
 - **Length precondition** `<= 2048`, the same as sections 9 and 10.
 
@@ -64,7 +64,7 @@ Alert sentence: *If this was not you, assume the scoreboard admin API may accept
 
 ### 4.2 Stop redeploying unchanged functions (this repository)
 
-`make build` passes `-buildvcs=false` to every `go build`. An unchanged function then builds to the same bytes at any commit, so `archive_file`'s hash, and with it the apply and the page, only moves when code moves. Proven in implementation by building at two different commits and comparing hashes.
+`make build` passes `-buildvcs=false` and `-trimpath` to every `go build`: Go otherwise stamps the commit and the checkout's absolute path into each binary. An unchanged function then builds to the same bytes at any commit, so `archive_file`'s hash, and with it the apply and the page, only moves when code moves. Proven in implementation by building at two different commits and comparing hashes.
 
 ### 4.3 The threat model and the sign-in spec
 

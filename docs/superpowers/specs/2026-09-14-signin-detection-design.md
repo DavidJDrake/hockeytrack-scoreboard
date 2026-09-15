@@ -199,7 +199,9 @@ against a real event, and the record says so.
 
 ## 6. Out of scope
 
-- **The admin API's authorization, the most important gap this leaves.** The
+- **The admin API's authorization, the most important gap this left.** Closed
+  2026-09-15 by `2026-09-15-api-detection-design.md` (HockeyTrack section 11).
+  The
   gate decides who gets a token; the admin API decides what a token is worth.
   `scoreboard-api` and `scoreboard-enroll` take the caller's identity entirely
   from the claims API Gateway's JWT authorizer passes them (`sub`, and for a
