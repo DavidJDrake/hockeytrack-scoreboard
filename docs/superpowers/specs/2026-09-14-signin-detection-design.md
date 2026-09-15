@@ -200,9 +200,10 @@ against a real event, and the record says so.
 ## 6. Out of scope
 
 - **The admin API's authorization, the most important gap this left.** Closed
-  2026-09-15 by `2026-09-15-api-detection-design.md` (HockeyTrack section 11).
-  The
-  gate decides who gets a token; the admin API decides what a token is worth.
+  2026-09-15 by `2026-09-15-api-detection-design.md` (HockeyTrack section 11),
+  except for direct invocation of the two functions, their IAM roles and their
+  log groups, which that spec names as still unwatched. The gate decides who
+  gets a token; the admin API decides what a token is worth.
   `scoreboard-api` and `scoreboard-enroll` take the caller's identity entirely
   from the claims API Gateway's JWT authorizer passes them (`sub`, and for a
   claim `cognito:username`, `email` and `email_verified`), and
@@ -210,10 +211,11 @@ against a real event, and the record says so.
   issuer and audience are believed. An `UpdateAuthorizer` naming an issuer the
   attacker runs, an `UpdateRoute` or `UpdateIntegration` that moves a route to
   another authorizer or other code, or a code change to either function, can
-  claim or control panels without touching the gate, and no rule in either
-  repository watches `apigateway.amazonaws.com` or those functions. The fix
-  has §4.1's shape: a rule on writes naming the admin API's authorizer, routes
-  and integrations, and on writes naming the two functions.
+  claim or control panels without touching the gate, and when this spec was
+  written no rule in either repository watched `apigateway.amazonaws.com` or
+  those functions. The fix had §4.1's shape: a rule on writes naming the
+  admin API's authorizer, routes and integrations, and on writes naming the
+  two functions.
 - **The static site.** S3 and CloudFront writes that could serve a
   phishing page from the real domain need their own rule.
 - **The gate's IAM role.** An edit to `scoreboard-authgate`'s role cannot
@@ -296,4 +298,4 @@ Run from the unmerged branches (hockeytrack `scoreboard-signin-detection`, this 
 
 **Section 9 re-measured** (HockeyTrack 2bfcc27). Over the same window, as far as CloudTrail still held it (2026-06-20 to 2026-09-11, the same 109 writes), the old matcher reproduces the published 33. The new prefix matches 34; the extra one is `scoreboard-dlq-depth`.
 
-**Known, unwatched authorization roots.** Stated here as §6 does: the admin API's JWT authorizer, its routes and integrations, and the `scoreboard-api` and `scoreboard-enroll` functions. A change to any of them can grant identity or panel control without touching the gate, and nothing pages on it.
+**Known, unwatched authorization roots.** Stated here as §6 does: the admin API's JWT authorizer, its routes and integrations, and the `scoreboard-api` and `scoreboard-enroll` functions. A change to any of them can grant identity or panel control without touching the gate, and nothing pages on it. `2026-09-15-api-detection-design.md` has since closed this, except for direct invocation of the two functions, their IAM roles and their log groups, which it names as unwatched.

@@ -58,13 +58,13 @@ event_pattern = jsonencode({
 - **No event names, scoped by resource, over-matching wildcards.** The reasoning is section 10's. Implementation confirms the complete field list from the apigatewayv2 and lambda service models; §3 is what the observed events show.
 - **Length precondition** `<= 2048`, the same as sections 9 and 10.
 
-Alert sentence: *If this was not you, assume the scoreboard admin API may accept tokens or requests it should not. Check its JWT authorizer's issuer and audience, its routes' authorizers and integrations, and the scoreboard-api and scoreboard-enroll functions' code, configuration and permissions, against the scoreboard repository.*
+Alert sentence: *If this was not you, assume the scoreboard admin API may accept tokens or requests it should not. Check its JWT authorizer's issuer and audience, its routes' authorizers and integrations, and the scoreboard-api and scoreboard-enroll functions' code, configuration, role and permissions, against the scoreboard repository.*
 
 **Accepted noise:** scoreboard applies that change the API or either function, which is rare and deliberate. It is only rare once 4.2 lands.
 
 ### 4.2 Stop redeploying unchanged functions (this repository)
 
-`make build` passes `-buildvcs=false` and `-trimpath` to every `go build`: Go otherwise stamps the commit and the checkout's absolute path into each binary. An unchanged function then builds to the same bytes at any commit, so `archive_file`'s hash, and with it the apply and the page, only moves when code moves. Terraform's archive_file also pins `output_file_mode = "0755"`, so the zip does not inherit the build host's umask. Proven in implementation by building at two different commits and comparing hashes.
+`make build` passes `-buildvcs=false` and `-trimpath` to every `go build`: Go otherwise stamps the commit and the checkout's absolute path into each binary. A function then builds to the same bytes at any commit unless its code, dependencies or Go toolchain change (each binary still records its Go and module versions), so `archive_file`'s hash, and with it the apply and the page, only moves when one of those does. Terraform's archive_file also pins `output_file_mode = "0755"`, so the zip does not inherit the build host's umask. Proven in implementation by building at two different commits and comparing hashes.
 
 ### 4.3 The threat model and the sign-in spec
 
@@ -91,6 +91,8 @@ Alert sentence: *If this was not you, assume the scoreboard admin API may accept
 
 ## 6. Out of scope
 
+- **Direct invocation of either function.** Both handlers read identity only from `req.RequestContext.Authorizer.JWT.Claims` (`cloud/cmd/api/handler.go`, `cloud/cmd/enroll/handler.go`), so any principal allowed `lambda:InvokeFunction` on them can invoke one with a hand-built event carrying forged claims, skipping API Gateway and the authorizer, with no configuration write. `Invoke` is a Lambda data event, which the account's trail does not log. Logging data events would not close it either: API Gateway's own invocations would then match the `functionName` wildcard on every admin-API request. Closing it needs `Invoke` events filtered to callers other than API Gateway. HockeyTrack's threat model gives the recovery check: compare the functions' `START` log lines with the access log.
+- **The API's and functions' log groups.** Deleting or shortening retention on `/aws/apigateway/scoreboard-admin`, `/aws/lambda/scoreboard-api` or `/aws/lambda/scoreboard-enroll` pages nobody (HockeyTrack's section 8 names only its trail group and `AWSIotLogsV2`), and the recovery steps depend on those logs. Removing access logging from the stage itself does page, as `UpdateStage` or `DeleteAccessLogSettings` naming the API.
 - **The api and enroll roles' IAM policies.** HockeyTrack's identity rule deliberately excludes role-policy churn, but `scoreboard-enroll`'s role can mint device certificates, so a widened grant there is a real, unwatched route. Named here and in section 11's "does not see".
 - **The devices table's ownership rows.** Writes to them are DynamoDB data events, which the trail does not log.
 - **The static site** (S3 and CloudFront), which could serve a look-alike page from the real domain. It remains its own gap.

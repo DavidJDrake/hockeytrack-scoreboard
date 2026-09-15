@@ -491,14 +491,16 @@ Rebuild the exact pattern from the plan's rendering into `<scratchpad>/api-patte
 
 - **Must match:**
   - on `dk3k7p41e2`: `CreateRoute`, `CreateAuthorizer`, `CreateIntegration`, `CreateStage` and `UpdateStage`;
-  - for each function: `CreateFunction20150331` and `AddPermission20150331v2`.
+  - for each function: `CreateFunction20150331` and `AddPermission20150331v2`;
+  - on `scoreboard-api`, a real `UpdateFunctionCode20150331v2` and a real `UpdateFunctionConfiguration20150331v2` from the 90 days, in both the bare and the ARN `functionName` forms if both occur.
 - **Must not match:**
   - `GetRoute` and `GetAuthorizer` on `dk3k7p41e2`;
   - `CreateRoute` on `bjmqkenm95` (healthtracker-api);
   - `TagResource` on `op8gfgqr8f`;
   - `CreateAuthorizer` on `op8gfgqr8f`;
   - `UpdateFunctionCode20150331v2` on `scoreboard-authgate`;
-  - a HealthTracker Lambda write, if one exists in the window.
+  - a HealthTracker Lambda write, if one exists in the window;
+  - a `TagResource20170331v2` on a HealthTracker Lambda, if one exists in the window.
 
 Then sweep 90 days of `apigateway` and `lambda` events with a local matcher. Name every match by event name and date: each must be a change to the admin API or one of the two functions. Spot-check three matches and three non-matches with `test-event-pattern`, and list any event naming these resources that has no `readOnly` key.
 
@@ -509,17 +511,19 @@ Hand the user the apply of the saved plan. Then:
 - `describe-rule` must return a pattern equal to the rendered one as parsed JSON, in state `ENABLED`;
 - `list-targets-by-rule` must show the security topic with its DLQ.
 
+Expected emails: the apply writes resources section 9 (`hockeytrack-sec-alerting-modification`) names, so it pages once each for `PutRule` (the new rule), `PutTargets` (its target) and `SetTopicAttributes` (the topic policy). The queue policy is an SQS write, which section 9 does not watch. No section 11 email is expected, and any other email is a finding to explain before going on.
+
 - [ ] **Step 4: Prove reproducible builds across a commit, then deploy them once**
 
-1. On `api-detection` with Task 2 committed, run `make build` and record `sha256sum build/*/bootstrap`. Terraform's `archive_file` re-zips each bootstrap deterministically, so identical bootstraps mean identical code hashes.
-2. Make an empty commit (`git commit --allow-empty -m "build: reproducibility probe"`), run `make build` again, and compare. Expected: identical bootstraps. Then drop the probe commit with `git reset --hard HEAD~1`; it touched nothing but history.
+1. Build at two commits in two throwaway clones, never in the working tree: `git clone /home/jay/projects/hockeytrack-scoreboard <scratchpad>/repro-a`, the same into `<scratchpad>/repro-b`, then `git -C <scratchpad>/repro-a checkout --detach origin/api-detection` and `git -C <scratchpad>/repro-b checkout --detach origin/api-detection~1`. Both commits carry Task 2's flags. Confirm their Go code is identical with `git -C <scratchpad>/repro-a diff --quiet origin/api-detection~1 origin/api-detection -- cloud` (exit 0) and that the Makefile's `go build` lines match; if either differs, use two docs-only commits on the branch instead. The clones' different absolute paths also exercise `-trimpath`.
+2. Run `make build` in each clone, then compare `sha256sum build/*/bootstrap` across the two. Expected: all five identical. Record `go version -m build/api/bootstrap` from one clone: it shows the Go and module versions and no `vcs.` lines. Terraform's `archive_file` re-zips each bootstrap with a pinned mode, so identical bootstraps mean identical code hashes. Delete both clones.
 3. Run `terraform plan -out=<scratchpad>/sb-api.tfplan`. Expected: the five functions update once, because their binaries lose the stamps, and nothing else changes. Hand the user the apply.
-4. Expected emails: section 11 pages `UpdateFunctionCode20150331v2` for `scoreboard-api` and `scoreboard-enroll`, and section 10 pages it for `scoreboard-authgate`. These are the first real positives for the `functionName` branch. The reducer and today redeploys page nothing.
-5. `terraform plan -detailed-exitcode` must exit 0. Then make a docs-only commit, run `make build` and plan again. Expected: no changes, with exit 0.
+4. Expected emails: section 11 pages `UpdateFunctionCode20150331v2` for `scoreboard-api` and `scoreboard-enroll`, and section 10 pages it for `scoreboard-authgate`. These are the first real positives for the `functionName` branch. The reducer and today redeploys page nothing. Each api and enroll email's body must carry section 11's sentence ("If this was not you, assume the scoreboard admin API may accept tokens or requests it should not. …"), and the authgate email section 10's ("If this was not you, assume the scoreboard admin site's sign-in gate may be bypassed. …"). Then check the security DLQ depth, which must be 0.
+5. `terraform plan -detailed-exitcode` must exit 0. Then make a docs-only commit, run `make build`, and run `terraform plan -detailed-exitcode -out=<scratchpad>/sb-docs.tfplan`. Expected: no changes, with exit 0. Hand the user the apply of that saved plan anyway, because an apply is what pages: it must report 0 added, 0 changed, 0 destroyed, and no rule email may arrive.
 
 - [ ] **Step 5: Break each branch**
 
-Hand these to the user one at a time. Check the Gmail inbox for `HOCKEYTRACK SECURITY` emails, and the security DLQ depth afterwards, which must be 0.
+Hand these to the user one at a time. Check the Gmail inbox for `HOCKEYTRACK SECURITY` emails, each of whose bodies must carry section 11's sentence, and the security DLQ depth afterwards, which must be 0.
 
 1. **`resource-arn`:**
    - `! aws apigatewayv2 tag-resource --region us-east-1 --resource-arn arn:aws:apigateway:us-east-1::/apis/dk3k7p41e2 --tags detection-probe=1`
@@ -536,9 +540,20 @@ Hand these to the user one at a time. Check the Gmail inbox for `HOCKEYTRACK SEC
    - and the same for `scoreboard-enroll`.
 
    Expected: two emails.
-5. **Negatives:** plans in both repositories and normal use of the admin site (sign in, panel list) send no rule email.
+5. **Negatives:** plans in both repositories, normal use of the admin site (sign in, panel list), and an enroll collect poll without a valid token send no rule email. The poll is `curl -s -o /dev/null -w '%{http_code}\n' -H 'Authorization: Bearer not-a-token' "$(cd terraform && terraform output -raw api_endpoint)/api/enroll"`, which must print `404`.
 
-- [ ] **Step 6: Record and hand off**
+- [ ] **Step 6: Run the new recovery entry's read-only steps once**
+
+Follow HockeyTrack's threat model §7 entry "A scoreboard admin API alert you cannot account for", running only its reads, each with `--region us-east-1`:
+- `get-authorizers`, `get-routes` and `get-integrations` on `dk3k7p41e2`;
+- for both functions, `get-function`, `get-function-configuration`, `get-policy`, `list-function-url-configs`, `list-event-source-mappings`, `list-aliases` and `list-versions-by-function`;
+- for both roles, `iam get-role`, `list-role-policies`, `get-role-policy` and `list-attached-role-policies`;
+- `CodeSha256` for both functions against `openssl dgst -sha256 -binary build/api.zip | base64` and `build/enroll.zip`, after `make build` and a `terraform plan` that regenerates the zips;
+- `aws iot list-certificates`, and `list-principal-things` for one known panel's certificate.
+
+Every expected value the entry states must match what AWS returns. Correct any command, field name or expected output that does not, in a small follow-up commit to HockeyTrack's `docs/threat-model.md`. None of the entry's writes (sign-outs, revocations, deletions) are run.
+
+- [ ] **Step 7: Record and hand off**
 
 Append `## 7. Verification record (2026-09-15)` to `docs/superpowers/specs/2026-09-15-api-detection-design.md`, recording:
 - the pattern's length;
@@ -548,6 +563,8 @@ Append `## 7. Verification record (2026-09-15)` to `docs/superpowers/specs/2026-
 - the one-time redeploy and the three emails it produced;
 - each break and its email;
 - the negatives;
-- the drift checks.
+- the drift checks;
+- the read-only recovery run and any correction it forced;
+- that direct invocation of the two functions, their roles and trust policies, and the API's and functions' log groups are known and unwatched.
 
 Commit it, then offer the user the finishing choice for both branches.
