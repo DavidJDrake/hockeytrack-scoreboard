@@ -58,7 +58,7 @@ func (v *Verifier) Verify(ctx context.Context, authorizationHeader string) (Clai
   - It is fetched on first use, not at init, so a Cognito blip does not crash-loop the function, and cached for the life of the execution environment.
   - An unknown `kid` triggers one refetch, at most once every 5 minutes. A stream of junk `kid`s costs Cognito one request per 5 minutes per environment.
   - Fetches use a 5-second timeout and read at most 64 KiB.
-  - Keys that are not `kty: RSA` with `use: sig` (or no `use`) are ignored.
+  - Keys that are not `kty: RSA` with `use: sig` (or no `use`) are ignored. So are RSA keys shorter than 2048 bits.
 - **Errors are typed.** `ErrUnavailable` wraps a failed key fetch; every other failure wraps `ErrInvalid`. Messages name which check failed, never the token or its claims.
 
 ### 3.2 The handlers
@@ -74,7 +74,7 @@ func (v *Verifier) Verify(ctx context.Context, authorizationHeader string) (Clai
 
 A request where API Gateway's authorizer accepted a token and the function rejected it should never happen on the real path: both check the same token against the same issuer and audience. It is the fingerprint of a hand-built event carrying authorizer claims.
 
-- When `requestContext.authorizer.jwt` is present and `Verify` returns `ErrInvalid`, the handler logs at warn level with the fixed message `token rejected after authorizer accepted`, plus the failed check and the route key. The token and claims are never logged.
+- When `requestContext.authorizer.jwt` is present and `Verify` returns `ErrInvalid`, `idtoken.Authenticate`, which both handlers call, logs at warn level with the fixed message `token rejected after authorizer accepted`, plus the failed check and the route key. The token and claims are never logged.
 - **In `terraform/admin.tf`:**
   - A metric filter on each of `/aws/lambda/scoreboard-api` and `/aws/lambda/scoreboard-enroll` matches `"token rejected after authorizer accepted"`. Both publish `TokenMismatch` in namespace `Scoreboard`.
   - One alarm, `scoreboard-token-mismatch`, fires on sum ≥ 1 in 300 seconds, with `treat_missing_data = "notBreaching"`. It sends to the same `data.aws_sns_topic.security_alerts` as the gate alarms.
@@ -216,7 +216,7 @@ Every apply is planned to a saved file and run by the user with `!`. No agent or
   - The owner-hint tests in `enroll` run on `Claims`.
 - **Terraform tripwires** (`site/tests/signin-config.test.js` or a new `invoke-config.test.js`):
   - Both functions set `USER_POOL_ID` and `APP_CLIENT_ID`.
-  - The metric filter's quoted term appears verbatim in both handlers' source.
+  - The metric filters' quoted term is `idtoken.MismatchMessage` verbatim, both handlers call `idtoken.Authenticate`, and no production code imports the test fake `internal/idtoken/idtokentest`.
   - `scoreboard-token-mismatch` is counted in the alarm-count test.
   - No handler source outside tests reads `Authorizer.JWT.Claims`.
 
