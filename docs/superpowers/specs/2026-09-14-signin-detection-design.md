@@ -289,6 +289,7 @@ Run from the unmerged branches (hockeytrack `scoreboard-signin-detection`, this 
 - **Throttle.**
   - With reserved concurrency 0, one sign-in attempt produced 4 throttles, so Cognito retries a throttled trigger.
   - The alarm went to `ALARM` at 01:47:37 UTC, and its email arrived. The limit was removed.
+- **Recovery:** both alarms returned to `OK` on their own, 15 minutes after firing (01:59:53 and 02:02:37 UTC). CloudWatch waited three five-minute periods of missing data before treating it as not breaching, so an alarm clears about 15 minutes after the gate recovers, not the moment it does.
 - **Not observed:** the timeout lines (`Status: timeout`, `Task timed out`) cannot be induced safely. Their terms match AWS's documented wording and CloudWatch's matcher, not a real event.
 
 **Section 9 re-measured** (HockeyTrack 2bfcc27). Over the same window, as far as CloudTrail still held it (2026-06-20 to 2026-09-11, the same 109 writes), the old matcher reproduces the published 33. The new prefix matches 34; the extra one is `scoreboard-dlq-depth`.
