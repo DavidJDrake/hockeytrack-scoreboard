@@ -166,6 +166,8 @@ resource "aws_lambda_function" "enroll" {
       DEVICES_TABLE     = aws_dynamodb_table.devices.name
       IOT_ENDPOINT      = data.aws_iot_endpoint.data.endpoint_address
       DEVICE_POLICY     = aws_iot_policy.device.name
+      USER_POOL_ID      = aws_cognito_user_pool.admin.id
+      APP_CLIENT_ID     = aws_cognito_user_pool_client.site.id
     }
   }
 
