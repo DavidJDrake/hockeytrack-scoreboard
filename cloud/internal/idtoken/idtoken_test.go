@@ -125,7 +125,16 @@ func goodClaims(now time.Time) jwt.MapClaims {
 
 func sign(t *testing.T, key *rsa.PrivateKey, kid string, claims jwt.MapClaims) string {
 	t.Helper()
-	tok := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	return signWithMethod(t, jwt.SigningMethodRS256, key, kid, claims)
+}
+
+// signWithMethod signs with an arbitrary jwt.SigningMethod, so a test can
+// build a token that is cryptographically genuine - signed by the real
+// signing key, under a kid the verifier knows - but uses an algorithm other
+// than RS256.
+func signWithMethod(t *testing.T, method jwt.SigningMethod, key *rsa.PrivateKey, kid string, claims jwt.MapClaims) string {
+	t.Helper()
+	tok := jwt.NewWithClaims(method, claims)
 	tok.Header["kid"] = kid
 	s, err := tok.SignedString(key)
 	if err != nil {
@@ -185,18 +194,26 @@ func TestForgedAndWrongTokensAreRefused(t *testing.T) {
 	cases := map[string]string{
 		"alg none":                  "Bearer " + none,
 		"HS256 with the public key": "Bearer " + hs,
-		"signed by another key":     "Bearer " + sign(t, other, "k1", goodClaims(c.t)),
-		"wrong issuer":              "Bearer " + sign(t, key, "k1", with(func(m jwt.MapClaims) { m["iss"] = "https://attacker.example.com" })),
-		"wrong audience":            "Bearer " + sign(t, key, "k1", with(func(m jwt.MapClaims) { m["aud"] = "someone-else" })),
-		"extra audience":            "Bearer " + sign(t, key, "k1", with(func(m jwt.MapClaims) { m["aud"] = []string{testClient, "someone-else"} })),
-		"access token":              "Bearer " + sign(t, key, "k1", with(func(m jwt.MapClaims) { m["token_use"] = "access" })),
-		"no exp":                    "Bearer " + sign(t, key, "k1", with(func(m jwt.MapClaims) { delete(m, "exp") })),
-		"expired beyond leeway":     "Bearer " + sign(t, key, "k1", with(func(m jwt.MapClaims) { m["exp"] = c.t.Add(-31 * time.Second).Unix() })),
-		"no sub":                    "Bearer " + sign(t, key, "k1", with(func(m jwt.MapClaims) { delete(m, "sub") })),
-		"no kid":                    "Bearer " + sign(t, key, "", goodClaims(c.t)),
-		"empty header":              "",
-		"basic scheme":              "Basic dXNlcjpwYXNz",
-		"garbage":                   "Bearer not-a-token",
+		// Genuine tokens: signed by the real signing key, under the kid the
+		// verifier knows, valid in every other claim - only the algorithm is
+		// wrong. Without jwt.WithValidMethods pinning RS256, both verify
+		// cleanly against key.PublicKey, so these are what would slip through
+		// an alg-confusion or algorithm-downgrade attack if that pin were
+		// ever removed.
+		"RS512 signed by the real key": "Bearer " + signWithMethod(t, jwt.SigningMethodRS512, key, "k1", goodClaims(c.t)),
+		"PS256 signed by the real key": "Bearer " + signWithMethod(t, jwt.SigningMethodPS256, key, "k1", goodClaims(c.t)),
+		"signed by another key":        "Bearer " + sign(t, other, "k1", goodClaims(c.t)),
+		"wrong issuer":                 "Bearer " + sign(t, key, "k1", with(func(m jwt.MapClaims) { m["iss"] = "https://attacker.example.com" })),
+		"wrong audience":               "Bearer " + sign(t, key, "k1", with(func(m jwt.MapClaims) { m["aud"] = "someone-else" })),
+		"extra audience":               "Bearer " + sign(t, key, "k1", with(func(m jwt.MapClaims) { m["aud"] = []string{testClient, "someone-else"} })),
+		"access token":                 "Bearer " + sign(t, key, "k1", with(func(m jwt.MapClaims) { m["token_use"] = "access" })),
+		"no exp":                       "Bearer " + sign(t, key, "k1", with(func(m jwt.MapClaims) { delete(m, "exp") })),
+		"expired beyond leeway":        "Bearer " + sign(t, key, "k1", with(func(m jwt.MapClaims) { m["exp"] = c.t.Add(-31 * time.Second).Unix() })),
+		"no sub":                       "Bearer " + sign(t, key, "k1", with(func(m jwt.MapClaims) { delete(m, "sub") })),
+		"no kid":                       "Bearer " + sign(t, key, "", goodClaims(c.t)),
+		"empty header":                 "",
+		"basic scheme":                 "Basic dXNlcjpwYXNz",
+		"garbage":                      "Bearer not-a-token",
 	}
 	for name, header := range cases {
 		_, err := v.Verify(context.Background(), header)
@@ -230,7 +247,11 @@ func TestEmailVerifiedAcceptsOnlyTrueOrTheStringTrue(t *testing.T) {
 	}
 	m := goodClaims(c.t)
 	delete(m, "email_verified")
-	if got, _ := v.Verify(context.Background(), sign(t, key, "k1", m)); got.EmailVerified {
+	got, err := v.Verify(context.Background(), sign(t, key, "k1", m))
+	if err != nil {
+		t.Fatalf("a token with no email_verified claim was refused: %v", err)
+	}
+	if got.EmailVerified {
 		t.Error("an absent email_verified was treated as verified")
 	}
 }

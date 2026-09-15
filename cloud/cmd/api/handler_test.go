@@ -165,30 +165,52 @@ func TestAnUnauthenticatedRequestIsRejectedWithoutTouchingTheStore(t *testing.T)
 }
 
 func TestForgedAuthorizerClaimsWithoutATokenAreRefusedAndLogged(t *testing.T) {
-	// A hand-built event sent straight to the function: the owner's sub in
-	// the authorizer block, and no token.
-	h, st, pub := handlerWith(t)
-	ctx := context.Background()
-	_ = st.Claim(ctx, "scoreboard-7qf2", "sub-a")
-	var buf bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	// A hand-built event sent straight to the function, for every route this
+	// API serves: the owner's sub in the authorizer block, and no token.
+	// terraform/admin.tf local.admin_routes is the source of truth for the
+	// route list.
+	cases := []struct {
+		method string
+		route  string
+		body   string
+		params map[string]string
+	}{
+		{"GET", "GET /api/devices", "", nil},
+		{"PUT", "PUT /api/devices/{thing}/game", `{"gameId":2026020001}`, map[string]string{"thing": "scoreboard-7qf2"}},
+		{"PATCH", "PATCH /api/devices/{thing}", `{"name":"Not yours"}`, map[string]string{"thing": "scoreboard-7qf2"}},
+		{"DELETE", "DELETE /api/devices/{thing}", "", map[string]string{"thing": "scoreboard-7qf2"}},
+		{"GET", "GET /api/games", "", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.route, func(t *testing.T) {
+			h, st, pub := handlerWith(t)
+			ctx := context.Background()
+			_ = st.Claim(ctx, "scoreboard-7qf2", "sub-a")
+			var buf bytes.Buffer
+			prev := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+			t.Cleanup(func() { slog.SetDefault(prev) })
 
-	r := req("PUT", "PUT /api/devices/{thing}/game", "", `{"gameId":2026020001}`, map[string]string{"thing": "scoreboard-7qf2"})
-	r.RequestContext.Authorizer = authorizer("sub-a")
-	res, err := h.Handle(ctx, r)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if res.StatusCode != 401 {
-		t.Errorf("status = %d, want 401", res.StatusCode)
-	}
-	if len(pub.Messages) != 0 {
-		t.Error("a forged event published a config")
-	}
-	if !strings.Contains(buf.String(), idtoken.MismatchMessage) {
-		t.Errorf("no mismatch line logged: %s", buf.String())
+			r := req(tc.method, tc.route, "", tc.body, tc.params)
+			r.RequestContext.Authorizer = authorizer("sub-a")
+			res, err := h.Handle(ctx, r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.StatusCode != 401 {
+				t.Errorf("status = %d, want 401", res.StatusCode)
+			}
+			if len(pub.Messages) != 0 {
+				t.Error("a forged event published a config")
+			}
+			d, found, _ := st.Get(ctx, "scoreboard-7qf2")
+			if !found || d.Owner != "sub-a" || d.Name != "" {
+				t.Errorf("forged event changed store state: found=%v owner=%q name=%q", found, d.Owner, d.Name)
+			}
+			if !strings.Contains(buf.String(), idtoken.MismatchMessage) {
+				t.Errorf("no mismatch line logged: %s", buf.String())
+			}
+		})
 	}
 }
 

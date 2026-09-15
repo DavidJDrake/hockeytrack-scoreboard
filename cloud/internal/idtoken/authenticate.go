@@ -10,10 +10,20 @@ import (
 )
 
 // MismatchMessage is logged when API Gateway's authorizer accepted a request
-// whose token Verify refuses. On the real path both check the same token
-// against the same issuer and audience, so this is what a hand-built event
-// carrying authorizer claims looks like. The scoreboard-token-mismatch metric
-// filters (terraform/admin.tf) match this exact text.
+// whose token Verify refuses. This is not proof of a hand-built event: it
+// also happens on two real paths. An HTTP API JWT authorizer validates
+// client_id, not aud, on a token that carries no aud at all, so a Cognito
+// access token issued to the scoreboard-site client passes the authorizer
+// (no route here sets scopes) and Verify then refuses it for missing aud /
+// not being an ID token. A Cognito signing-key rotation can do the same if
+// the new kid appears within the verifier's 5-minute refetch window: the
+// authorizer's own key cache picks it up first. Both leave the request
+// refused with 401, nothing exposed. Telling them apart from a genuine
+// direct invoke is HockeyTrack's job: a mismatch page with no section 12
+// page at the same time came through API Gateway (check the access log for
+// the route and sub); a mismatch page together with a section 12 page is a
+// direct invoke. The scoreboard-token-mismatch metric filters
+// (terraform/admin.tf) match this exact text.
 const MismatchMessage = "token rejected after authorizer accepted"
 
 // Authenticate verifies the request's Authorization header and returns the

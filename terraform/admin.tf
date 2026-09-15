@@ -256,12 +256,17 @@ resource "aws_lambda_function" "api" {
 # authorizer puts in the event, because anyone allowed lambda:InvokeFunction
 # can hand a function an event with any claims in it. When the authorizer
 # block is present but the token fails verification, API Gateway accepted a
-# token the function refused. On the real path both check the same token
-# against the same issuer and audience, so that does not happen: it is what a
-# hand-built event looks like. HockeyTrack's section 12 rule sees direct
-# invocations through CloudTrail; this alarm sees forged ones without
-# CloudTrail at all. The pattern is idtoken.MismatchMessage, quoted, and
-# assumes Lambda's default text log format, as the authgate filters do.
+# token the function refused. That is not proof of a hand-built event by
+# itself: an access token, which carries no aud, passes the authorizer (it
+# checks client_id instead, and no route here sets scopes) and Verify then
+# refuses it; a signing-key rotation whose new kid lands inside the
+# verifier's 5-minute refetch window does the same. Tell those apart from a
+# forged direct invoke using HockeyTrack's section 12 rule: this alarm with
+# no section 12 page at the same time is an access token or a key rotation
+# through API Gateway (check the access log for the route and sub); both
+# alarms together are a direct invoke. The pattern is idtoken.MismatchMessage,
+# quoted, and assumes Lambda's default text log format, as the authgate
+# filters do.
 resource "aws_cloudwatch_log_metric_filter" "token_mismatch_api" {
   name           = "scoreboard-token-mismatch-api"
   log_group_name = aws_cloudwatch_log_group.api.name
@@ -298,10 +303,15 @@ resource "aws_cloudwatch_metric_alarm" "token_mismatch" {
   alarm_description   = <<-EOT
     scoreboard-api or scoreboard-enroll was handed an event whose authorizer
     block said API Gateway had accepted a token, but the token failed the
-    function's own verification. API Gateway does not send that. Assume
-    someone invoked the function directly with forged claims. The request was
-    refused. Find the caller in CloudTrail (HockeyTrack's section 12 alert
-    names them) and follow HockeyTrack's docs/threat-model.md, section 7.
+    function's own verification. The request was refused either way. Check
+    whether HockeyTrack's section 12 rule paged at the same time. If it did
+    not, this is a real-path case: an access token sent through API Gateway
+    by a signed-in user, or a Cognito signing-key rotation inside the
+    refetch window; look at the admin API access log for the route and sub.
+    If section 12 paged too, assume someone invoked the function directly
+    with forged claims; find the caller in CloudTrail (HockeyTrack's section
+    12 alert names them) and follow HockeyTrack's docs/threat-model.md,
+    section 7.
   EOT
   alarm_actions       = [data.aws_sns_topic.security_alerts.arn]
   treat_missing_data  = "notBreaching"

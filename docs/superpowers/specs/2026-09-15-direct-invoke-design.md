@@ -72,7 +72,7 @@ func (v *Verifier) Verify(ctx context.Context, authorizationHeader string) (Clai
 
 ### 3.3 The mismatch signal
 
-A request where API Gateway's authorizer accepted a token and the function rejected it should never happen on the real path: both check the same token against the same issuer and audience. It is the fingerprint of a hand-built event carrying authorizer claims.
+A request where API Gateway's authorizer accepted a token and the function rejected it is not proof of a hand-built event carrying authorizer claims: it also happens on two real paths. An HTTP API JWT authorizer validates `client_id`, not `aud`, when the token carries no `aud` at all, so a Cognito access token issued to the scoreboard-site client passes the authorizer (no route here sets scopes) and `Verify` then refuses it for a missing `aud` / not being an ID token. A Cognito signing-key rotation does the same if the new `kid` appears within the verifier's 5-minute refetch window, because the authorizer's own key cache can pick it up first. Both leave the request refused with 401; nothing is exposed either way. Telling either apart from a genuine direct invoke needs HockeyTrack's section 12 rule: a mismatch page with no section 12 page at the same time came through API Gateway (an access token or a key rotation — check the access log for the route and sub); a mismatch page together with a section 12 page is a direct invoke.
 
 - When `requestContext.authorizer.jwt` is present and `Verify` returns `ErrInvalid`, `idtoken.Authenticate`, which both handlers call, logs at warn level with the fixed message `token rejected after authorizer accepted`, plus the failed check and the route key. The token and claims are never logged.
 - **In `terraform/admin.tf`:**
@@ -249,6 +249,7 @@ All times UTC. Both applies ran from saved plans that were read before applying.
 ### Step 2: HockeyTrack apply A (trail selector and category guards)
 
 - **Plan:** `0 to add, 4 to change`. It covered the trail, sections 10 and 11 (each adding only `eventCategory`), and `hockeytrack-foreign-project-deny`. The deny policy's document names the trail's ARN, which Terraform treats as unknown while the trail has pending changes. The apply reported 3 changed, and the policy stayed at `v1`.
+- **The audit-tampering rule paged, as required.** The apply's own `PutEventSelectors` on the trail is exactly the proof §4.1 called for: `hockeytrack-sec-audit-tampering` matched it, `MatchedEvents` 1 in the 11:00Z bucket, and the email arrived.
 - **The trail now has two selectors.** One logs S3 `WriteOnly` events plus management events. The other logs Lambda `All` events, without management events, for the three function ARNs.
 - **A1 is confirmed.** A real sign-in at 12:28 produced two kinds of `Invoke` record:
   - authgate, with `userIdentity.type` `AWSService` and `invokedBy` `cognito-idp.amazonaws.com`;

@@ -9,13 +9,17 @@ disagree, the code is right.
 
 ## Authentication and authorization are two different checks
 
-Every route requires a valid Cognito JWT. API Gateway's JWT authorizer
-(`terraform/admin.tf`) checks that the token is a real, unexpired token issued
-by this project's user pool, for this project's client — nothing more. It
-runs in front of all six routes, `GET /api/games` included. A request with no
-token, or an invalid one, never reaches the Lambda; API Gateway returns its
-own 401 before the handler runs. The one 401 the handler itself can return is
-for a token that reached it without a usable `sub` claim.
+Every route requires a valid Cognito JWT, and it is checked twice. API
+Gateway's JWT authorizer (`terraform/admin.tf`) runs in front of all six
+routes, `GET /api/games` included, and rejects a request with no token, or a
+token that fails its own check, before the handler runs. But the handler does
+not trust the authorizer's word for it, or read the claims the authorizer
+hands it in the event: `cloud/internal/idtoken` verifies the raw
+`Authorization` header itself — signature against the pool's published keys,
+issuer, exact audience, `token_use`, expiry — and takes identity only from
+that. A token that reaches the handler without passing this second check
+never runs as anyone; see "Errors common to every route" below for what it
+returns.
 
 Authorization — does *this* signed-in user own *this* device — is a second,
 separate check the Lambda makes itself, by reading an ownership row out of
@@ -179,11 +183,19 @@ fixing it is a separate ticket.
 
 ## Errors common to every route
 
-- **401** `{"error": "unauthenticated"}` — no usable `sub` claim on the
-  token. In practice this means the request got past API Gateway's authorizer
-  with a token that doesn't carry `sub`, which shouldn't happen with a
-  correctly configured Cognito authorizer; a missing or invalid token is
+- **401** `{"error": "unauthenticated"}` — the token failed the function's
+  own verification (`cloud/internal/idtoken`): a missing or malformed
+  header, a bad signature, the wrong issuer or audience, a `token_use` other
+  than `id`, or an expired token. This can happen even after API Gateway's
+  authorizer accepted the request — an access token has no `aud`, so the
+  authorizer checks `client_id` instead and lets it through, and the
+  function then refuses it itself — in which case the function also logs a
+  mismatch line (`docs/superpowers/specs/2026-09-15-direct-invoke-design.md`
+  §3.3). A missing token, or one the authorizer's own check fails, is
   rejected by API Gateway itself, before the Lambda runs.
+- **503** `{"error": "sign-in check unavailable"}` — the pool's signing keys
+  could not be fetched, so no token could be checked. This fails closed
+  without blaming the caller; retrying shortly is reasonable.
 - **400** `{"error": "invalid request body"}` — API Gateway marked the body
   base64-encoded and it didn't decode. Rare, and generally not something a
   hand-written client will trigger.
@@ -222,8 +234,11 @@ TOKEN=$(curl -s "https://${USER_POOL_DOMAIN}.auth.${REGION}.amazoncognito.com/oa
   -d "grant_type=authorization_code&client_id=${CLIENT_ID}&code=${AUTH_CODE}&redirect_uri=http://localhost:8000/&code_verifier=${CODE_VERIFIER}" \
   | jq -r '.id_token')
 
-# 4. Call the API. The authorizer's audience is the client id, which is
-#    only present on the ID token, not the access token — use id_token.
+# 4. Call the API. Use id_token, not access_token: an access token carries
+#    no aud, so API Gateway's JWT authorizer checks its client_id instead and
+#    lets it through (no route here sets scopes), and the function then
+#    refuses it itself with 401 and logs a mismatch line, rather than never
+#    reaching the function at all.
 curl -s -H "Authorization: Bearer ${TOKEN}" "$API/api/devices"
 ```
 
