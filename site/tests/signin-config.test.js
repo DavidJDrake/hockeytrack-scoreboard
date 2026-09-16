@@ -175,7 +175,11 @@ test("the page may reach the same sign-in host the site is configured with", () 
   assert.ok(csp, "connect-src not found in the CSP");
   assert.match(csp[0], /https:\/\/\$\{aws_cognito_user_pool_domain\.admin\.domain\}/,
     "connect-src must name the pool's domain as written, or it drifts from the output the site is built with");
+  assert.doesNotMatch(csp[0], /amazoncognito\.com/,
+    "connect-src must not append a Cognito prefix-domain suffix; a partial revert would still name the AWS hostname");
   const out = code(site).match(/output\s+"cognito_domain"\s*\{[^}]*\}/);
   assert.ok(out, "the cognito_domain output not found");
   assert.match(out[0], /value\s*=\s*aws_cognito_user_pool_domain\.admin\.domain/);
+  assert.doesNotMatch(out[0], /amazoncognito\.com/,
+    "the cognito_domain output must not append a Cognito prefix-domain suffix; a partial revert would still hand the site the AWS hostname");
 });

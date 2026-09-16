@@ -225,11 +225,11 @@ CODE_CHALLENGE=$(printf '%s' "$CODE_VERIFIER" | openssl dgst -sha256 -binary | o
 
 # 2. Open this URL in a browser and sign in with Google. It redirects to
 #    http://localhost:8000/?code=... on success.
-echo "https://${USER_POOL_DOMAIN}.auth.${REGION}.amazoncognito.com/oauth2/authorize?identity_provider=Google&client_id=${CLIENT_ID}&response_type=code&scope=openid+email&redirect_uri=http://localhost:8000/&code_challenge_method=S256&code_challenge=${CODE_CHALLENGE}"
+echo "https://${USER_POOL_DOMAIN}/oauth2/authorize?identity_provider=Google&client_id=${CLIENT_ID}&response_type=code&scope=openid+email&redirect_uri=http://localhost:8000/&code_challenge_method=S256&code_challenge=${CODE_CHALLENGE}"
 
 # 3. Exchange the code from that redirect for tokens.
 read -p "code from the redirect: " AUTH_CODE
-TOKEN=$(curl -s "https://${USER_POOL_DOMAIN}.auth.${REGION}.amazoncognito.com/oauth2/token" \
+TOKEN=$(curl -s "https://${USER_POOL_DOMAIN}/oauth2/token" \
   -H "content-type: application/x-www-form-urlencoded" \
   -d "grant_type=authorization_code&client_id=${CLIENT_ID}&code=${AUTH_CODE}&redirect_uri=http://localhost:8000/&code_verifier=${CODE_VERIFIER}" \
   | jq -r '.id_token')
@@ -242,13 +242,11 @@ TOKEN=$(curl -s "https://${USER_POOL_DOMAIN}.auth.${REGION}.amazoncognito.com/oa
 curl -s -H "Authorization: Bearer ${TOKEN}" "$API/api/devices"
 ```
 
-`$API` (Terraform output `api_endpoint`) and `$CLIENT_ID` (output
-`user_pool_client_id`) come straight out of `terraform output` for this
-stack. `$USER_POOL_DOMAIN` isn't a Terraform output — it's not needed
-outside this kind of manual flow — but it's derivable: `admin.tf` sets it to
-`scoreboard-admin-<account id>` (`aws_cognito_user_pool_domain.admin`).
-`$REGION` is whatever you set `var.region` to. None of these are recorded
-here, since they're deployment-specific.
+`$API` (Terraform output `api_endpoint`), `$CLIENT_ID` (output
+`user_pool_client_id`) and `$USER_POOL_DOMAIN` (output `cognito_domain`,
+the full hosted-UI host — `auth.<site domain>`, not a bare prefix) come
+straight out of `terraform output` for this stack. None of these are
+recorded here, since they're deployment-specific.
 
 ## What this document is not
 
