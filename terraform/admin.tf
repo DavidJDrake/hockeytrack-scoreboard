@@ -118,9 +118,13 @@ resource "aws_cognito_user_pool_domain" "admin" {
 
   lifecycle {
     precondition {
+      # aws_route53_records and aws_route53_zone disagree about the trailing
+      # dot on a zone/record name (the former keeps it, the latter strips
+      # it), so both sides are trimmed before comparing -- do not "simplify"
+      # this back to a plain ==, it silently fails every zone it checks.
       condition = anytrue([
         for r in data.aws_route53_records.site_zone_apex.resource_record_sets :
-        r.type == "A" && r.name == data.aws_route53_zone.site.name
+        r.type == "A" && trimsuffix(r.name, ".") == trimsuffix(data.aws_route53_zone.site.name, ".")
       ])
       error_message = "The ${data.aws_route53_zone.site.name} zone has no apex A record. Cognito refuses a custom domain under a zone whose apex doesn't resolve; create that record (in whichever stack owns it) before applying this one."
     }
