@@ -65,3 +65,43 @@ Google does not need to re-verify the app: the sign-in requests `openid` and `em
 ## 6. Rollback
 
 Re-apply the previous commit, which restores the prefix domain, and keep the old redirect URI in Google until the new domain is proven. The outage on rollback is the same 15 to 20 minutes.
+
+## 7. Verification record (2026-09-16)
+
+All times UTC.
+
+### Before applying
+
+- **Review changed three things.**
+  - A content-security-policy test that would still have passed if the Cognito suffix crept back now fails on any mention of `amazoncognito.com`.
+  - The manual `curl` walkthrough in `docs/admin-api.md` no longer appends the suffix to an output that is already the full host.
+  - A precondition checks that the zone's apex has an A record, since Cognito refuses a custom domain otherwise.
+- **The precondition failed the first real plan.** Route 53's record sets carry a trailing dot (`davidjdrake.com.`) and the zone data source renders its name without one, so the check said "no apex record" about a zone that has one. Both sides are now compared with the dot trimmed. A reviewer had reported the check true against the live zone, but had read the AWS CLI's value rather than the data source's; the plan is what settled it.
+- **Plan:** `5 to add, 1 to change, 1 to destroy`. The domain replaced (`scoreboard-admin-989232581535` → `auth.scoreboard.davidjdrake.com`), the certificate, its validation record and the alias created, and the response-headers policy's `connect-src` updated. Nothing touching the pool, its clients, the identity provider or the functions.
+
+### Google, before the apply (21:22)
+
+In the OAuth client, `https://auth.scoreboard.davidjdrake.com/oauth2/idpresponse` was added as a redirect URI and `https://auth.scoreboard.davidjdrake.com` as a JavaScript origin, with the Cognito entries kept. Google confirmed the save, and a reload showed all four. The branding page already carried the app name, support email, home page, privacy policy and `davidjdrake.com` as an authorized domain, so nothing changed there.
+
+### Applied 21:23:20
+
+The domain took 2 minutes 49 seconds to create and the alias 31 seconds more — about four minutes of sign-in outage in all, well under the 15 to 20 the spec allowed for. Cognito reported the domain `ACTIVE`, and the hosted sign-in page answered 200.
+
+**One correction to §5:** the spec proposed checking `https://auth.scoreboard.davidjdrake.com/.well-known/jwks.json`, which returns 404. Cognito publishes signing keys on `cognito-idp.us-east-1.amazonaws.com`, not on the hosted-UI domain, so the sign-in page answering is the right check.
+
+### The site and the sign-in
+
+- **`make site`, run by the owner,** wrote `"cognitoDomain": "auth.scoreboard.davidjdrake.com"` into the live `config.json`, and the served policy's `connect-src` names the same host.
+- **The first sign-ins on the new domain succeeded but showed no consent screen,** because Google remembered the grant the account had already given this client. Deleting the app from the account's linked apps did not take on the first attempt — the list still showed it — and did on the second.
+- **The consent screen then read "Sign in to davidjdrake.com"** — "Google will allow davidjdrake.com to access this info about you: Email address" — with the privacy policy link on `scoreboard.davidjdrake.com/privacy/`. No AWS hostname, no account number.
+- **Continuing signed the owner in.** The gate ran on every sign-in with no refusals or errors, the admin API answered `GET /api/devices` and `GET /api/games` with 200, and `scoreboard-signin-refused`, `scoreboard-authgate-failures`, `scoreboard-authgate-throttles` and `scoreboard-token-mismatch` all stayed OK.
+
+**It says "davidjdrake.com" rather than "HockeyTrack Scoreboard"** because Google shows an app's name only once its branding is verified. That remains optional and is not part of this change.
+
+### Google, after the switch (21:38)
+
+The Cognito redirect URI and JavaScript origin were removed from the client, and the Cognito host from the authorized domains. Each save was confirmed by reloading the page: the client holds only the new domain's two entries, and `davidjdrake.com` is the only authorized domain. Google now refuses to delete `davidjdrake.com`, because the client uses it.
+
+### Detection and drift
+
+`hockeytrack-sec-scoreboard-signin` (section 10) matched 2 events in the 21:21 window — the domain's deletion and creation — which is the expected noise. The dead-letter queue is at 0, and `terraform plan -detailed-exitcode` exits 0 in both repositories.
