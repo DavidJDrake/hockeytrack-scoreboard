@@ -94,9 +94,41 @@ resource "aws_cognito_user_pool" "admin" {
   }
 }
 
+# Cognito refuses to create a custom domain under a zone whose apex doesn't
+# resolve, and the error at apply is unhelpful if it doesn't -- it names the
+# domain, not the missing record. This stack doesn't create
+# davidjdrake.com's apex record (a different stack owns it), so the
+# precondition below reads the zone's own record sets rather than depending
+# on a resource declared here.
+data "aws_route53_records" "site_zone_apex" {
+  zone_id = data.aws_route53_zone.site.zone_id
+}
+
+# The hosted UI answers here, and this is the domain Google shows on its
+# consent screen. A Cognito prefix domain would put
+# <prefix>.auth.<region>.amazoncognito.com there instead, which names AWS and
+# this account's ID on the one page a person reads before handing over their
+# Google identity (SCO-27). Changing this replaces the resource, and sign-in
+# is unavailable while the new domain is built -- panels are unaffected,
+# because they hold IoT certificates, not Cognito sessions.
 resource "aws_cognito_user_pool_domain" "admin" {
-  domain       = "scoreboard-admin-${data.aws_caller_identity.current.account_id}"
-  user_pool_id = aws_cognito_user_pool.admin.id
+  domain          = "auth.${var.site_domain}"
+  certificate_arn = aws_acm_certificate_validation.auth.certificate_arn
+  user_pool_id    = aws_cognito_user_pool.admin.id
+
+  lifecycle {
+    precondition {
+      # aws_route53_records and aws_route53_zone disagree about the trailing
+      # dot on a zone/record name (the former keeps it, the latter strips
+      # it), so both sides are trimmed before comparing -- do not "simplify"
+      # this back to a plain ==, it silently fails every zone it checks.
+      condition = anytrue([
+        for r in data.aws_route53_records.site_zone_apex.resource_record_sets :
+        r.type == "A" && trimsuffix(r.name, ".") == trimsuffix(data.aws_route53_zone.site.name, ".")
+      ])
+      error_message = "The ${data.aws_route53_zone.site.name} zone has no apex A record. Cognito refuses a custom domain under a zone whose apex doesn't resolve; create that record (in whichever stack owns it) before applying this one."
+    }
+  }
 }
 
 # A public client with no secret: the site is static, so a secret would be

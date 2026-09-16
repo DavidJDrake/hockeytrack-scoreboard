@@ -152,7 +152,7 @@ resource "aws_cloudfront_response_headers_policy" "site" {
       content_security_policy = join("", [
         "default-src 'self'; script-src 'self'; style-src 'self'; ",
         "img-src 'self' data:; font-src 'self'; ",
-        "connect-src 'self' ${aws_apigatewayv2_api.admin.api_endpoint} https://${aws_cognito_user_pool_domain.admin.domain}.auth.${var.region}.amazoncognito.com; ",
+        "connect-src 'self' ${aws_apigatewayv2_api.admin.api_endpoint} https://${aws_cognito_user_pool_domain.admin.domain}; ",
         "base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; ",
         "require-trusted-types-for 'script'; trusted-types 'none'",
       ])
@@ -271,6 +271,6 @@ output "site_distribution_id" {
 }
 
 output "cognito_domain" {
-  value       = "${aws_cognito_user_pool_domain.admin.domain}.auth.${var.region}.amazoncognito.com"
+  value       = aws_cognito_user_pool_domain.admin.domain
   description = "Hosted-UI host the site signs in through. make site writes it into site/config.json."
 }

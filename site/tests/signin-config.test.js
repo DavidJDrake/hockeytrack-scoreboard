@@ -160,3 +160,26 @@ test("every alarm keeps the prefix HockeyTrack watches for rewriting", () => {
   assert.equal(names.length, alarms, "every aws_cloudwatch_metric_alarm needs a literal alarm_name, with no interpolation");
   for (const n of names) assert.ok(n.startsWith("scoreboard-"), `alarm "${n}" lacks the scoreboard- prefix`);
 });
+
+test("the hosted UI answers on this project's own domain, not a Cognito prefix", () => {
+  const domain = code(block(admin, 'resource "aws_cognito_user_pool_domain" "admin" {'));
+  assert.match(domain, /domain\s*=\s*"auth\.\$\{var\.site_domain\}"/,
+    "the pool's domain must be auth.<site domain>; a prefix domain puts the AWS hostname and the account ID on Google's consent screen");
+  assert.match(domain, /certificate_arn\s*=\s*aws_acm_certificate_validation\.auth\.certificate_arn/,
+    "a custom domain needs its validated certificate");
+});
+
+test("the page may reach the same sign-in host the site is configured with", () => {
+  const site = readFileSync(new URL("../../terraform/site.tf", import.meta.url), "utf8");
+  const csp = code(site).match(/connect-src[^;]*;/);
+  assert.ok(csp, "connect-src not found in the CSP");
+  assert.match(csp[0], /https:\/\/\$\{aws_cognito_user_pool_domain\.admin\.domain\}/,
+    "connect-src must name the pool's domain as written, or it drifts from the output the site is built with");
+  assert.doesNotMatch(csp[0], /amazoncognito\.com/,
+    "connect-src must not append a Cognito prefix-domain suffix; a partial revert would still name the AWS hostname");
+  const out = code(site).match(/output\s+"cognito_domain"\s*\{[^}]*\}/);
+  assert.ok(out, "the cognito_domain output not found");
+  assert.match(out[0], /value\s*=\s*aws_cognito_user_pool_domain\.admin\.domain/);
+  assert.doesNotMatch(out[0], /amazoncognito\.com/,
+    "the cognito_domain output must not append a Cognito prefix-domain suffix; a partial revert would still hand the site the AWS hostname");
+});

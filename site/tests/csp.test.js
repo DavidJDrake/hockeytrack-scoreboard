@@ -14,7 +14,9 @@ const text = policy ? policy[1] : "";
 const directive = (name) => (text.match(new RegExp(`${name} ([^;"]*)`)) || [])[1] || "";
 
 test("connect-src names the hosted UI, which the token exchange posts to", () => {
-  assert.match(directive("connect-src"), /aws_cognito_user_pool_domain\.admin\.domain\}\.auth\.\$\{var\.region\}\.amazoncognito\.com/);
+  assert.match(directive("connect-src"), /https:\/\/\$\{aws_cognito_user_pool_domain\.admin\.domain\}/);
+  assert.doesNotMatch(directive("connect-src"), /amazoncognito\.com/,
+    "connect-src must name the pool's domain as written, with nothing appended -- a Cognito prefix-domain suffix here means the CSP has drifted from the custom domain");
 });
 
 test("connect-src no longer names the user-pool API the site never calls", () => {
