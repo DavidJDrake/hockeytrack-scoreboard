@@ -237,6 +237,8 @@ use, including the Bookworm refusal and the pygame-provenance check.
 
 ## 6. B2 — build and publish
 
+> **Revised 2026-09-16.** Section 9 updates this section for what was built after it was written — enrollment, Google sign-in and the live site — and adds the supply-chain controls a public image needs. Where the two disagree, section 9 wins.
+
 ### 6.1 The recipe
 
 `tools/pi-gen/` holds a pinned pi-gen commit SHA, the build config, and
@@ -366,3 +368,113 @@ on a real panel.
 - **SCO-24** — unbinding leaves the certificate live; the control factory reset
   depends on
 - **SCO-22** — non-reproducible Lambda builds
+
+## 9. Revision, 2026-09-16: B2 as it will be built
+
+**Status:** accepted (approved in conversation, 2026-09-16).
+
+**Why this revision exists.** Section 6 was written on 2026-09-12, before sub-project A (enrollment), Google sign-in, the custom sign-in domain and the live site existed. B2 was held because B1's hardware checks had not run, but those checks need a Pi with something on it, and the image is how the Pi gets anything. So the first image is built and published first, and all eight hardware checks run on it. If H1 or H2 fails, the fix goes into B1 and a new image is tagged. That is a CI run, not a redesign.
+
+### 9.1 Facts established by investigation (read-only)
+
+1. **pi-gen's `arm64` branch is at `74d08a337bd29da289b9aedbe5b48c79fb2e5a03`.** Its `build-docker.sh` runs a `--privileged` container and registers its own `qemu-aarch64` binfmt handler, so an x86 GitHub runner can build the arm64 image under emulation.
+2. **Appliance mode already runs inside a chroot.** `tools/pi-setup.sh --appliance` installs `python3-pygame python3-gpiozero python3-venv network-manager polkitd python3-cryptography ca-certificates`, creates the `scoreboard` system account, copies the application to `/opt/scoreboard`, and enables both units by symlink precisely because there is no running systemd in a pi-gen chroot. The image's stage calls it unchanged.
+3. **The build identity is one free-text line.** `screens.build_identity` reads `/etc/scoreboard-build` and shows it as written, or "development build" when the file is absent.
+4. **The account already has a GitHub OIDC provider,** `arn:aws:iam::989232581535:oidc-provider/token.actions.githubusercontent.com`. It is owned by the `davidjdrake.com` repository's Terraform (`terraform/github_oidc.tf`), not this one. The two existing roles that trust it are scoped to one repository's `refs/heads/main`.
+5. **The only certificate the device ships is Amazon's public root,** `device/certs/AmazonRootCA1.pem`. Every other certificate or key on a panel is generated or issued after first boot.
+
+### 9.2 The recipe
+
+- **pi-gen is pinned by commit.** `tools/pi-gen/` holds the pinned SHA from §9.1, a `config`, and `stage-scoreboard/`.
+- **Config:** `IMG_NAME=scoreboard`, `RELEASE=trixie`, `STAGE_LIST="stage0 stage1 stage2 stage-scoreboard"`, `DEPLOY_COMPRESSION=xz`. `FIRST_USER_PASS`, `DISABLE_FIRST_BOOT_USER_RENAME` and `ENABLE_SSH` are left unset, as section 6.1 requires. The build writes `SKIP_IMAGES` into `stage2` so that only the scoreboard stage exports an image.
+- **`stage-scoreboard/00-packages`** lists exactly what §9.1 fact 2 installs, so the image's packages come from pi-gen's cached apt step rather than a second resolution inside the script.
+- **`stage-scoreboard/01-install/00-run.sh`** copies `device/` and `tools/pi-setup.sh` into the rootfs under `/tmp/scoreboard-src`, runs `pi-setup.sh --appliance` there with `on_chroot`, removes the copy, and writes `/etc/scoreboard-build` as `<version> · <UTC build date> · <short commit>`.
+
+### 9.3 The no-secrets gate, extended
+
+`tools/image-gate.sh <rootfs>` runs against the mounted image. It exits non-zero on the first failed assertion and names it. Section 6.3's assertions stay, and these are added:
+
+- **No private key anywhere** under `/etc`, `/opt`, `/var`, `/home` or `/root`: no file contains a PEM `PRIVATE KEY` header, and there are no SSH host keys. pi-gen removes those and each device generates its own on first boot, so a key baked in here would be shared by every panel that flashes the image.
+- **No enrollment material:** no `enrollment.json`, `device.json`, `device.pem.crt` or `private.pem.key` under `/var/lib/scoreboard` or `/opt/scoreboard`.
+- **Exactly one certificate under `/opt/scoreboard`:** `certs/AmazonRootCA1.pem`, byte-identical to the repository's copy.
+- **`/etc/scoreboard-build` exists** and is a single non-empty line.
+- **Both units are enabled:** `scoreboard.service` and `scoreboard-netcfg.service`.
+- **The polkit rule is present:** `/etc/polkit-1/rules.d/10-scoreboard-network.rules`.
+
+The gate is tested in this repository's CI against fixture root filesystems — one clean, and one per assertion broken — so that a gate which cannot fail is caught before it guards a release.
+
+### 9.4 The build workflow
+
+`.github/workflows/image.yml`, with every action pinned by commit SHA as in `ci.yml`.
+
+- **Triggers.** A pushed tag matching `v*` builds and publishes. Manual dispatch builds, gates and uploads a workflow artifact, but never publishes, and the AWS role in §9.5 would refuse it anyway.
+- **Build job** (`ubuntu-24.04`, 300-minute timeout, `permissions: contents: read, id-token: write, attestations: write`):
+  1. Free runner disk by removing preinstalled toolchains the build does not use, and fail early if less than 25 GB is free.
+  2. Check out pi-gen at the pinned SHA.
+  3. Run `build-docker.sh`.
+  4. Loop-mount the image and run `tools/image-gate.sh`.
+  5. Write `scoreboard-<version>.img.xz.sha256`.
+  6. Create a build provenance attestation for the `.img.xz` with `actions/attest-build-provenance`.
+- **Publish job** (tags only, `permissions: contents: write, id-token: write`):
+  1. Create the GitHub Release with the image and its checksum; GitHub Releases is the source of truth.
+  2. Assume the publisher role over OIDC and upload both files to `images/<version>/`.
+  3. Write `latest.json`: `version`, `file`, `sha256`, `size`, `released`, and the release URL.
+  4. Invalidate `latest.json` only.
+
+### 9.5 Hosting the mirror
+
+In this repository's Terraform, in a new `terraform/images.tf`:
+
+- **Bucket `scoreboard-images-<account id>`:** separate from the website's, as section 6.4 requires. Private, Block Public Access on, versioning on, SSE-S3.
+- **A CloudFront distribution in front of it** with origin access control, at `images.scoreboard.davidjdrake.com`, using its own DNS-validated certificate and a Route 53 alias. `latest.json` is cached for 60 seconds, and everything under `images/` for a year, since a version's files never change.
+- **IAM role `scoreboard-image-publisher`.** It trusts the existing OIDC provider (looked up, not created) only when `aud` is `sts.amazonaws.com` and `sub` is exactly `repo:DavidJDrake/hockeytrack-scoreboard:ref:refs/tags/v*`. Its policy allows `s3:PutObject` on `images/*` and `latest.json`, and `cloudfront:CreateInvalidation` on this distribution. It has no delete, no read beyond what the upload needs, and no other bucket.
+- **Dependency on another repository:** the OIDC provider belongs to `davidjdrake.com`'s Terraform. Deleting it there breaks publishing here. This is recorded in both places.
+
+### 9.6 The divergence monitor
+
+A Go Lambda, `cloud/cmd/imagecheck`, runs daily from EventBridge Scheduler.
+
+- **What it checks.** It reads `latest.json` from the bucket, streams the image object and computes its SHA-256, and fetches the GitHub Release's published `.sha256` for the same version from GitHub's public API. It also compares `latest.json`'s version against GitHub's latest release, to catch a mirror left behind.
+- **On any disagreement** it publishes one message to the existing security SNS topic, naming which of the three values differ.
+- **It reads the object directly, not through CloudFront.** In-region reads cost nothing, and a swapped CloudFront origin is §9.8's job.
+- **Its own alarms** match the gate's: a crash or timeout, and a throttle, both to the security topic. A monitor that fails silently is worse than none.
+
+### 9.7 The download page
+
+- **`/download/` on the scoreboard site** is public, because anyone may flash the image; claiming a panel still needs an invited account.
+- **What it shows.** `assets/download.js` fetches `https://images.scoreboard.davidjdrake.com/latest.json` and renders the version, size and SHA-256, a download link, and the verification commands as text: `sha256sum -c` and `gh attestation verify <file> --repo DavidJDrake/hockeytrack-scoreboard`.
+- **It follows the site's existing rules:** no inline script and no markup built from strings. The CSP's `connect-src` gains exactly the images host.
+- **The home page's "Prepare an SD card" step links here,** which is the fix for step 1 saying nothing about where the card comes from.
+
+### 9.8 Detection: HockeyTrack section 15
+
+A new rule, `hockeytrack-sec-scoreboard-image`, in HockeyTrack's repository. Section 13 has no room left (1,994 of 2,048 characters), and this asset deserves its own alert sentence anyway.
+
+- **Object writes.** The trail gains a fourth selector: write-only S3 data events on the images bucket. The rule pages on any object write whose `sessionContext.sessionIssuer.arn` is not the publisher role, including a caller with no session issuer at all. It is the section 14 shape, leaf `exists` included.
+- **Control-plane writes.** It also pages on any management write naming the images bucket (`bucketName` or its ARN), the images distribution (`id` or the distribution ARN in `resource`), the publisher role (`roleName`), or the OIDC provider (`openIDConnectProviderArn`). Widening the role's trust or repointing the distribution is the quiet way to swap what strangers flash.
+- **Expected noise:** none from releases, because the publisher role's object writes are exempt and invalidations name `distributionId`, which the pattern does not match. Terraform applies that touch these resources page, and are deliberate.
+
+### 9.9 Who can publish
+
+Anyone who can push a `v*` tag can publish an image. A repository ruleset restricts creating, updating and deleting `v*` tags to repository administrators, so a Dependabot token or a compromised workflow token cannot tag a release. This is a GitHub setting, applied with `gh api` and recorded in this spec.
+
+### 9.10 Order of work and proof
+
+1. **Code:** the gate and its fixtures, the pi-gen recipe, the workflow, `images.tf`, the monitor, and the download page, each test-first where it can be.
+2. **Detection:** HockeyTrack section 15 and its trail selector.
+3. **Infrastructure:** apply the scoreboard Terraform, then HockeyTrack's, from saved plans.
+4. **The tag ruleset.**
+5. **Tag `v0.1.0`** and watch the workflow: build, gate, attestation, release, mirror, `latest.json`.
+6. **Prove the controls:**
+   - `gh attestation verify` and `sha256sum -c` pass on a downloaded copy;
+   - the monitor reports agreement;
+   - an object written to the bucket by `funandgames` pages section 15 and makes the monitor report a mismatch — then it is restored;
+   - the download page shows the release.
+7. **Hardware session on the flashed image:** H4 and H5 first, since the image must boot, then H1, H2, H7, H3 and H8, then H6 on a Zero 2 W if one is available. Results go into `docs/hardware-checks.md`. A failure goes back into B1 and a new tag.
+
+### 9.11 Cost
+
+- **Storage:** about 0.5 GB per release, roughly one cent a month each.
+- **Downloads:** CloudFront transfer, about $0.085 per GB after the free tier, so a few cents per download.
+- **The monitor:** negligible, since its S3 reads are in-region.
+- **CI minutes:** free on a public repository.
