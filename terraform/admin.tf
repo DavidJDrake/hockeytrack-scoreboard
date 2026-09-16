@@ -94,9 +94,17 @@ resource "aws_cognito_user_pool" "admin" {
   }
 }
 
+# The hosted UI answers here, and this is the domain Google shows on its
+# consent screen. A Cognito prefix domain would put
+# <prefix>.auth.<region>.amazoncognito.com there instead, which names AWS and
+# this account's ID on the one page a person reads before handing over their
+# Google identity (SCO-27). Changing this replaces the resource, and sign-in
+# is unavailable while the new domain is built -- panels are unaffected,
+# because they hold IoT certificates, not Cognito sessions.
 resource "aws_cognito_user_pool_domain" "admin" {
-  domain       = "scoreboard-admin-${data.aws_caller_identity.current.account_id}"
-  user_pool_id = aws_cognito_user_pool.admin.id
+  domain          = "auth.${var.site_domain}"
+  certificate_arn = aws_acm_certificate_validation.auth.certificate_arn
+  user_pool_id    = aws_cognito_user_pool.admin.id
 }
 
 # A public client with no secret: the site is static, so a secret would be
