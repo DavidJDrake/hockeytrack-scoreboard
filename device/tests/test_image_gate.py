@@ -69,6 +69,11 @@ def _write(path: Path, text: str) -> None:
     path.write_text(text)
 
 
+def _write_bytes(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+
+
 BREAKS = {
     "an identity file under /var/lib/scoreboard": (
         lambda r, b: _write(r / "var/lib/scoreboard/device.json", "{}"), "device.json"),
@@ -114,6 +119,68 @@ BREAKS = {
         lambda r, b: _write(r / "opt/scoreboard/certs/extra.crt", "cert"), "certificate"),
     "a CA that is not Amazon's": (
         lambda r, b: _write(r / "opt/scoreboard/certs/AmazonRootCA1.pem", "not the CA\n"), "AmazonRootCA1"),
+    # Round 1 fixes: each of these bypassed tools/image-gate.sh before the fix.
+    "a certificate with a .cer extension": (
+        lambda r, b: _write(r / "opt/scoreboard/certs/evil.cer", "not a real cert\n"), "certificate"),
+    "a certificate with an upper-case extension": (
+        lambda r, b: _write(r / "opt/scoreboard/certs/EVIL.PEM", "not a real cert\n"), "certificate"),
+    "a certificate symlink beside the CA": (
+        lambda r, b: (r / "opt/scoreboard/certs/extra.pem").symlink_to("../data/x.txt"), "certificate"),
+    "a certificate hiding behind an innocuous filename": (
+        lambda r, b: _write(r / "opt/scoreboard/notes.txt",
+                             "-----BEGIN CERTIFICATE-----\nnot a key\n-----END CERTIFICATE-----\n"), "certificate"),
+    "the Amazon root CA shipped as a symlink": (
+        lambda r, b: ((r / "opt/scoreboard/certs/AmazonRootCA1.pem").unlink(),
+                       (r / "opt/scoreboard/certs/AmazonRootCA1.pem").symlink_to("/nonexistent/elsewhere.pem")),
+        "AmazonRootCA1"),
+    "a private key hidden by a NUL byte": (
+        lambda r, b: _write_bytes(r / "etc/ssl/private/binary.key", b"\x00" + FAKE_KEY.encode()), "private key"),
+    "a private key on the boot partition": (
+        lambda r, b: _write(b / "backup.pem", FAKE_KEY), "private key"),
+    "a two-line build identity without a trailing newline": (
+        lambda r, b: (r / "etc/scoreboard-build").write_text("v0.1.0\nextra"), "scoreboard-build"),
+    "an empty password field in /etc/passwd": (
+        lambda r, b: (r / "etc/passwd").write_text((r / "etc/passwd").read_text().replace("pi:x:1000", "pi::1000")), "pi"),
+    "a second account with uid 0": (
+        lambda r, b: ((r / "etc/passwd").write_text((r / "etc/passwd").read_text() + "toor:x:0:0:toor:/root:/bin/bash\n"),
+                       (r / "etc/shadow").write_text((r / "etc/shadow").read_text() + "toor:$6$salt$hash:20000:0:99999:7:::\n")),
+        "toor"),
+    "an authorized_keys2 file": (
+        lambda r, b: _write(r / "home/pi/.ssh/authorized_keys2", "ssh-ed25519 AAAA test\n"), "authorized_keys"),
+    "SSH enabled via an uncommon target": (
+        lambda r, b: _write(r / "etc/systemd/system/graphical.target.wants/sshd.socket", ""), "SSH"),
+    "the scoreboard unit enabled by a symlink to the wrong target": (
+        lambda r, b: ((r / "etc/systemd/system/multi-user.target.wants/scoreboard.service").unlink(),
+                       (r / "etc/systemd/system/multi-user.target.wants/scoreboard.service").symlink_to(
+                           "/etc/systemd/system/other-service.service")),
+        "scoreboard.service"),
+    "a legacy ssh_host_key": (
+        lambda r, b: _write(r / "etc/ssh/ssh_host_key", "binary-ish"), "host key"),
+    "a saved Wi-Fi connection under /usr/lib/NetworkManager": (
+        lambda r, b: _write(r / "usr/lib/NetworkManager/system-connections/home.nmconnection",
+                             "[wifi-security]\npsk=hunter2\n"), "Wi-Fi"),
+    "a Wi-Fi password via sae_password": (
+        lambda r, b: _write(r / "etc/wpa_supplicant/wpa_supplicant.conf", "network={\n sae_password=hunter2\n}\n"), "Wi-Fi"),
+    "a Wi-Fi password via a bare password key": (
+        lambda r, b: _write(r / "etc/wpa_supplicant/wpa_supplicant.conf", "network={\n password=hunter2\n}\n"), "Wi-Fi"),
+    "a Wi-Fi password via a WEP key": (
+        lambda r, b: _write(r / "etc/wpa_supplicant/wpa_supplicant.conf", "network={\n wep_key0=hunter2\n}\n"), "Wi-Fi"),
+    "a device certificate under /var/lib/scoreboard": (
+        lambda r, b: _write(r / "var/lib/scoreboard/device.pem.crt", "cert\n"), "device.pem.crt"),
+    "a device private key under /var/lib/scoreboard": (
+        lambda r, b: _write(r / "var/lib/scoreboard/private.pem.key", "key\n"), "private.pem.key"),
+    "a device certificate under /opt/scoreboard": (
+        lambda r, b: _write(r / "opt/scoreboard/device.pem.crt", "cert\n"), "device.pem.crt"),
+    "a device private key under /opt/scoreboard": (
+        lambda r, b: _write(r / "opt/scoreboard/private.pem.key", "key\n"), "private.pem.key"),
+    "an identity file under /opt/scoreboard": (
+        lambda r, b: _write(r / "opt/scoreboard/device.json", "{}"), "device.json"),
+    "the scoreboard unit file missing entirely": (
+        lambda r, b: (r / "etc/systemd/system/scoreboard.service").unlink(), "scoreboard.service"),
+    "the polkit rule missing entirely": (
+        lambda r, b: (r / "etc/polkit-1/rules.d/10-scoreboard-network.rules").unlink(), "polkit"),
+    "the distribution's pygame not installed": (
+        lambda r, b: shutil.rmtree(r / "usr/lib/python3/dist-packages/pygame"), "pygame"),
 }
 
 
@@ -133,3 +200,13 @@ def test_a_directory_that_is_not_a_rootfs_is_refused(tmp_path):
     result = gate(tmp_path / "empty", tmp_path / "boot")
     assert result.returncode == 1
     assert "root filesystem" in result.stderr
+
+
+def test_a_build_identity_without_a_trailing_newline_still_passes(tmp_path):
+    # wc -l undercounts a file missing its trailing newline; the gate must
+    # not punish a single-line build identity for lacking one.
+    root, boot = clean_image(tmp_path)
+    (root / "etc/scoreboard-build").write_text("v0.1.0")
+    result = gate(root, boot)
+    assert result.returncode == 0, result.stderr
+    assert "image-gate: all checks passed" in result.stdout
