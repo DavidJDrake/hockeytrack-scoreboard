@@ -416,7 +416,7 @@ The gate is tested in this repository's CI against fixture root filesystems — 
   4. Loop-mount the image and run `tools/image-gate.sh`.
   5. Write `scoreboard-<version>.img.xz.sha256`.
   6. Create a build provenance attestation for the `.img.xz` with `actions/attest-build-provenance`.
-- **Publish job** (tags only, `permissions: contents: write, id-token: write`):
+- **Publish job** (tags only, runs in the `image-release` environment, `permissions: contents: write, id-token: write`). It waits for the reviewer's approval before any step runs:
   1. Create the GitHub Release with the image and its checksum; GitHub Releases is the source of truth.
   2. Assume the publisher role over OIDC and upload both files to `images/<version>/`.
   3. Write `latest.json`: `version`, `file`, `sha256`, `size`, `released`, and the release URL.
@@ -428,7 +428,7 @@ In this repository's Terraform, in a new `terraform/images.tf`:
 
 - **Bucket `scoreboard-images-<account id>`:** separate from the website's, as section 6.4 requires. Private, Block Public Access on, versioning on, SSE-S3.
 - **A CloudFront distribution in front of it** with origin access control, at `images.scoreboard.davidjdrake.com`, using its own DNS-validated certificate and a Route 53 alias. `latest.json` is cached for 60 seconds, and everything under `images/` for a year, since a version's files never change.
-- **IAM role `scoreboard-image-publisher`.** It trusts the existing OIDC provider (looked up, not created) only when `aud` equals `sts.amazonaws.com` and `sub` matches `repo:DavidJDrake/hockeytrack-scoreboard:ref:refs/tags/v*`. That match is `StringLike`, since the pattern carries a wildcard. Its policy allows `s3:PutObject` on `images/*` and `latest.json`, and `cloudfront:CreateInvalidation` on this distribution. It has no delete, no read beyond what the upload needs, and no other bucket.
+- **IAM role `scoreboard-image-publisher`.** It trusts the existing OIDC provider (looked up, not created) only when `aud` equals `sts.amazonaws.com` and `sub` equals `repo:DavidJDrake/hockeytrack-scoreboard:environment:image-release`. GitHub issues that subject only to a job running in the `image-release` environment, which §9.9 restricts to `v*` tags behind a required reviewer, so the role trusts an approved release rather than any tag push. Its policy allows `s3:PutObject` on `images/*` and `latest.json`, and `cloudfront:CreateInvalidation` on this distribution. It has no delete, no read beyond what the upload needs, and no other bucket.
 - **Dependency on another repository:** the OIDC provider belongs to `davidjdrake.com`'s Terraform. Deleting it there breaks publishing here. This is recorded in both places.
 
 ### 9.6 The divergence monitor
@@ -457,7 +457,11 @@ A new rule, `hockeytrack-sec-scoreboard-image`, in HockeyTrack's repository. Sec
 
 ### 9.9 Who can publish
 
-Anyone who can push a `v*` tag can publish an image. A repository ruleset restricts creating, updating and deleting `v*` tags to repository administrators, so a Dependabot token or a compromised workflow token cannot tag a release. This is a GitHub setting, applied with `gh api` and recorded in this spec.
+Publishing takes two things: a `v*` tag, and approval of the `image-release` environment.
+
+- **The environment** requires the repository owner as reviewer, and its deployment policy allows only `v*` tags. A tag alone builds and gates an image, but nothing reaches GitHub Releases or the mirror until someone approves. The AWS role's trust names the environment, so a job outside it cannot assume the role.
+- **A repository ruleset** restricts creating, updating and deleting `v*` tags to administrators, so a Dependabot or workflow token cannot start a release.
+- Both are GitHub settings, applied with `gh api` and recorded in the verification record.
 
 ### 9.10 Order of work and proof
 
