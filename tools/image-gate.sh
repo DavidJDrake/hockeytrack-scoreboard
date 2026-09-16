@@ -32,6 +32,46 @@ sanitize_for_log() {
   printf '%s' "$1" | tr -d '\000-\037\177' | sed 's/::/: :/g'
 }
 
+# find (with the default -P) does not descend into a starting point that is
+# itself a symlink -- it only inspects the link, never what it points to --
+# so a symlink standing in for one of the directories this gate scans would
+# hide everything inside it. Every scan below checks its own starting point
+# with this first.
+reject_symlink() {
+  [ ! -L "$1" ] || fail "$2 is a symlink; it must be a real directory so the gate can see inside it"
+}
+
+# Run find, capturing its output in $FOUND. A nonzero exit -- a permission or
+# read error partway through the scan -- fails the gate outright instead of
+# being read as "nothing found". Call this directly (never as `x=$(run_find
+# ...)`), so a fail() inside it exits the gate itself and not a subshell.
+FOUND=""
+run_find() {
+  local rc
+  set +e
+  FOUND="$(find "$@" 2>&1)"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "scanning failed (find $*): ${FOUND%%$'\n'*}"
+}
+
+# grep -q, but distinguishing "no match" (1) from a real read error (>1), so
+# an unreadable file cannot be misread as clean. Returns 0/1 like grep -q for
+# a normal match/no-match; a real error fails the gate outright. Same calling
+# rule as run_find: call it directly, never through command substitution.
+grep_or_fail() {
+  local err rc
+  set +e
+  err="$(grep "$@" 2>&1 1>/dev/null)"
+  rc=$?
+  set -e
+  case "$rc" in
+    0) return 0 ;;
+    1) return 1 ;;
+    *) fail "scanning failed (grep $*): ${err%%$'\n'*}" ;;
+  esac
+}
+
 [ -f "$ROOT/etc/passwd" ] && [ -f "$ROOT/etc/shadow" ] || fail "$ROOT is not a root filesystem (no /etc/passwd or /etc/shadow)"
 [ -d "$BOOT" ] || fail "$BOOT does not exist"
 
@@ -39,44 +79,47 @@ sanitize_for_log() {
 # boot. One baked in here would make every panel the same panel. A missing
 # directory is not an error to swallow: there is simply nothing to find.
 for dir in var/lib/scoreboard opt/scoreboard; do
+  reject_symlink "$ROOT/$dir" "/$dir"
   if [ -d "$ROOT/$dir" ]; then
     for name in device.json device.pem.crt private.pem.key enrollment.json; do
-      hit="$(find "$ROOT/$dir" -name "$name" -print -quit)"
-      [ -z "$hit" ] || fail "/$dir contains $name, which a panel must generate for itself"
+      run_find "$ROOT/$dir" -name "$name" -print -quit
+      [ -z "$FOUND" ] || fail "/$dir contains $name, which a panel must generate for itself"
     done
   fi
 done
 ok "no identity or enrollment files"
 
 # authorized_keys2 is the same secret under a name ssh(1) also honors.
-hit="$(find "$ROOT" -xdev -name 'authorized_keys*' -print -quit)"
-[ -z "$hit" ] || fail "authorized_keys present at ${hit#"$ROOT"}"
+run_find "$ROOT" -xdev -name 'authorized_keys*' -print -quit
+[ -z "$FOUND" ] || fail "authorized_keys present at ${FOUND#"$ROOT"}"
 ok "no authorized_keys"
 
 # Every passwd entry must delegate its password to /etc/shadow (an 'x' in the
 # password field); an empty field there is itself a passwordless login on
-# many systems and would make the /etc/shadow check below moot. root and
-# every human account -- selected by uid, not by name, so a second uid-0
-# account cannot hide under a different name -- must then be locked in
-# /etc/shadow: a '!' or '*' hash. Any other hash, including an empty one, is
-# usable and fails.
-while IFS=: read -r name pass uid _; do
+# many systems and would make the /etc/shadow check below moot. Every
+# account's shadow hash must then be locked: a '!' or '*' hash. Any other
+# hash, including an empty one, is usable and fails -- not just root's or the
+# first user's, since a system account is not automatically harmless.
+while IFS=: read -r name pass _; do
+  [ -n "$name" ] || continue # a blank line in /etc/passwd is not an account
   [ "$pass" = "x" ] || fail "account $name's /etc/passwd entry does not delegate to /etc/shadow (password field is '$pass')"
-  if [ "$uid" -eq 0 ] || { [ "$uid" -ge 1000 ] && [ "$uid" -lt 65534 ]; }; then
-    hash="$(awk -F: -v u="$name" '$1 == u { print $2 }' "$ROOT/etc/shadow")"
-    case "$hash" in
-      '!'* | '*'*) ;;
-      *) fail "account $name has a usable or empty password" ;;
-    esac
-  fi
+  hash="$(awk -F: -v u="$name" '$1 == u { print $2 }' "$ROOT/etc/shadow")"
+  case "$hash" in
+    '!'* | '*'*) ;;
+    *) fail "account $name has a usable or empty password" ;;
+  esac
 done <"$ROOT/etc/passwd"
 ok "accounts are locked"
 
-# Any ssh*/sshd* unit wired into ANY systemd target (not just the two
-# conventional ones) starts sshd; a marker file on the boot partition enables
-# it on the device's first boot, long after this check has run.
-hit="$(find "$ROOT/etc/systemd/system" -path '*.wants/ssh*' -print -quit)"
-[ -z "$hit" ] || fail "SSH is enabled (${hit#"$ROOT"})"
+# Only the real SSH unit names count -- Raspberry Pi OS ships sshswitch.service
+# enabled in multi-user.target.wants on every image; it only starts sshd when
+# a marker file is on the boot partition, which is checked separately below.
+# A unit wired into ANY systemd target (not just the two conventional ones)
+# still starts sshd if it is one of these.
+run_find "$ROOT/etc/systemd/system" -path '*.wants/*' \
+  \( -name 'ssh.service' -o -name 'sshd.service' -o -name 'ssh.socket' -o -name 'sshd.socket' \
+     -o -name 'ssh@*.service' -o -name 'sshd@*.service' \) -print -quit
+[ -z "$FOUND" ] || fail "SSH is enabled (${FOUND#"$ROOT"})"
 for name in ssh ssh.txt; do
   [ ! -e "$BOOT/$name" ] || fail "SSH is enabled by /boot/$name"
 done
@@ -85,12 +128,15 @@ ok "SSH is not enabled"
 # NetworkManager keeps saved connections in /etc and, for system-provided
 # ones, under /usr/lib too; either carries a Wi-Fi psk in plain text.
 for conns in "$ROOT/etc/NetworkManager/system-connections" "$ROOT/usr/lib/NetworkManager/system-connections"; do
-  if [ -d "$conns" ] && [ -n "$(find "$conns" -type f -print -quit)" ]; then
-    fail "a saved Wi-Fi connection is present in ${conns#"$ROOT"}"
+  reject_symlink "$conns" "${conns#"$ROOT"}"
+  if [ -d "$conns" ]; then
+    run_find "$conns" -type f -print -quit
+    [ -z "$FOUND" ] || fail "a saved Wi-Fi connection is present in ${conns#"$ROOT"}"
   fi
 done
+reject_symlink "$ROOT/etc/wpa_supplicant" "/etc/wpa_supplicant"
 if [ -d "$ROOT/etc/wpa_supplicant" ] \
-  && grep -rqsE '^[[:space:]]*(psk|sae_password|password|wep_key[0-9]?)=' "$ROOT/etc/wpa_supplicant"; then
+  && grep_or_fail -rqE '^[[:space:]]*(psk|sae_password|password|wep_key[0-9]?)=' "$ROOT/etc/wpa_supplicant"; then
   fail "a Wi-Fi password is present in /etc/wpa_supplicant"
 fi
 for name in custom.toml firstrun.sh wpa_supplicant.conf scoreboard-setup.txt; do
@@ -102,8 +148,8 @@ cfg="$ROOT/opt/scoreboard/.venv/pyvenv.cfg"
 [ -f "$cfg" ] || fail "no virtualenv at /opt/scoreboard/.venv"
 grep -qE '^include-system-site-packages[[:space:]]*=[[:space:]]*true' "$cfg" \
   || fail "the virtualenv does not include system site packages, so it cannot see the distribution's pygame"
-hit="$(find "$ROOT/opt/scoreboard/.venv" -type d -name pygame -print -quit)"
-[ -z "$hit" ] || fail "the virtualenv carries its own pygame (${hit#"$ROOT"}), which has no kmsdrm driver"
+run_find "$ROOT/opt/scoreboard/.venv" -type d -name pygame -print -quit
+[ -z "$FOUND" ] || fail "the virtualenv carries its own pygame (${FOUND#"$ROOT"}), which has no kmsdrm driver"
 [ -d "$ROOT/usr/lib/python3/dist-packages/pygame" ] || fail "the distribution's pygame is not installed"
 ok "the virtualenv uses the distribution's pygame"
 
@@ -150,6 +196,7 @@ ok "build identity: $(sanitize_for_log "$first")"
 # gate instead of being mistaken for "no key found" (1).
 scan_for_private_key() {
   local search="$1" where="$2" out rc hit
+  reject_symlink "$search" "$where"
   [ -d "$search" ] || return 0
   set +e
   out="$(grep -rlaE -- '-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----' "$search" 2>&1)"
@@ -169,9 +216,10 @@ scan_for_private_key "$BOOT" "the boot partition:"
 
 # Legacy Debian named the RSA host key ssh_host_key with no algorithm suffix;
 # match that and the current ssh_host_<algo>_key form.
+reject_symlink "$ROOT/etc/ssh" "/etc/ssh"
 if [ -d "$ROOT/etc/ssh" ]; then
-  hit="$(find "$ROOT/etc/ssh" -name 'ssh_host_*key*' -print -quit)"
-  [ -z "$hit" ] || fail "an SSH host key is in the image at ${hit#"$ROOT"}; each panel must generate its own"
+  run_find "$ROOT/etc/ssh" -name 'ssh_host_*key*' -print -quit
+  [ -z "$FOUND" ] || fail "an SSH host key is in the image at ${FOUND#"$ROOT"}; each panel must generate its own"
 fi
 ok "no private keys"
 
@@ -181,21 +229,22 @@ ok "no private keys"
 # and against symlinks too (! -type d, not -type f, so a symlink standing in
 # for a certificate cannot dodge this), or if its content is plainly a
 # certificate regardless of its name.
-found="$(cd "$ROOT/opt/scoreboard" && find . -path ./.venv -prune -o ! -type d -print | sort)"
+run_find "$ROOT/opt/scoreboard" -path "$ROOT/opt/scoreboard/.venv" -prune -o ! -type d -print
 while IFS= read -r entry; do
   [ -n "$entry" ] || continue
-  rel="${entry#./}"
-  path="$ROOT/opt/scoreboard/$rel"
+  rel="${entry#"$ROOT/opt/scoreboard/"}"
+  path="$entry"
   suspect=0
   case "$(printf '%s' "$rel" | tr '[:upper:]' '[:lower:]')" in
     *.pem | *.crt | *.cer | *.der | *.p7b | *.p7c | *.p12 | *.pfx | *.key) suspect=1 ;;
   esac
-  if [ "$suspect" -eq 0 ] && [ -f "$path" ] && grep -qas -- '-----BEGIN CERTIFICATE-----' "$path"; then
+  if [ "$suspect" -eq 0 ] && [ -f "$path" ] \
+    && grep_or_fail -qaE -- '-----BEGIN (TRUSTED )?CERTIFICATE-----|-----BEGIN PKCS7-----' "$path"; then
     suspect=1
   fi
   [ "$suspect" -eq 0 ] || [ "$rel" = "certs/AmazonRootCA1.pem" ] \
     || fail "unexpected certificate or key file under /opt/scoreboard: $rel"
-done <<<"$found"
+done <<<"$(printf '%s\n' "$FOUND" | sort)"
 # The one certificate this image may ship must be the repository's own file,
 # and a regular file -- not a symlink standing in for something else that a
 # name or content match alone would wave through.

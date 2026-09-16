@@ -4,6 +4,7 @@ A gate that cannot fail guards nothing, so every assertion gets a fixture that
 breaks exactly it, and the clean fixture must pass. The fixtures are plain
 directories; nothing is mounted and nothing needs root.
 """
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -32,6 +33,11 @@ def clean_image(tmp_path: Path) -> tuple[Path, Path]:
     for unit in ("scoreboard.service", "scoreboard-netcfg.service"):
         (units / unit).write_text("[Unit]\n")
         (wants / unit).symlink_to(f"/etc/systemd/system/{unit}")
+    # Raspberry Pi OS (raspberrypi-sys-mods) ships this enabled on every
+    # image; it only turns SSH on via a boot-partition marker file, which is
+    # checked separately, so it must not itself trip the SSH-enabled check.
+    (units / "sshswitch.service").write_text("[Unit]\n")
+    (wants / "sshswitch.service").symlink_to("/etc/systemd/system/sshswitch.service")
     rules = root / "etc" / "polkit-1" / "rules.d"
     rules.mkdir(parents=True)
     shutil.copy(REPO / "device" / "polkit" / "10-scoreboard-network.rules", rules)
@@ -72,6 +78,19 @@ def _write(path: Path, text: str) -> None:
 def _write_bytes(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
+
+
+def _symlink_scoreboard_state_dir(r: Path, b: Path) -> None:
+    # find (default -P) does not descend into a starting point that is
+    # itself a symlink, so replacing /var/lib/scoreboard with a symlink to a
+    # real directory would hide an identity file inside it from the scan
+    # that looks for exactly that, unless the gate refuses the symlink
+    # outright.
+    real = r / "var/lib/scoreboard-real"
+    real.mkdir(parents=True)
+    (real / "device.json").write_text("{}")
+    shutil.rmtree(r / "var/lib/scoreboard")
+    (r / "var/lib/scoreboard").symlink_to("scoreboard-real")
 
 
 BREAKS = {
@@ -181,6 +200,19 @@ BREAKS = {
         lambda r, b: (r / "etc/polkit-1/rules.d/10-scoreboard-network.rules").unlink(), "polkit"),
     "the distribution's pygame not installed": (
         lambda r, b: shutil.rmtree(r / "usr/lib/python3/dist-packages/pygame"), "pygame"),
+    # Round 2 fixes: each of these bypassed tools/image-gate.sh before the fix.
+    "SSH enabled by an uncommon target": (
+        lambda r, b: _write(r / "etc/systemd/system/graphical.target.wants/ssh.service", ""), "SSH"),
+    "var/lib/scoreboard replaced by a symlink hiding an identity file": (
+        _symlink_scoreboard_state_dir, "symlink"),
+    "a certificate hiding behind a TRUSTED CERTIFICATE header": (
+        lambda r, b: _write(r / "opt/scoreboard/trusted-notes.txt",
+                             "-----BEGIN TRUSTED CERTIFICATE-----\nnot a key\n-----END TRUSTED CERTIFICATE-----\n"),
+        "certificate"),
+    "a system account with a usable password": (
+        lambda r, b: (r / "etc/shadow").write_text(
+            (r / "etc/shadow").read_text().replace("scoreboard:!:", "scoreboard:$6$salt$hash:")),
+        "scoreboard"),
 }
 
 
@@ -210,3 +242,28 @@ def test_a_build_identity_without_a_trailing_newline_still_passes(tmp_path):
     result = gate(root, boot)
     assert result.returncode == 0, result.stderr
     assert "image-gate: all checks passed" in result.stdout
+
+
+def test_a_blank_line_in_passwd_is_skipped_not_flagged(tmp_path):
+    # A blank line has no name field; it is not an account, so it must not
+    # produce a confusing "account ''" failure -- or any failure at all.
+    root, boot = clean_image(tmp_path)
+    (root / "etc/passwd").write_text((root / "etc/passwd").read_text() + "\n")
+    result = gate(root, boot)
+    assert result.returncode == 0, result.stderr
+    assert "image-gate: all checks passed" in result.stdout
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="running as root can read anything, so an unreadable fixture proves nothing")
+def test_an_unreadable_directory_fails_closed(tmp_path):
+    # A find that cannot read part of the image must fail the gate, not be
+    # read as "nothing here" -- the whole point of round 2's fail-closed fix.
+    root, boot = clean_image(tmp_path)
+    target = root / "var/lib/scoreboard"
+    target.chmod(0o000)
+    try:
+        result = gate(root, boot)
+        assert result.returncode == 1, result.stdout
+        assert "image-gate: FAIL:" in result.stderr
+    finally:
+        target.chmod(0o700)
