@@ -396,7 +396,8 @@ on a real panel.
 
 - **No private key anywhere** under `/etc`, `/opt`, `/var`, `/home` or `/root`: no file contains a PEM `PRIVATE KEY` header, and there are no SSH host keys. pi-gen removes those and each device generates its own on first boot, so a key baked in here would be shared by every panel that flashes the image.
 - **No enrollment material:** no `enrollment.json`, `device.json`, `device.pem.crt` or `private.pem.key` under `/var/lib/scoreboard` or `/opt/scoreboard`.
-- **Exactly one certificate under `/opt/scoreboard`:** `certs/AmazonRootCA1.pem`, byte-identical to the repository's copy.
+- **Exactly one certificate in what we ship under `/opt/scoreboard`,** outside its virtualenv: `certs/AmazonRootCA1.pem`, byte-identical to the repository's copy. The virtualenv is left to the private-key scan, since a pip package may legitimately carry a public CA bundle.
+- **If the scan finds a key that isn't ours** — a test fixture inside a package, or a distribution snakeoil key — the stage deletes it and the gate stays as strict as it is. A shared private key in a public image is the thing this gate exists to stop, whoever put it there.
 - **`/etc/scoreboard-build` exists** and is a single non-empty line.
 - **Both units are enabled:** `scoreboard.service` and `scoreboard-netcfg.service`.
 - **The polkit rule is present:** `/etc/polkit-1/rules.d/10-scoreboard-network.rules`.
@@ -427,7 +428,7 @@ In this repository's Terraform, in a new `terraform/images.tf`:
 
 - **Bucket `scoreboard-images-<account id>`:** separate from the website's, as section 6.4 requires. Private, Block Public Access on, versioning on, SSE-S3.
 - **A CloudFront distribution in front of it** with origin access control, at `images.scoreboard.davidjdrake.com`, using its own DNS-validated certificate and a Route 53 alias. `latest.json` is cached for 60 seconds, and everything under `images/` for a year, since a version's files never change.
-- **IAM role `scoreboard-image-publisher`.** It trusts the existing OIDC provider (looked up, not created) only when `aud` is `sts.amazonaws.com` and `sub` is exactly `repo:DavidJDrake/hockeytrack-scoreboard:ref:refs/tags/v*`. Its policy allows `s3:PutObject` on `images/*` and `latest.json`, and `cloudfront:CreateInvalidation` on this distribution. It has no delete, no read beyond what the upload needs, and no other bucket.
+- **IAM role `scoreboard-image-publisher`.** It trusts the existing OIDC provider (looked up, not created) only when `aud` equals `sts.amazonaws.com` and `sub` matches `repo:DavidJDrake/hockeytrack-scoreboard:ref:refs/tags/v*`. That match is `StringLike`, since the pattern carries a wildcard. Its policy allows `s3:PutObject` on `images/*` and `latest.json`, and `cloudfront:CreateInvalidation` on this distribution. It has no delete, no read beyond what the upload needs, and no other bucket.
 - **Dependency on another repository:** the OIDC provider belongs to `davidjdrake.com`'s Terraform. Deleting it there breaks publishing here. This is recorded in both places.
 
 ### 9.6 The divergence monitor
