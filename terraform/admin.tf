@@ -244,9 +244,77 @@ resource "aws_lambda_function" "api" {
       DEVICES_TABLE = aws_dynamodb_table.devices.name
       IOT_ENDPOINT  = "https://${data.aws_iot_endpoint.data.endpoint_address}"
       SCHEDULE_URL  = var.schedule_url
+      USER_POOL_ID  = aws_cognito_user_pool.admin.id
+      APP_CLIENT_ID = aws_cognito_user_pool_client.site.id
     }
   }
   depends_on = [aws_cloudwatch_log_group.api]
+}
+
+# The admin functions verify the caller's ID token themselves
+# (cloud/internal/idtoken) instead of believing the claims API Gateway's
+# authorizer puts in the event, because anyone allowed lambda:InvokeFunction
+# can hand a function an event with any claims in it. When the authorizer
+# block is present but the token fails verification, API Gateway accepted a
+# token the function refused. That is not proof of a hand-built event by
+# itself: an access token, which carries no aud, passes the authorizer (it
+# checks client_id instead, and no route here sets scopes) and Verify then
+# refuses it; a signing-key rotation whose new kid lands inside the
+# verifier's 5-minute refetch window does the same. Tell those apart from a
+# forged direct invoke using HockeyTrack's section 12 rule: this alarm with
+# no section 12 page at the same time is an access token or a key rotation
+# through API Gateway (check the access log for the route and sub); both
+# alarms together are a direct invoke. The pattern is idtoken.MismatchMessage,
+# quoted, and assumes Lambda's default text log format, as the authgate
+# filters do.
+resource "aws_cloudwatch_log_metric_filter" "token_mismatch_api" {
+  name           = "scoreboard-token-mismatch-api"
+  log_group_name = aws_cloudwatch_log_group.api.name
+  pattern        = "\"token rejected after authorizer accepted\""
+
+  metric_transformation {
+    name      = "TokenMismatch"
+    namespace = "Scoreboard"
+    value     = "1"
+  }
+}
+
+resource "aws_cloudwatch_log_metric_filter" "token_mismatch_enroll" {
+  name           = "scoreboard-token-mismatch-enroll"
+  log_group_name = aws_cloudwatch_log_group.enroll.name
+  pattern        = "\"token rejected after authorizer accepted\""
+
+  metric_transformation {
+    name      = "TokenMismatch"
+    namespace = "Scoreboard"
+    value     = "1"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "token_mismatch" {
+  alarm_name          = "scoreboard-token-mismatch"
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  evaluation_periods  = 1
+  threshold           = 1
+  period              = 300
+  statistic           = "Sum"
+  namespace           = "Scoreboard"
+  metric_name         = "TokenMismatch"
+  alarm_description   = <<-EOT
+    scoreboard-api or scoreboard-enroll was handed an event whose authorizer
+    block said API Gateway had accepted a token, but the token failed the
+    function's own verification. The request was refused either way. Check
+    whether HockeyTrack's section 12 rule paged at the same time. If it did
+    not, this is a real-path case: an access token sent through API Gateway
+    by a signed-in user, or a Cognito signing-key rotation inside the
+    refetch window; look at the admin API access log for the route and sub.
+    If section 12 paged too, assume someone invoked the function directly
+    with forged claims; find the caller in CloudTrail (HockeyTrack's section
+    12 alert names them) and follow HockeyTrack's docs/threat-model.md,
+    section 7.
+  EOT
+  alarm_actions       = [data.aws_sns_topic.security_alerts.arn]
+  treat_missing_data  = "notBreaching"
 }
 
 resource "aws_apigatewayv2_api" "admin" {

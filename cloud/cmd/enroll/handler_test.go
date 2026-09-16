@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -10,6 +11,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"log/slog"
 	"strconv"
 	"strings"
 	"testing"
@@ -19,6 +21,8 @@ import (
 
 	"hockeytrack-scoreboard/internal/devices"
 	"hockeytrack-scoreboard/internal/enroll"
+	"hockeytrack-scoreboard/internal/idtoken"
+	"hockeytrack-scoreboard/internal/idtoken/idtokentest"
 )
 
 func csrPEM(t *testing.T) string {
@@ -45,6 +49,7 @@ func newHandler() (*Handler, *enroll.FakeIssuer) {
 		IoTEndpoint: "a1.iot.us-east-1.amazonaws.com",
 		TTL:         24 * time.Hour,
 		CodeTTL:     15 * time.Minute,
+		Tokens:      idtokentest.Fake{},
 	}, issuer
 }
 
@@ -84,9 +89,16 @@ func submitFor(t *testing.T, h *Handler, owner string) (code, token string) {
 }
 
 // claimAs lets a test supply exactly the claims a token would carry, for
-// cases that need to control email_verified rather than get it for free.
+// cases that need to control email_verified rather than get it for free. The
+// same claims go in the authorizer block, as API Gateway would put them.
 func claimAs(h *Handler, code string, claims map[string]string) events.APIGatewayV2HTTPResponse {
 	req := post("/api/devices/claim", `{"code":"`+code+`"}`)
+	req.Headers = map[string]string{"authorization": idtokentest.Header(idtoken.Claims{
+		Sub:             claims["sub"],
+		Email:           claims["email"],
+		EmailVerified:   claims["email_verified"] == "true",
+		CognitoUsername: claims["cognito:username"],
+	})}
 	req.RequestContext.Authorizer = &events.APIGatewayV2HTTPRequestContextAuthorizerDescription{
 		JWT: &events.APIGatewayV2HTTPRequestContextAuthorizerJWTDescription{Claims: claims},
 	}
@@ -520,6 +532,7 @@ func TestACodeCollisionIsRetriedNotSurfaced(t *testing.T) {
 		IoTEndpoint: "a1.iot.us-east-1.amazonaws.com",
 		TTL:         24 * time.Hour,
 		CodeTTL:     15 * time.Minute,
+		Tokens:      idtokentest.Fake{},
 	}
 	payload := `{"csr":` + strconv.Quote(csrPEM(t)) + `}`
 	resp, err := h.Handle(context.Background(), post("/api/enroll", payload))
@@ -542,10 +555,84 @@ func TestACodeCollisionThatNeverResolvesIs500(t *testing.T) {
 		IoTEndpoint: "a1.iot.us-east-1.amazonaws.com",
 		TTL:         24 * time.Hour,
 		CodeTTL:     15 * time.Minute,
+		Tokens:      idtokentest.Fake{},
 	}
 	payload := `{"csr":` + strconv.Quote(csrPEM(t)) + `}`
 	resp, _ := h.Handle(context.Background(), post("/api/enroll", payload))
 	if resp.StatusCode != 500 {
 		t.Errorf("got %d, want 500", resp.StatusCode)
+	}
+}
+
+func TestForgedOwnerClaimsWithoutATokenCannotClaimAPreBoundPanel(t *testing.T) {
+	h, issuer := newHandler()
+	code, _ := submitFor(t, h, "owner-1@example.com")
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	req := post("/api/devices/claim", `{"code":"`+code+`"}`)
+	req.RequestContext.Authorizer = &events.APIGatewayV2HTTPRequestContextAuthorizerDescription{
+		JWT: &events.APIGatewayV2HTTPRequestContextAuthorizerJWTDescription{Claims: map[string]string{
+			"sub": "attacker", "email": "owner-1@example.com", "email_verified": "true",
+		}},
+	}
+	resp, _ := h.Handle(context.Background(), req)
+	if resp.StatusCode != 401 {
+		t.Errorf("forged claim returned %d, want 401", resp.StatusCode)
+	}
+	if len(issuer.Calls) != 0 {
+		t.Fatal("forged authorizer claims minted a certificate")
+	}
+	if !strings.Contains(buf.String(), idtoken.MismatchMessage) {
+		t.Errorf("no mismatch line logged: %s", buf.String())
+	}
+	if got := claim(h, code, "owner-1").StatusCode; got != 200 {
+		t.Errorf("the real owner's claim returned %d afterwards, want 200", got)
+	}
+}
+
+func TestTheOwnerHintIsCheckedAgainstTheTokenNotTheAuthorizerBlock(t *testing.T) {
+	h, issuer := newHandler()
+	code, _ := submitFor(t, h, "owner-1@example.com")
+	req := post("/api/devices/claim", `{"code":"`+code+`"}`)
+	req.Headers = map[string]string{"authorization": idtokentest.Header(idtoken.Claims{
+		Sub: "owner-2", Email: "owner-2@example.com", EmailVerified: true,
+	})}
+	req.RequestContext.Authorizer = &events.APIGatewayV2HTTPRequestContextAuthorizerDescription{
+		JWT: &events.APIGatewayV2HTTPRequestContextAuthorizerJWTDescription{Claims: map[string]string{
+			"sub": "owner-2", "email": "owner-1@example.com", "email_verified": "true",
+		}},
+	}
+	resp, _ := h.Handle(context.Background(), req)
+	if resp.StatusCode != 404 {
+		t.Errorf("got %d, want 404: the token names owner-2", resp.StatusCode)
+	}
+	if len(issuer.Calls) != 0 {
+		t.Fatal("the authorizer block's email minted a certificate")
+	}
+}
+
+func TestClaimingWhileSigningKeysAreUnavailableIs503(t *testing.T) {
+	h, issuer := newHandler()
+	code, _ := submit(t, h)
+	h.Tokens = idtokentest.Fake{Unavailable: true}
+	if got := claim(h, code, "owner-1").StatusCode; got != 503 {
+		t.Errorf("got %d, want 503", got)
+	}
+	if len(issuer.Calls) != 0 {
+		t.Fatal("a claim was served without a verified token")
+	}
+}
+
+func TestTheDeviceRoutesNeverAskForASignInToken(t *testing.T) {
+	// POST and GET /api/enroll are the panel's own routes. A Cognito outage
+	// must not stop a panel enrolling or polling.
+	h, _ := newHandler()
+	h.Tokens = idtokentest.Fake{Unavailable: true}
+	_, token := submit(t, h)
+	if got := collect(h, token).StatusCode; got == 503 {
+		t.Error("collect consulted the sign-in verifier")
 	}
 }

@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/aws/aws-lambda-go/events"
 
 	"hockeytrack-scoreboard/internal/devices"
+	"hockeytrack-scoreboard/internal/idtoken"
 	"hockeytrack-scoreboard/internal/iotpub"
 )
 
@@ -16,9 +18,10 @@ import (
 // device by thing name, then checks the caller owns it; a caller who does
 // not own it gets 404, so the API never confirms a thing exists.
 type Handler struct {
-	Store devices.Store
-	Pub   iotpub.Publisher
-	Games func(ctx context.Context) ([]byte, error)
+	Store  devices.Store
+	Pub    iotpub.Publisher
+	Games  func(ctx context.Context) ([]byte, error)
+	Tokens idtoken.Tokens
 }
 
 type deviceView struct {
@@ -41,13 +44,6 @@ func respond(status int, body any) (events.APIGatewayV2HTTPResponse, error) {
 
 func fail(status int, msg string) (events.APIGatewayV2HTTPResponse, error) {
 	return respond(status, map[string]string{"error": msg})
-}
-
-func subject(req events.APIGatewayV2HTTPRequest) string {
-	if req.RequestContext.Authorizer == nil || req.RequestContext.Authorizer.JWT == nil {
-		return ""
-	}
-	return req.RequestContext.Authorizer.JWT.Claims["sub"]
 }
 
 // decodeBody returns the request body, base64-decoding it first if API
@@ -74,10 +70,14 @@ func (h *Handler) owned(ctx context.Context, thing, sub string) (devices.Device,
 // Handle routes one request. The route key is API Gateway's, e.g.
 // "PUT /api/devices/{thing}/game".
 func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest) (events.APIGatewayV2HTTPResponse, error) {
-	sub := subject(req)
-	if sub == "" {
+	caller, err := idtoken.Authenticate(ctx, h.Tokens, req)
+	if errors.Is(err, idtoken.ErrUnavailable) {
+		return fail(503, "sign-in check unavailable")
+	}
+	if err != nil {
 		return fail(401, "unauthenticated")
 	}
+	sub := caller.Sub
 	route := req.RequestContext.RouteKey
 	if route == "" {
 		route = req.RouteKey
