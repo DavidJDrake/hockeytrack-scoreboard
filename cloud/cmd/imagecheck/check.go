@@ -1,4 +1,4 @@
-// Command imagecheck compares, once a day, three accounts of the scoreboard
+// Command imagecheck compares, twice a day, three accounts of the scoreboard
 // image strangers download: the image object in the mirror bucket, the
 // checksum in the mirror's latest.json, and the checksum published with the
 // GitHub Release, which is the source of truth. Two copies are a liability

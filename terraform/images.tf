@@ -3,8 +3,8 @@
 # distribution separate from the website so that compromising the site cannot
 # swap the image people flash (docs/superpowers/specs/2026-09-12-device-image-design.md,
 # 6.4 and 9.5). HockeyTrack's security-alarms.tf section 15 pages on any write
-# to it that is not the release itself, and cmd/imagecheck compares it daily
-# against the release.
+# to it that is not the release itself, and cmd/imagecheck compares it twice a
+# day against the release.
 
 locals {
   images_domain = "images.${var.site_domain}"

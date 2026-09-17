@@ -230,6 +230,16 @@ test("the monitor's own failures page the security topic", () => {
 test("the monitor runs twice a day, so the not-running alarm has slack", () => {
   const schedule = code(block(imagecheck, 'resource "aws_scheduler_schedule" "imagecheck" {'));
   assert.match(schedule, /schedule_expression\s*=\s*"cron\(0 11,23 \* \* \? \*\)"/);
+  // The cadence was once daily; prose that still says so misleads a reader
+  // reasoning about the alarm's slack or GitHub's rate limit.
+  const prose = {
+    "terraform/images.tf": images,
+    "cloud/cmd/imagecheck/check.go": readFileSync(new URL("../../cloud/cmd/imagecheck/check.go", import.meta.url), "utf8"),
+    "cloud/cmd/imagecheck/github.go": readFileSync(new URL("../../cloud/cmd/imagecheck/github.go", import.meta.url), "utf8"),
+  };
+  for (const [name, text] of Object.entries(prose)) {
+    assert.doesNotMatch(text, /once a day|\bdaily\b|two a day/, `${name} still describes the old cadence`);
+  }
 });
 
 test("a failed run is not silently retried into duplicate alerts", () => {

@@ -77,6 +77,8 @@
 
 ### Task 1: The no-secrets gate
 
+> **Superseded in part (final fix wave, 2026-09-16).** Review rounds changed the committed files after this task's code was written. Where this block and `tools/image-gate.sh` and `device/tests/test_image_gate.py` disagree, the committed files are authoritative; this block records the starting point, not the result. Main differences: every probe fails closed; symlinked scan roots, newline paths, SSH via `.wants/`, `.requires/` or `.upholds/`, cloud-init (seed files, dpkg entry, config), PyPI packages in the venv and a pip cache all fail the gate; the call is `image-gate.sh <rootfs> <bootfs> [<repo>]`.
+
 **Files:**
 - Create: `tools/image-gate.sh`
 - Create: `device/tests/test_image_gate.py`
@@ -386,6 +388,8 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 ### Task 2: The pi-gen recipe
 
+> **Superseded in part (final fix wave, 2026-09-16).** Review rounds changed the committed files after this task's code was written. Where this block and `tools/pi-gen/` and `tools/pi-setup.sh` disagree, the committed files are authoritative; this block records the starting point, not the result. Main differences: `build.sh` fetches the pinned commit directly (`git init` + `git fetch --depth 1 origin <sha>`) instead of cloning `--branch arm64`; `config` sets `ENABLE_CLOUD_INIT=0` and `build.sh` skips `stage2/04-cloud-init`; `python3-paho-mqtt` is in both package lists and appliance mode runs pip only as `--no-index --no-cache-dir` (spec §9.2).
+
 **Files:**
 - Create: `tools/pi-gen/PIGEN_REF`
 - Create: `tools/pi-gen/config`
@@ -638,6 +642,8 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 ---
 
 ### Task 3: The build and publish workflow
+
+> **Superseded in part (final fix wave, 2026-09-16).** Review rounds changed the committed files after this task's code was written. Where this block and `.github/workflows/image.yml` and `site/tests/image-workflow.test.js` disagree, the committed files are authoritative; this block records the starting point, not the result. Main differences: the build job is `contents: read` only; a separate `attest` job (`needs: build`, tag push only, `id-token`/`attestations: write`, no checkout) re-checks the sha256 and attests; `publish` needs `[build, attest]`, re-resolves the tag, accepts an existing Release only if complete, creates an older release with `--latest=false`, and keeps `latest.json` monotonic; the rootfs mounts `ro,noload`; the artifact is kept 30 days (spec §9.4).
 
 **Files:**
 - Create: `.github/workflows/image.yml`
@@ -938,6 +944,8 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 ---
 
 ### Task 4: The image mirror and the publisher role
+
+> **Superseded in part (final fix wave, 2026-09-16).** Review rounds changed the committed files after this task's code was written. Where this block and `terraform/images.tf` and `site/tests/images-config.test.js` disagree, the committed files are authoritative; this block records the starting point, not the result. Main differences: the publisher policy also allows `s3:GetObject` on `latest.json` and `s3:ListBucket` conditioned on prefix `latest.json` (spec §9.5), and the tests pin every policy statement exactly.
 
 **Files:**
 - Create: `terraform/images.tf`
@@ -1383,6 +1391,8 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 ---
 
 ### Task 5: The divergence monitor
+
+> **Superseded in part (final fix wave, 2026-09-16).** Review rounds changed the committed files after this task's code was written. Where this block and `cloud/cmd/imagecheck/` and `terraform/imagecheck.tf` disagree, the committed files are authoritative; this block records the starting point, not the result. Main differences: it runs twice a day (`cron(0 11,23 * * ? *)`) with no async retries, has a third alarm `scoreboard-imagecheck-not-running`, reports a checksum 404 as a disagreement, and limits redirects to GitHub hosts (spec §9.6).
 
 **Files:**
 - Create: `cloud/cmd/imagecheck/check.go`
@@ -2156,6 +2166,8 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 ### Task 6: The download page
 
+> **Superseded in part (final fix wave, 2026-09-16).** Review rounds changed the committed files after this task's code was written. Where this block and `site/download/index.html`, `site/assets/download.js` and `site/tests/download.test.js` disagree, the committed files are authoritative; this block records the starting point, not the result. Main differences: there are three verify steps: the mirror checksum (described as integrity only), the GitHub Release's own `.sha256` via `gh release download`, and `gh attestation verify <file> --repo DavidJDrake/hockeytrack-scoreboard --signer-workflow DavidJDrake/hockeytrack-scoreboard/.github/workflows/image.yml --source-ref refs/tags/<version>`; the flash steps say to decline Imager's OS customization (spec §9.7).
+
 **Files:**
 - Create: `site/download/index.html`
 - Create: `site/assets/download.js`
@@ -2485,6 +2497,8 @@ Expected plan: only additions, plus in-place updates to the site response-header
 
 It must show nothing destroyed and no change to any existing function's code. Stop and report on anything else.
 
+Before handing the plan over, tell the user: `scoreboard-imagecheck-not-running` will page the security topic shortly after the apply. It reads a function with no invocations as breaching, and the first scheduled run is not until 11:00 or 23:00 UTC. Step 3b clears it by invoking the monitor once, so the page is expected and not an incident.
+
 - [ ] **Step 3: The user applies**
 
 The user runs `terraform -chdir=terraform apply /tmp/claude-1000/b2-images.tfplan`. CloudFront typically takes 5–10 minutes. Then:
@@ -2496,6 +2510,26 @@ terraform -chdir=terraform output -raw image_publisher_role_arn
 curl -sI https://images.scoreboard.davidjdrake.com/latest.json | head -1   # 403 or 404: no object yet, and the bucket is not listable
 curl -sI http://images.scoreboard.davidjdrake.com/ | grep -i '^location'    # redirects to https
 aws s3api get-public-access-block --bucket "$(terraform -chdir=terraform output -raw images_bucket)" --region us-east-1
+```
+
+- [ ] **Step 3b: Invoke the monitor once (after the user's go-ahead)**
+
+The invoke runs the monitor's normal read-only check, and it is still a Lambda invoke, so the user says go first:
+
+```bash
+aws lambda invoke --function-name scoreboard-imagecheck --region us-east-1 /tmp/claude-1000/imagecheck-first.json
+cat /tmp/claude-1000/imagecheck-first.json
+aws logs tail /aws/lambda/scoreboard-imagecheck --since 5m --region us-east-1
+```
+
+Expected:
+- the invoke's response has no `FunctionError`;
+- the log has `image mirror agrees with its release` and no ERROR line.
+
+With no GitHub release and no `latest.json` (a 404 from GitHub's `releases/latest` and a NoSuchKey from S3), `Check` returns no problems and no error. So that line is how this state appears; the code has no separate "no release yet" message. An AccessDenied on `latest.json` or a GitHub error would instead come back as a `FunctionError` with an ERROR log line: stop and report. Then confirm the not-running alarm returns to OK within a few minutes:
+
+```bash
+aws cloudwatch describe-alarms --alarm-names scoreboard-imagecheck-not-running --region us-east-1 --query 'MetricAlarms[0].StateValue'
 ```
 
 - [ ] **Step 4: Publish the site with the download page**
@@ -2549,12 +2583,23 @@ gh api repos/DavidJDrake/hockeytrack-scoreboard/rulesets --jq '.[] | select(.nam
 
 Role 5 is the repository admin role. Anyone else, including a compromised token with only `contents:write`, cannot create, move or delete a `v*` tag, so cannot start a publish. Update and deletion are blocked for admins too, except by bypass, so a published tag cannot be silently re-pointed.
 
+- [ ] **Step 7b: Enable immutable releases (after the user's go-ahead)**
+
+The endpoint was checked against GitHub's REST reference ("Enable immutable releases", `PUT /repos/{owner}/{repo}/immutable-releases`, 204 on success; `GET` on the same path returns 200 with `enabled` and `enforced_by_owner` when enabled, 404 when not):
+
+```bash
+gh api -X PUT repos/DavidJDrake/hockeytrack-scoreboard/immutable-releases
+gh api repos/DavidJDrake/hockeytrack-scoreboard/immutable-releases
+```
+
+Expected: the `PUT` prints nothing, and the `GET` prints `{"enabled":true,"enforced_by_owner":false}`. Any 404 on the `GET` means it is not enabled: stop and report. Once a Release is published, its assets and tag are locked (spec §9.9). `gh release create` uploads assets to a draft before publishing, which immutability permits. A failed publish that leaves a published but incomplete Release can no longer be fixed by editing it, only by deleting it and re-running.
+
 - [ ] **Step 8: Record it**
 
 Append to spec §9 a "Deployed" note, with:
 - the apply date;
 - the distribution's domain, but not its ID (the ID lives in Terraform outputs and repository variables);
-- that the environment and tag ruleset exist, and how they were checked.
+- that the environment, tag ruleset and immutable releases exist, and how they were checked.
 
 Commit on the branch.
 
@@ -2717,6 +2762,25 @@ After the user's go-ahead, merge the PR. Record the break test (date, both alert
 
 ### Task 10: The first release, end to end (controller and user)
 
+- [ ] **Step 0: Build and gate on main before tagging (after the user's go-ahead)**
+
+The workflow cannot be dispatched from a branch until it exists on main, so the first real pi-gen build happens after the merge. Run it without publishing before any tag exists:
+
+```bash
+gh workflow run image.yml --repo DavidJDrake/hockeytrack-scoreboard --ref main
+gh run watch --repo DavidJDrake/hockeytrack-scoreboard $(gh run list --repo DavidJDrake/hockeytrack-scoreboard --workflow image.yml --limit 1 --json databaseId --jq '.[0].databaseId')
+gh run view --repo DavidJDrake/hockeytrack-scoreboard --log $(gh run list --repo DavidJDrake/hockeytrack-scoreboard --workflow image.yml --limit 1 --json databaseId --jq '.[0].databaseId') | grep 'image-gate:'
+```
+
+A dispatch sets `publish=false`, so only the build job runs: no attestation and no publish. Read every gate line against the real trixie rootfs, not just the final result. These rules have only ever met fixtures:
+- **the account rule:** every `/etc/passwd` entry has an `x` and a locked shadow hash, including the first user and root;
+- **cloud-init:** no seed files, no dpkg entry, no `/etc/cloud/cloud.cfg`;
+- **NetworkManager under `/usr/lib`:** no system-provided connection files;
+- **pip trees:** the venv holds only `pip-*.dist-info`, `/usr/lib/python3/dist-packages/paho` exists, and there is no `/root/.cache/pip`;
+- **runtime:** how long the gate step took, since `grep -a` reads all of `/var`.
+
+A failure here is fixed on a branch and merged before Step 1. It costs one extra CI run of about two hours if nothing fails.
+
 - [ ] **Step 1: Merge B2 and tag**
 
 After Tasks 7 and 9, and the user's go-ahead, merge the scoreboard PR, then tag from main:
@@ -2733,6 +2797,7 @@ git -C /home/jay/projects/hockeytrack-scoreboard push origin v0.1.0
 
 Expected:
 - the build job passes the gate and uploads the artifact;
+- the attest job verifies the sha256 and attests;
 - the publish job waits on `image-release`.
 
 A gate failure is a finding, not a flake: read the gate's output, fix on a branch, and delete and re-create the tag only after that fix merges. The ruleset means the user does that as admin.
@@ -2747,7 +2812,8 @@ The user approves the `image-release` deployment in the Actions UI, after checki
 cd /tmp/claude-1000 && rm -rf v010 && mkdir v010 && cd v010
 gh release download v0.1.0 --repo DavidJDrake/hockeytrack-scoreboard
 sha256sum -c scoreboard-v0.1.0.img.xz.sha256
-gh attestation verify scoreboard-v0.1.0.img.xz --repo DavidJDrake/hockeytrack-scoreboard
+gh attestation verify scoreboard-v0.1.0.img.xz --repo DavidJDrake/hockeytrack-scoreboard \
+  --signer-workflow DavidJDrake/hockeytrack-scoreboard/.github/workflows/image.yml --source-ref refs/tags/v0.1.0
 curl -s https://images.scoreboard.davidjdrake.com/latest.json | jq .
 curl -s https://images.scoreboard.davidjdrake.com/images/v0.1.0/scoreboard-v0.1.0.img.xz | sha256sum
 ```
@@ -2813,7 +2879,9 @@ Only the user can do this: it needs the Pi, a panel, an SD card and the user's W
 
 - [ ] **Step 1: Flash and first boot**
 
-The user downloads from the page, runs both verify commands, and flashes with Raspberry Pi Imager's **Use custom**, with no OS customization. The Imager's settings would write credentials the gate forbids. The user then follows the home page's setup steps, with a real setup file.
+The user downloads from the page, runs all three verify commands, and flashes with Raspberry Pi Imager's **Use custom**, with no OS customization. The Imager's settings would write credentials the gate forbids, and the image has no cloud-init to read them. The user then follows the home page's setup steps, with a real setup file.
+
+During H4 and H5, watch for pi-gen's first-boot user-rename wizard. `DISABLE_FIRST_BOOT_USER_RENAME` is deliberately unset, so `userconf-pi` runs its rename prompt on tty1 at first boot. It may compete with `scoreboard.service`, which also takes tty1 to become kmsdrm's DRM master. If the panel stays black or shows the wizard, record exactly what appears and which of the two holds the console: `journalctl -b -u scoreboard`, plus the rename service's own journal. Find its unit with `systemctl list-units --all 'userconf*'`; the unit name was not checked against `userconf-pi`'s package. That is a B1 finding, not something to work around by hand.
 
 - [ ] **Step 2: Run the checks in order**
 

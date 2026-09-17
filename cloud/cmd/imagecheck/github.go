@@ -11,7 +11,8 @@ import (
 )
 
 // GitHub reads a public repository's releases without credentials. Its
-// unauthenticated rate limit is 60 requests an hour; this makes two a day.
+// unauthenticated API rate limit is 60 requests an hour; each run makes one API
+// request and one release-asset download, twice a day, so four requests a day.
 type GitHub struct {
 	Repo   string // owner/name
 	API    string // https://api.github.com
