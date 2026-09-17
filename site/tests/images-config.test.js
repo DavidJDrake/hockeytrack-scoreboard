@@ -222,9 +222,20 @@ test("the monitor's own failures page the security topic", () => {
   }
 });
 
-test("the monitor runs daily", () => {
+// Twice a day, not once: the not-running alarm below is built on
+// Invocations' longest period (24h), so a once-daily schedule would have a
+// window right after each run where the trailing 24h holds no datapoint
+// (yesterday's aged out, today's not yet emitted) and the alarm would false
+// -page on missing data. Running every 12 hours gives that window slack.
+test("the monitor runs twice a day, so the not-running alarm has slack", () => {
   const schedule = code(block(imagecheck, 'resource "aws_scheduler_schedule" "imagecheck" {'));
-  assert.match(schedule, /schedule_expression\s*=\s*"cron\(0 11 \* \* \? \*\)"/);
+  assert.match(schedule, /schedule_expression\s*=\s*"cron\(0 11,23 \* \* \? \*\)"/);
+});
+
+test("a failed run is not silently retried into duplicate alerts", () => {
+  const config = code(block(imagecheck, 'resource "aws_lambda_function_event_invoke_config" "imagecheck" {'));
+  assert.match(config, /function_name\s*=\s*aws_lambda_function\.imagecheck\.function_name/);
+  assert.match(config, /maximum_retry_attempts\s*=\s*0/);
 });
 
 // Unlike the errors/throttles alarms (which only fire when the function

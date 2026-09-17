@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -261,20 +262,53 @@ func TestGitHubForbiddenOrRateLimitedIsAnErrorNotNoRelease(t *testing.T) {
 	}
 }
 
+// The redirect target is a second, real local server, not an unresolvable
+// hostname: a bare DNS failure would make this test pass even with no
+// policy at all. It is also a TLS server, and the client is built from its
+// own Client() (which trusts its certificate), so a follow is prevented
+// only by redirectPolicy -- never incidentally by certificate distrust,
+// which would likewise pass for the wrong reason. (Confirmed by hand: with
+// CheckRedirect removed, this same setup follows the redirect and
+// evilRequests becomes 1 -- see the fix report.)
 func TestGitHubRefusesARedirectToAnotherHost(t *testing.T) {
+	var evilRequests int
+	evil := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		evilRequests++
+		w.Write([]byte(sum(image) + "  scoreboard-v0.1.0.img.xz\n"))
+	}))
+	defer evil.Close()
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "https://evil.example.com/scoreboard-v0.1.0.img.xz.sha256", http.StatusFound)
+		http.Redirect(w, r, evil.URL+"/scoreboard-v0.1.0.img.xz.sha256", http.StatusFound)
 	}))
 	defer srv.Close()
-	g := GitHub{
-		Repo:   "DavidJDrake/hockeytrack-scoreboard",
-		API:    srv.URL,
-		Web:    srv.URL,
-		Client: &http.Client{CheckRedirect: redirectPolicy},
+
+	client := &http.Client{
+		Transport:     evil.Client().Transport,
+		CheckRedirect: redirectPolicy,
 	}
-	if _, err := g.Checksum(context.Background(), "v0.1.0", "scoreboard-v0.1.0.img.xz"); err == nil {
-		t.Error("a redirect to an unexpected host was followed instead of refused")
+	g := GitHub{Repo: "DavidJDrake/hockeytrack-scoreboard", API: srv.URL, Web: srv.URL, Client: client}
+
+	_, err := g.Checksum(context.Background(), "v0.1.0", "scoreboard-v0.1.0.img.xz")
+	if err == nil {
+		t.Fatal("a redirect to an unexpected host was followed instead of refused")
 	}
+	evilHost := mustHostname(t, evil.URL)
+	if !strings.Contains(err.Error(), evilHost) {
+		t.Errorf("error %q does not name the refused host %q", err, evilHost)
+	}
+	if evilRequests != 0 {
+		t.Errorf("the redirect was followed: the other server received %d requests", evilRequests)
+	}
+}
+
+func mustHostname(t *testing.T, rawURL string) string {
+	t.Helper()
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatalf("parsing %q: %v", rawURL, err)
+	}
+	return u.Hostname()
 }
 
 // A forged version is not merely an infrastructure error: latest.json names

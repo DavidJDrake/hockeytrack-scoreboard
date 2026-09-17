@@ -20,13 +20,17 @@ type GitHub struct {
 }
 
 // allowedRedirectHosts are the only hosts a github.com or api.github.com
-// request may legitimately be redirected to (release assets are served from
-// GitHub's object storage). redirectPolicy is meant to be set as an
-// http.Client's CheckRedirect, so a captive proxy, DNS hijack or compromised
-// intermediary cannot make this function fetch a "checksum" -- or anything
-// else -- from an attacker's server just by 30x-ing a request there.
+// request may legitimately be redirected to: github.com and
+// api.github.com themselves (a renamed or transferred repository 301s
+// api.github.com/repos/<old>/... to api.github.com/repositories/<id>/...),
+// and the two hosts release assets are actually served from.
+// redirectPolicy is meant to be set as an http.Client's CheckRedirect, so a
+// captive proxy, DNS hijack or compromised intermediary cannot make this
+// function fetch a "checksum" -- or anything else -- from an attacker's
+// server just by 30x-ing a request there.
 var allowedRedirectHosts = map[string]bool{
 	"github.com":                           true,
+	"api.github.com":                       true,
 	"release-assets.githubusercontent.com": true,
 	"objects.githubusercontent.com":        true,
 }

@@ -434,7 +434,7 @@ In this repository's Terraform, in a new `terraform/images.tf`:
 
 ### 9.6 The divergence monitor
 
-A Go Lambda, `cloud/cmd/imagecheck`, runs daily from EventBridge Scheduler.
+A Go Lambda, `cloud/cmd/imagecheck`, runs twice a day (11:00 and 23:00 UTC) from EventBridge Scheduler -- twice, not once, so its own not-running alarm (built on the `Invocations` metric's longest period, 24 hours) always has slack against Lambda's own metric-reporting lag, rather than false-paging the security topic in the window right after a single daily run.
 
 - **What it checks.** It reads `latest.json` from the bucket, streams the image object and computes its SHA-256, and fetches the GitHub Release's published `.sha256` for the same version from GitHub's public API. It also compares `latest.json`'s version against GitHub's latest release, to catch a mirror left behind.
 - **On any disagreement** it publishes one message to the existing security SNS topic, naming which of the three values differ.
