@@ -17,3 +17,11 @@ KEYBOARD_KEYMAP=us
 KEYBOARD_LAYOUT="English (US)"
 TIMEZONE_DEFAULT=America/New_York
 STAGE_LIST="stage0 stage1 stage2 stage-scoreboard"
+# No cloud-init. At the pinned commit it defaults on, installing cloud-init and
+# writing a NoCloud seed (user-data, network-config, meta-data) to the boot
+# partition, where Raspberry Pi Imager's OS customization or anyone with the
+# card can create accounts and set credentials. The appliance owns networking
+# through scoreboard-netcfg. This setting skips only the seed files, so
+# build.sh also skips the whole stage2/04-cloud-init sub-stage, and
+# tools/image-gate.sh fails an image carrying either.
+ENABLE_CLOUD_INIT=0

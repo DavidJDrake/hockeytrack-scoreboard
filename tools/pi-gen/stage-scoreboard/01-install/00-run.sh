@@ -1,6 +1,13 @@
 #!/bin/bash -e
 # Install the appliance with the same script a hand-built panel uses, inside
 # the image's chroot, then remove the source and record which build this is.
+#
+# The staging copy lives on /tmp inside the rootfs, which is a tmpfs rather
+# than the image: on_chroot mounts a tmpfs over ${ROOTFS_DIR}/tmp the first
+# time it runs, which this stage's 00-packages sub-stage already did, and
+# pi-gen leaves it mounted until the stage ends. So the copy is visible to the
+# chroot below and never lands in the exported image, even if the rm at the
+# end were skipped.
 src="${ROOTFS_DIR}/tmp/scoreboard-src"
 install -d "${src}/tools"
 cp -a files/device "${src}/device"

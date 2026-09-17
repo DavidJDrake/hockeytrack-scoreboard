@@ -5,3 +5,4 @@ network-manager
 polkitd
 python3-cryptography
 ca-certificates
+python3-paho-mqtt

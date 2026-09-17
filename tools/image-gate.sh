@@ -75,6 +75,18 @@ grep_or_fail() {
 [ -f "$ROOT/etc/passwd" ] && [ -f "$ROOT/etc/shadow" ] || fail "$ROOT is not a root filesystem (no /etc/passwd or /etc/shadow)"
 [ -d "$BOOT" ] || fail "$BOOT does not exist"
 
+# Several checks below read find's output one line at a time. A name holding a
+# newline splits into two lines there, and the second can impersonate an
+# allowed path: a directory named "x<newline>certs" holding its own
+# AmazonRootCA1.pem reads as the one certificate this image may ship. No file
+# pi-gen or this project writes has a newline in its name, so any such path
+# fails the gate before a line-oriented check can be fooled by it.
+for tree in "$ROOT" "$BOOT"; do
+  run_find "$tree" -name "*"$'\n'"*" -print -quit
+  [ -z "$FOUND" ] || fail "a path contains a newline: $(sanitize_for_log "${FOUND#"$tree"}")"
+done
+ok "no path contains a newline"
+
 # A panel's identity and its pending enrollment are generated after first
 # boot. One baked in here would make every panel the same panel. A missing
 # directory is not an error to swallow: there is simply nothing to find.
@@ -114,9 +126,10 @@ ok "accounts are locked"
 # Only the real SSH unit names count -- Raspberry Pi OS ships sshswitch.service
 # enabled in multi-user.target.wants on every image; it only starts sshd when
 # a marker file is on the boot partition, which is checked separately below.
-# A unit wired into ANY systemd target (not just the two conventional ones)
-# still starts sshd if it is one of these.
-run_find "$ROOT/etc/systemd/system" -path '*.wants/*' \
+# A unit wired into ANY systemd target (not just the two conventional ones),
+# through a .wants, .requires or .upholds directory, still starts sshd if it
+# is one of these.
+run_find "$ROOT/etc/systemd/system" \( -path '*.wants/*' -o -path '*.requires/*' -o -path '*.upholds/*' \) \
   \( -name 'ssh.service' -o -name 'sshd.service' -o -name 'ssh.socket' -o -name 'sshd.socket' \
      -o -name 'ssh@*.service' -o -name 'sshd@*.service' \) -print -quit
 [ -z "$FOUND" ] || fail "SSH is enabled (${FOUND#"$ROOT"})"
@@ -144,6 +157,27 @@ for name in custom.toml firstrun.sh wpa_supplicant.conf scoreboard-setup.txt; do
 done
 ok "no Wi-Fi credentials"
 
+# cloud-init reads user-data, network-config and meta-data from the boot
+# partition on first boot (pi-gen's NoCloud seed), and user-data can create
+# accounts, set passwords and install SSH keys. The appliance owns its network
+# through scoreboard-netcfg, so the image ships no cloud-init at all: no seed
+# files, and no cloud-init package to read one that Raspberry Pi Imager or a
+# stranger's SD card reader adds later. dpkg's status file is the package
+# signal; the two files are a backstop for a copy installed outside dpkg.
+for name in user-data network-config meta-data; do
+  [ ! -e "$BOOT/$name" ] && [ ! -L "$BOOT/$name" ] \
+    || fail "the boot partition carries $name, a cloud-init seed that can create accounts or set credentials"
+done
+status="$ROOT/var/lib/dpkg/status"
+[ -f "$status" ] || fail "no /var/lib/dpkg/status, so the installed packages cannot be checked"
+if grep_or_fail -qxE 'Package: (cloud-init|rpi-cloud-init-mods)' "$status"; then
+  fail "cloud-init is installed (dpkg lists it)"
+fi
+for path in etc/cloud/cloud.cfg usr/bin/cloud-init; do
+  [ ! -e "$ROOT/$path" ] && [ ! -L "$ROOT/$path" ] || fail "cloud-init is installed (/$path exists)"
+done
+ok "no cloud-init"
+
 cfg="$ROOT/opt/scoreboard/.venv/pyvenv.cfg"
 [ -f "$cfg" ] || fail "no virtualenv at /opt/scoreboard/.venv"
 grep -qE '^include-system-site-packages[[:space:]]*=[[:space:]]*true' "$cfg" \
@@ -152,6 +186,17 @@ run_find "$ROOT/opt/scoreboard/.venv" -type d -name pygame -print -quit
 [ -z "$FOUND" ] || fail "the virtualenv carries its own pygame (${FOUND#"$ROOT"}), which has no kmsdrm driver"
 [ -d "$ROOT/usr/lib/python3/dist-packages/pygame" ] || fail "the distribution's pygame is not installed"
 ok "the virtualenv uses the distribution's pygame"
+
+# The service that holds each panel's IoT private key imports paho-mqtt, so it
+# comes from Debian's signed archive (python3-paho-mqtt), not an unpinned PyPI
+# download. Appliance mode's pip only confirms requirements.txt is satisfied
+# by what apt installed (--no-index), so the venv must hold nothing but the pip
+# that python3 -m venv bundles, and no pip cache may ship.
+[ -d "$ROOT/usr/lib/python3/dist-packages/paho" ] || fail "the distribution's paho-mqtt is not installed"
+run_find "$ROOT/opt/scoreboard/.venv" -name '*.dist-info' ! -name 'pip-*.dist-info' -print -quit
+[ -z "$FOUND" ] || fail "the virtualenv holds a package installed from PyPI ($(sanitize_for_log "${FOUND##*/}")); appliance packages come from apt"
+[ ! -e "$ROOT/root/.cache/pip" ] && [ ! -L "$ROOT/root/.cache/pip" ] || fail "a pip cache ships in the image at /root/.cache/pip"
+ok "no Python package from PyPI, and no pip cache"
 
 # A unit only counts as enabled if its .wants symlink resolves to the unit
 # file this image installed. A symlink that merely exists but points at the

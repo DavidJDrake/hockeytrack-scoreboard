@@ -99,7 +99,10 @@ install_appliance() {
   preflight
   echo "==> apt packages"
   apt-get update
-  apt-get install -y python3-pygame python3-gpiozero python3-venv network-manager polkitd python3-cryptography ca-certificates
+  # Every Python dependency comes from the distribution's signed archive:
+  # pygame for its kmsdrm driver, cryptography for enrollment, and paho-mqtt
+  # because the service that imports it holds the panel's IoT private key.
+  apt-get install -y python3-pygame python3-gpiozero python3-venv network-manager polkitd python3-cryptography python3-paho-mqtt ca-certificates
 
   echo "==> service account"
   getent passwd "$SERVICE_USER" >/dev/null || \
@@ -121,7 +124,12 @@ install_appliance() {
   mkdir -p "$APP_DIR"
   cp -a "$DEVICE/scoreboard" "$DEVICE/requirements.txt" "$DEVICE/certs" "$APP_DIR/"
   python3 -m venv --system-site-packages "$APP_DIR/.venv"
-  "$APP_DIR/.venv/bin/pip" install -r "$APP_DIR/requirements.txt"
+  # pip only confirms that what apt installed satisfies requirements.txt. With
+  # --no-index it cannot reach PyPI (or the piwheels index Raspberry Pi OS
+  # configures in /etc/pip.conf), so a missing or too-old package fails the
+  # install instead of quietly downloading an unpinned, unhashed wheel; with
+  # --no-cache-dir it leaves no pip cache in /root for an image to ship.
+  "$APP_DIR/.venv/bin/pip" install --no-index --no-cache-dir --disable-pip-version-check -r "$APP_DIR/requirements.txt"
   local where
   where="$(PYGAME_HIDE_SUPPORT_PROMPT=1 "$APP_DIR/.venv/bin/python" -c 'import os, pygame; print(os.path.dirname(pygame.__file__))')"
   case "$where" in

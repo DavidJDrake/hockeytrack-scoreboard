@@ -19,14 +19,23 @@ case "$VERSION" in
 esac
 
 rm -rf "$WORK"
-git clone --quiet --branch arm64 https://github.com/RPi-Distro/pi-gen.git "$WORK"
-git -C "$WORK" checkout --quiet --detach "$REF"
+# Fetch the pinned commit itself rather than cloning the arm64 branch and
+# checking the commit out: a force-push upstream can drop the commit from the
+# branch, but GitHub still serves it by SHA until it is garbage-collected.
+git init --quiet "$WORK"
+git -C "$WORK" remote add origin https://github.com/RPi-Distro/pi-gen.git
+git -C "$WORK" fetch --quiet --depth 1 origin "$REF"
+git -C "$WORK" checkout --quiet --detach FETCH_HEAD
 [ "$(git -C "$WORK" rev-parse HEAD)" = "$REF" ] || { echo "build.sh: pi-gen is not at $REF" >&2; exit 1; }
 
 cp "$HERE/config" "$WORK/config"
 cp -a "$HERE/stage-scoreboard" "$WORK/stage-scoreboard"
 # Stage 2 is Raspberry Pi OS Lite; only the scoreboard stage exports an image.
 touch "$WORK/stage2/SKIP_IMAGES"
+# No cloud-init (see config). ENABLE_CLOUD_INIT=0 only skips the sub-stage's
+# 01-run.sh; its 00-packages would still install cloud-init and
+# rpi-cloud-init-mods, so the whole sub-stage is skipped.
+touch "$WORK/stage2/04-cloud-init/SKIP"
 
 # What the appliance needs, as an explicit list. The device's config directory
 # holds a developer's own panel identity and must never reach an image.

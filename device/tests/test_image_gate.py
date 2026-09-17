@@ -50,6 +50,17 @@ def clean_image(tmp_path: Path) -> tuple[Path, Path]:
     (root / "opt" / "scoreboard" / "certs").mkdir()
     shutil.copy(REPO / "device" / "certs" / "AmazonRootCA1.pem", root / "opt" / "scoreboard" / "certs")
     (root / "usr" / "lib" / "python3" / "dist-packages" / "pygame").mkdir(parents=True)
+    # paho-mqtt comes from Debian's signed archive, like pygame, and the venv
+    # holds nothing but the pip that python3 -m venv bundles.
+    (root / "usr" / "lib" / "python3" / "dist-packages" / "paho").mkdir(parents=True)
+    (venv / "lib" / "python3.13" / "site-packages" / "pip-25.1.1.dist-info").mkdir(parents=True)
+    (venv / "lib" / "python3.13" / "site-packages" / "pip").mkdir()
+    dpkg = root / "var" / "lib" / "dpkg"
+    dpkg.mkdir(parents=True)
+    (dpkg / "status").write_text(
+        "Package: python3-paho-mqtt\nStatus: install ok installed\nVersion: 2.1.0-1\n\n"
+        "Package: network-manager\nStatus: install ok installed\nVersion: 1.52.0-1\n"
+    )
     (root / "var" / "lib" / "scoreboard").mkdir(parents=True)
     (root / "home" / "pi").mkdir(parents=True)
     (root / "root").mkdir()
@@ -213,6 +224,45 @@ BREAKS = {
         lambda r, b: (r / "etc/shadow").write_text(
             (r / "etc/shadow").read_text().replace("scoreboard:!:", "scoreboard:$6$salt$hash:")),
         "scoreboard"),
+    # Final fix wave: each of these bypassed tools/image-gate.sh before the fix.
+    "cloud-init user-data on the boot partition": (
+        lambda r, b: _write(b / "user-data", "#cloud-config\nssh_pwauth: true\n"), "cloud-init"),
+    "cloud-init network-config on the boot partition": (
+        lambda r, b: _write(b / "network-config", "network:\n  version: 2\n"), "cloud-init"),
+    "cloud-init meta-data on the boot partition": (
+        lambda r, b: _write(b / "meta-data", "instance_id: rpios-image\n"), "cloud-init"),
+    "cloud-init's configuration in the rootfs": (
+        lambda r, b: _write(r / "etc/cloud/cloud.cfg", "users: [default]\n"), "cloud-init"),
+    "the cloud-init program in the rootfs": (
+        lambda r, b: _write(r / "usr/bin/cloud-init", "#!/usr/bin/python3\n"), "cloud-init"),
+    "cloud-init recorded as a package by dpkg": (
+        lambda r, b: (r / "var/lib/dpkg/status").write_text(
+            (r / "var/lib/dpkg/status").read_text() + "\nPackage: cloud-init\nStatus: install ok installed\n"),
+        "cloud-init"),
+    "rpi-cloud-init-mods recorded as a package by dpkg": (
+        lambda r, b: (r / "var/lib/dpkg/status").write_text(
+            (r / "var/lib/dpkg/status").read_text() + "\nPackage: rpi-cloud-init-mods\nStatus: install ok installed\n"),
+        "cloud-init"),
+    "no dpkg status to check packages against": (
+        lambda r, b: (r / "var/lib/dpkg/status").unlink(), "dpkg"),
+    "a pip cache left in root's home": (
+        lambda r, b: _write(r / "root/.cache/pip/http-v2/0/entry", "cached wheel"), "pip cache"),
+    "a PyPI package installed into the venv": (
+        lambda r, b: (r / "opt/scoreboard/.venv/lib/python3.13/site-packages/paho_mqtt-2.1.0.dist-info").mkdir(), "PyPI"),
+    "the distribution's paho-mqtt not installed": (
+        lambda r, b: shutil.rmtree(r / "usr/lib/python3/dist-packages/paho"), "paho"),
+    # A directory named "x<newline>certs" splits find's output into two
+    # lines, the second reading as the one allowed certificate path.
+    "a foreign CA smuggled behind a newline in a directory name": (
+        lambda r, b: _write(r / "opt/scoreboard/x\ncerts/AmazonRootCA1.pem", "not the CA\n"), "newline"),
+    "a newline in a path under /etc": (
+        lambda r, b: _write(r / "etc/odd\nname", ""), "newline"),
+    "a newline in a path on the boot partition": (
+        lambda r, b: _write(b / "odd\nname", ""), "newline"),
+    "SSH enabled through a requires directory": (
+        lambda r, b: _write(r / "etc/systemd/system/multi-user.target.requires/ssh.service", ""), "SSH"),
+    "SSH enabled through an upholds directory": (
+        lambda r, b: _write(r / "etc/systemd/system/multi-user.target.upholds/sshd.socket", ""), "SSH"),
 }
 
 
