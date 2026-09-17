@@ -186,11 +186,35 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          gh release create "$VERSION" \
-            "out/scoreboard-$VERSION.img.xz" "out/scoreboard-$VERSION.img.xz.sha256" \
-            --verify-tag \
-            --title "Scoreboard image $VERSION" \
-            --notes "Verify before you flash: https://scoreboard.davidjdrake.com/download/"
+          set -euo pipefail
+          err="$(mktemp)"
+          if gh release view "$VERSION" >/dev/null 2>"$err"; then
+            # Re-running after a later step failed: the release from the
+            # previous attempt is already there. Only treat it as this
+            # run's release, rather than creating a duplicate, if its
+            # published checksum still matches what this build attested.
+            gh release download "$VERSION" --pattern "scoreboard-$VERSION.img.xz.sha256" --output existing.sha256 --clobber
+            existing_sha="$(cut -d' ' -f1 existing.sha256)"
+            rm -f existing.sha256
+            if [ "$existing_sha" != "$EXPECTED_SHA256" ]; then
+              echo "GitHub Release $VERSION already exists but its checksum ($existing_sha) does not match this build ($EXPECTED_SHA256)" >&2
+              rm -f "$err"
+              exit 1
+            fi
+            echo "GitHub Release $VERSION already exists and matches this build; continuing"
+          elif grep -qi 'release not found' "$err"; then
+            gh release create "$VERSION" \
+              "out/scoreboard-$VERSION.img.xz" "out/scoreboard-$VERSION.img.xz.sha256" \
+              --verify-tag \
+              --title "Scoreboard image $VERSION" \
+              --notes "Verify before you flash: https://scoreboard.davidjdrake.com/download/"
+          else
+            cat "$err" >&2
+            rm -f "$err"
+            echo "could not check for an existing GitHub Release" >&2
+            exit 1
+          fi
+          rm -f "$err"
 
       - name: Assume the publisher role
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
@@ -218,24 +242,34 @@ jobs:
           # The concurrency group above only stops two publish runs from
           # interleaving their writes; it does not order which version
           # wins. An older release approved after a newer one has already
-          # published must not roll latest.json backwards, so read
+          # published must not roll latest.json backwards, so look up
           # whatever is there now and compare versions numerically before
-          # ever overwriting it. A missing object means no release has
-          # published yet; any other read failure fails the job rather
-          # than publishing blind.
-          err="$(mktemp)"
+          # ever overwriting it. A plain GetObject/HeadObject can't tell a
+          # missing key from one denied by a scoped policy without
+          # s3:ListBucket (both come back as 403, not 404), so look the
+          # object up with a ListObjectsV2 scoped to this one key instead:
+          # 0 means no release has published yet, 1 means it has and gets
+          # read, anything else (or any error from either call) fails the
+          # job rather than publishing blind.
+          count="$(aws s3api list-objects-v2 --bucket "$BUCKET" --prefix latest.json --max-keys 1 \
+            --query 'length(Contents[?Key==`latest.json`] || `[]`)' --output text --region us-east-1)"
           current_version=""
-          if current_json="$(aws s3 cp "s3://$BUCKET/latest.json" - --region us-east-1 2>"$err")"; then
-            current_version="$(printf '%s' "$current_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("version",""))')"
-          elif grep -Eqi 'NoSuchKey|Not Found|404' "$err"; then
-            current_version=""
-          else
-            cat "$err" >&2
-            rm -f "$err"
-            echo "could not read the existing latest.json; refusing to publish blind" >&2
-            exit 1
-          fi
-          rm -f "$err"
+          case "$count" in
+            0)
+              ;;
+            1)
+              current_json="$(aws s3 cp "s3://$BUCKET/latest.json" - --region us-east-1)"
+              current_version="$(printf '%s' "$current_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("version",""))')"
+              if [[ ! "$current_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                echo "existing latest.json has an unreadable or malformed version; refusing to publish blind" >&2
+                exit 1
+              fi
+              ;;
+            *)
+              echo "unexpected object count for latest.json: $count" >&2
+              exit 1
+              ;;
+          esac
 
           should_write=yes
           if [ -n "$current_version" ]; then

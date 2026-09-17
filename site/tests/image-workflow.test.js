@@ -109,20 +109,29 @@ test("the gate step always releases its loop device, even on failure", () => {
   assert.match(gate, /udevadm settle/);
 });
 
-test("latest.json is compared against the current manifest before it can be overwritten", () => {
-  // Serializing publishes stops them interleaving, but not an older,
-  // late-approved release from rolling latest.json back to an earlier
-  // version. The mirror step has to read what's there and compare before
-  // it writes.
+test("latest.json is looked up by listing, not a plain read, before it can be overwritten", () => {
+  // A HeadObject/GetObject on a missing key comes back 403, not 404,
+  // without s3:ListBucket, so the lookup has to be a ListObjectsV2 scoped
+  // to exactly this key (the policy in Task 4 conditions on this exact
+  // prefix), not a read wrapped in error-text sniffing.
   const publish = job("publish");
   const mirror = publish.slice(publish.indexOf("Mirror to the image CDN"));
+  assert.match(mirror, /aws s3api list-objects-v2 --bucket "\$BUCKET" --prefix latest\.json --max-keys 1/);
+  assert.match(mirror, /--query 'length\(Contents\[\?Key==`latest\.json`\] \|\| `\[\]`\)'/);
+  const list = mirror.indexOf("list-objects-v2");
   const read = mirror.indexOf('aws s3 cp "s3://$BUCKET/latest.json" -');
-  assert.ok(read > 0, "the mirror step never reads the existing manifest");
+  assert.ok(read > list, "the object must be listed before it is read");
   const write = mirror.indexOf("aws s3 cp latest.json");
   assert.ok(write > read, "latest.json must be read before it can be overwritten");
   assert.match(mirror, /should_write/);
   assert.match(mirror, /::notice::/, "skipping an older release must still be visible in the run's log");
-  assert.match(mirror, /could not read the existing latest\.json/, "a read failure other than a missing object must fail the job");
+  assert.match(mirror, /unexpected object count for latest\.json/, "anything other than 0 or 1 objects must fail the job");
+});
+
+test("a malformed existing version fails the publish instead of being silently overwritten", () => {
+  const mirror = job("publish").slice(job("publish").indexOf("Mirror to the image CDN"));
+  assert.match(mirror, /\^v\[0-9\]\+\\\.\[0-9\]\+\\\.\[0-9\]\+\$/, "the existing version must be validated before use");
+  assert.match(mirror, /malformed version/);
 });
 
 test("the write token is scoped to the steps that need it, not the whole publish job", () => {
@@ -130,4 +139,13 @@ test("the write token is scoped to the steps that need it, not the whole publish
   const header = publish.slice(0, publish.indexOf("\n    steps:\n"));
   assert.doesNotMatch(header, /GH_TOKEN/, "GH_TOKEN must not sit in the publish job's shared env");
   assert.match(publish, /GH_TOKEN: \$\{\{ github\.token \}\}/, "GH_TOKEN must still be set on the steps that call gh");
+});
+
+test("a re-run tolerates a release that already exists, but only if its checksum still matches", () => {
+  const publish = job("publish");
+  const release = publish.slice(publish.indexOf("Create the GitHub Release"), publish.indexOf("Assume the publisher role"));
+  assert.match(release, /gh release view "\$VERSION"/);
+  assert.match(release, /gh release download "\$VERSION"/);
+  assert.match(release, /"\$existing_sha" != "\$EXPECTED_SHA256"/);
+  assert.match(release, /gh release create "\$VERSION"/, "a release that does not exist yet must still be created");
 });
