@@ -141,11 +141,19 @@ test("the write token is scoped to the steps that need it, not the whole publish
   assert.match(publish, /GH_TOKEN: \$\{\{ github\.token \}\}/, "GH_TOKEN must still be set on the steps that call gh");
 });
 
-test("a re-run tolerates a release that already exists, but only if its checksum still matches", () => {
+test("a re-run trusts an existing release only if it is published, complete and this build", () => {
   const publish = job("publish");
   const release = publish.slice(publish.indexOf("Create the GitHub Release"), publish.indexOf("Assume the publisher role"));
-  assert.match(release, /gh release view "\$VERSION"/);
+  assert.match(release, /gh release view "\$VERSION" --json isDraft,assets/, "the existing release's draft state and assets must be fetched");
+  assert.match(release, /jq -r '\.isDraft'[^\n]*= false \] \|\| refuse/, "a draft release must be refused");
+  assert.match(release, /for name in "\$file" "\$file\.sha256"; do/, "both assets must be checked");
+  assert.match(release, /\[ "\$state" = uploaded \] \|\| refuse/, "a missing or partly uploaded asset must be refused");
+  assert.match(release, /local_size="\$\(stat -c %s "out\/\$file"\)"/);
+  assert.match(release, /\[ "\$remote_size" = "\$local_size" \] \|\| refuse/, "the image asset's size must match this build");
+  assert.match(release, /\[ "\$digest" = "sha256:\$EXPECTED_SHA256" \] \|\| refuse/, "a reported digest must match this build");
   assert.match(release, /gh release download "\$VERSION"/);
   assert.match(release, /"\$existing_sha" != "\$EXPECTED_SHA256"/);
+  assert.match(release, /::error::GitHub Release \$VERSION already exists but .*Fix or delete the Release by hand/);
+  assert.doesNotMatch(release, /gh release (upload|edit|delete)/, "a bad release is never repaired automatically");
   assert.match(release, /gh release create "\$VERSION"/, "a release that does not exist yet must still be created");
 });

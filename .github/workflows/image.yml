@@ -187,34 +187,55 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          err="$(mktemp)"
-          if gh release view "$VERSION" >/dev/null 2>"$err"; then
-            # Re-running after a later step failed: the release from the
-            # previous attempt is already there. Only treat it as this
-            # run's release, rather than creating a duplicate, if its
-            # published checksum still matches what this build attested.
-            gh release download "$VERSION" --pattern "scoreboard-$VERSION.img.xz.sha256" --output existing.sha256 --clobber
-            existing_sha="$(cut -d' ' -f1 existing.sha256)"
-            rm -f existing.sha256
-            if [ "$existing_sha" != "$EXPECTED_SHA256" ]; then
-              echo "GitHub Release $VERSION already exists but its checksum ($existing_sha) does not match this build ($EXPECTED_SHA256)" >&2
-              rm -f "$err"
+          file="scoreboard-$VERSION.img.xz"
+          work="$(mktemp -d "$RUNNER_TEMP/release.XXXXXX")"
+          trap 'rm -rf "$work"' EXIT
+          # gh release view finds a draft too (it falls back from the
+          # published-only releases/tags endpoint to a draft lookup), so a
+          # half-finished Release from an earlier attempt is seen here
+          # rather than mistaken for "not found".
+          if gh release view "$VERSION" --json isDraft,assets >"$work/release.json" 2>"$work/err"; then
+            # Re-running after a later step failed: the Release from the
+            # previous attempt is already there. Accept it only if it is
+            # published, complete and this build's image; anything else is
+            # left for a person to fix or delete, never repaired here.
+            refuse() {
+              echo "::error::GitHub Release $VERSION already exists but $1. Fix or delete the Release by hand, then re-run."
               exit 1
+            }
+            [ "$(jq -r '.isDraft' "$work/release.json")" = false ] || refuse "is a draft (or its draft state is unreadable)"
+            for name in "$file" "$file.sha256"; do
+              state="$(jq -r --arg n "$name" '[.assets[] | select(.name == $n)] | if length == 1 then (.[0].state // "unknown") else "missing" end' "$work/release.json")"
+              [ "$state" = uploaded ] || refuse "asset $name is $state, not uploaded"
+            done
+            local_size="$(stat -c %s "out/$file")"
+            remote_size="$(jq -r --arg n "$file" '.assets[] | select(.name == $n) | .size' "$work/release.json")"
+            [ "$remote_size" = "$local_size" ] || refuse "asset $file is $remote_size bytes, not this build's $local_size"
+            # GitHub reports a digest for newer assets; older ones have null.
+            # Without it, size plus the published .sha256 below must do.
+            digest="$(jq -r --arg n "$file" '.assets[] | select(.name == $n) | .digest // ""' "$work/release.json")"
+            if [ -n "$digest" ]; then
+              [ "$digest" = "sha256:$EXPECTED_SHA256" ] || refuse "asset $file has digest $digest, not this build's sha256:$EXPECTED_SHA256"
+            else
+              echo "::notice::GitHub reports no digest for $file; relying on its size and published checksum"
             fi
-            echo "GitHub Release $VERSION already exists and matches this build; continuing"
-          elif grep -qi 'release not found' "$err"; then
+            gh release download "$VERSION" --pattern "$file.sha256" --output "$work/existing.sha256" --clobber
+            existing_sha="$(cut -d' ' -f1 "$work/existing.sha256")"
+            if [ "$existing_sha" != "$EXPECTED_SHA256" ]; then
+              refuse "its published checksum ($existing_sha) does not match this build ($EXPECTED_SHA256)"
+            fi
+            echo "GitHub Release $VERSION already exists, is published and complete, and matches this build; continuing"
+          elif grep -qi 'release not found' "$work/err"; then
             gh release create "$VERSION" \
-              "out/scoreboard-$VERSION.img.xz" "out/scoreboard-$VERSION.img.xz.sha256" \
+              "out/$file" "out/$file.sha256" \
               --verify-tag \
               --title "Scoreboard image $VERSION" \
               --notes "Verify before you flash: https://scoreboard.davidjdrake.com/download/"
           else
-            cat "$err" >&2
-            rm -f "$err"
-            echo "could not check for an existing GitHub Release" >&2
+            cat "$work/err" >&2
+            echo "::error::could not check for an existing GitHub Release $VERSION"
             exit 1
           fi
-          rm -f "$err"
 
       - name: Assume the publisher role
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
