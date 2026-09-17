@@ -475,8 +475,16 @@ Publishing takes two things: a `v*` tag, and approval of the `image-release` env
 
 - **The environment** requires the repository owner as reviewer, and its deployment policy allows only `v*` tags. A tag alone builds and gates an image, but nothing reaches GitHub Releases or the mirror until someone approves. The AWS role's trust names the environment, so a job outside it cannot assume the role.
 - **A repository ruleset** restricts creating, updating and deleting `v*` tags to administrators, so a Dependabot or workflow token cannot start a release.
-- **Immutable releases** are enabled for the repository (`PUT repos/DavidJDrake/hockeytrack-scoreboard/immutable-releases`, in plan Task 7). Once a Release is published, its assets and tag cannot be changed or replaced, so the source of truth cannot be edited after the fact by anyone holding a `contents: write` token. `gh release create` uploads assets to a draft and then publishes it, which immutability allows.
+- **Immutable releases** are enabled for the repository (verified 2026-09-17: `GET .../immutable-releases` returns `{"enabled":true,"enforced_by_owner":false}`). Once a Release is published, its assets and tag cannot be changed or replaced, so the source of truth cannot be edited after the fact by anyone holding a `contents: write` token. `gh release create` uploads assets to a draft and then publishes it, which immutability allows.
 - All three are GitHub settings, applied with `gh api` and recorded in the verification record.
+
+### 9.9b Deployed, 2026-09-17
+
+The scoreboard Terraform was applied from a saved plan: 26 added, 7 changed, 0 destroyed. The seven changes were the site CSP gaining the image host, the scheduler policy gaining the monitor's ARN, and five existing Lambdas re-uploaded because builds here are not reproducible (SCO-22) and two shared AWS SDK modules moved by a patch version.
+
+- **The mirror** serves `images.scoreboard.davidjdrake.com`. With nothing published, `/latest.json` and `/` both return 403 rather than a listing, and plain HTTP redirects to HTTPS. The bucket has all four public-access blocks on. The distribution's ID is a Terraform output and a repository variable, so it is not written here.
+- **The monitor** was invoked once by hand so that `scoreboard-imagecheck-not-running` had a datapoint: no error, "image mirror agrees with its release" (no release and no manifest), 290 ms of a 300 s timeout, 45 MB of 1024 MB.
+- **GitHub settings**, all read back after writing: the three repository variables; the `image-release` environment with the owner as required reviewer and exactly one deployment policy, `{"name":"v*","type":"tag"}`; the active `release tags` ruleset (id 23629753) restricting creation, update, deletion and non-fast-forward on `refs/tags/v*` to the admin role; immutable releases enabled.
 
 ### 9.10 Order of work and proof
 
@@ -507,6 +515,6 @@ What the controls above do not cover. Each is named so it is a decision, not an 
 - **Package versions float within signed archives.** pi-gen and `pi-setup.sh` install whatever version the Debian and Raspberry Pi archives serve on the day of the build. Those archives are signed, and apt verifies them. But two builds of the same tag can differ, and nothing pins or records the versions beyond the image's own `/var/lib/dpkg/status`.
 - **Tools come from the runner image.** The AWS CLI and `gh` the publish job uses are whatever GitHub's `ubuntu-24.04` runner image ships, not pinned versions.
 - **The publisher role is exempt from detection.** A stolen publisher session can overwrite older `images/<v>/` objects or place files under `images/`. Neither §9.8's rule nor §9.6's monitor, which checks only the current version, sees it (§9.8).
-- **GitHub Release assets are mutable until immutable releases are enabled** in plan Task 7 (§9.9). Before then, anyone with `contents: write` could replace an asset.
+- **GitHub Release assets were mutable until 2026-09-17,** when immutable releases were enabled (§9.9). A release published before that date could have had an asset replaced by anyone holding `contents: write`; none existed.
 - **An attestation proves origin, not contents.** It says `image.yml` built this file from this tag's commit. It says nothing about what the floating base image, the archives or pi-gen put into it. That is what the gate is for, and the gate checks for secrets and known-bad configuration, not for every possible compromise.
 - **No SBOM.** pi-gen writes one only when `syft` is installed in its container, and this build does not add it. The image's package list can be read from its `/var/lib/dpkg/status` after the fact.
