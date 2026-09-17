@@ -199,3 +199,30 @@ test("the distribution reads the bucket through origin access control over HTTPS
     assert.match(behavior, /viewer_protocol_policy\s*=\s*"redirect-to-https"/, "every cache behavior must redirect to HTTPS");
   }
 });
+
+let imagecheck = "";
+try {
+  imagecheck = readFileSync(new URL("../../terraform/imagecheck.tf", import.meta.url), "utf8");
+} catch {
+  // Reported below.
+}
+
+test("the monitor can read the mirror and alert, and nothing else", () => {
+  const policy = code(block(imagecheck, 'data "aws_iam_policy_document" "imagecheck" {'));
+  const actions = [...policy.matchAll(/"([a-z0-9]+:[A-Za-z*]+)"/g)].map((m) => m[1]).sort();
+  assert.deepEqual(actions, ["s3:GetObject", "s3:ListBucket", "sns:Publish"]);
+  assert.match(policy, /actions\s*=\s*local\.logs/);
+});
+
+test("the monitor's own failures page the security topic", () => {
+  for (const name of ["imagecheck_errors", "imagecheck_throttles"]) {
+    const alarm = code(block(imagecheck, `resource "aws_cloudwatch_metric_alarm" "${name}" {`));
+    assert.match(alarm, /alarm_actions\s*=\s*\[data\.aws_sns_topic\.security_alerts\.arn\]/);
+    assert.match(alarm, /FunctionName\s*=\s*aws_lambda_function\.imagecheck\.function_name/);
+  }
+});
+
+test("the monitor runs daily", () => {
+  const schedule = code(block(imagecheck, 'resource "aws_scheduler_schedule" "imagecheck" {'));
+  assert.match(schedule, /schedule_expression\s*=\s*"cron\(0 11 \* \* \? \*\)"/);
+});

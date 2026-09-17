@@ -149,7 +149,7 @@ site-local: site-config
 # plans (an apply plans first), with a pinned file mode, and that regenerated
 # zip is the one uploaded.
 build:
-	mkdir -p build/reducer build/today build/api build/enroll build/authgate
+	mkdir -p build/reducer build/today build/api build/enroll build/authgate build/imagecheck
 	cd cloud && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -buildvcs=false -trimpath -ldflags="-s -w" -o ../build/reducer/bootstrap ./cmd/reducer
 	cd cloud && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -buildvcs=false -trimpath -ldflags="-s -w" -o ../build/today/bootstrap ./cmd/today
 	cd build/reducer && python3 -m zipfile -c ../reducer.zip bootstrap
@@ -160,6 +160,8 @@ build:
 	cd build/enroll && python3 -m zipfile -c ../enroll.zip bootstrap
 	cd cloud && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -buildvcs=false -trimpath -ldflags="-s -w" -o ../build/authgate/bootstrap ./cmd/authgate
 	cd build/authgate && python3 -m zipfile -c ../authgate.zip bootstrap
+	cd cloud && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -buildvcs=false -trimpath -ldflags="-s -w" -o ../build/imagecheck/bootstrap ./cmd/imagecheck
+	cd build/imagecheck && python3 -m zipfile -c ../imagecheck.zip bootstrap
 
 deploy: test build
 	mkdir -p $(XDG_RUNTIME_DIR)
