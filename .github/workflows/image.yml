@@ -28,6 +28,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       publish: ${{ steps.version.outputs.publish }}
+      sha256: ${{ steps.checksum.outputs.sha256 }}
     steps:
       - name: Check out
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -37,11 +38,15 @@ jobs:
       - name: Decide the version
         id: version
         env:
+          EVENT: ${{ github.event_name }}
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
           RUN: ${{ github.run_number }}
         run: |
-          if [ "$REF_TYPE" = tag ] && [[ "$REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          # A workflow_dispatch run against a tag ref sets ref_type=tag and
+          # ref_name=<tag>, same as a real tag push, so the event is checked
+          # too. Only a push of the tag may publish.
+          if [ "$EVENT" = push ] && [ "$REF_TYPE" = tag ] && [[ "$REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "version=$REF_NAME" >>"$GITHUB_OUTPUT"
             echo "publish=true" >>"$GITHUB_OUTPUT"
           else
@@ -69,16 +74,24 @@ jobs:
           set -euo pipefail
           img="$(ls "$RUNNER_TEMP"/pi-gen/deploy/*-scoreboard.img.xz)"
           xz -dc "$img" >"$RUNNER_TEMP/scoreboard.img"
-          loop="$(sudo losetup --find --show --partscan --read-only "$RUNNER_TEMP/scoreboard.img")"
           mkdir -p "$RUNNER_TEMP/rootfs" "$RUNNER_TEMP/bootfs"
+          loop="$(sudo losetup --find --show --partscan --read-only "$RUNNER_TEMP/scoreboard.img")"
+          # Belt and suspenders: if the gate (or anything after it) fails,
+          # still unmount and detach the loop device instead of leaking it
+          # into the next step or the runner teardown.
+          cleanup() {
+            sudo umount "$RUNNER_TEMP/rootfs" "$RUNNER_TEMP/bootfs" 2>/dev/null || true
+            sudo losetup -d "$loop" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          sudo udevadm settle
           sudo mount -o ro "${loop}p2" "$RUNNER_TEMP/rootfs"
           sudo mount -o ro "${loop}p1" "$RUNNER_TEMP/bootfs"
           sudo tools/image-gate.sh "$RUNNER_TEMP/rootfs" "$RUNNER_TEMP/bootfs" "$GITHUB_WORKSPACE"
-          sudo umount "$RUNNER_TEMP/rootfs" "$RUNNER_TEMP/bootfs"
-          sudo losetup -d "$loop"
           rm "$RUNNER_TEMP/scoreboard.img"
 
       - name: Name and checksum
+        id: checksum
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
@@ -86,6 +99,7 @@ jobs:
           mv "$RUNNER_TEMP"/pi-gen/deploy/*-scoreboard.img.xz "out/scoreboard-$VERSION.img.xz"
           (cd out && sha256sum "scoreboard-$VERSION.img.xz" >"scoreboard-$VERSION.img.xz.sha256")
           cat "out/scoreboard-$VERSION.img.xz.sha256"
+          echo "sha256=$(cut -d' ' -f1 "out/scoreboard-$VERSION.img.xz.sha256")" >>"$GITHUB_OUTPUT"
 
       - name: Attest build provenance
         if: steps.version.outputs.publish == 'true'
@@ -105,15 +119,27 @@ jobs:
   publish:
     name: Publish
     needs: build
-    if: needs.build.outputs.publish == 'true'
+    # A workflow_dispatch run against a tag ref sets outputs.publish=true
+    # from the build job too; require the triggering event to have been an
+    # actual tag push, not just a build that looks like one.
+    if: needs.build.outputs.publish == 'true' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     environment: image-release
+    # Repo-wide, not per-ref: two tags approved close together must not
+    # race, or the one that finishes last wins latest.json regardless of
+    # which was meant to be newest.
+    concurrency:
+      group: image-publish
+      cancel-in-progress: false
     permissions:
       contents: write
       id-token: write
     env:
       VERSION: ${{ needs.build.outputs.version }}
+      EXPECTED_SHA256: ${{ needs.build.outputs.sha256 }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
     steps:
       - name: Fetch the gated image
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -122,12 +148,37 @@ jobs:
           path: out
 
       - name: Re-check the checksum
-        run: cd out && sha256sum -c "scoreboard-$VERSION.img.xz.sha256"
+        run: |
+          set -euo pipefail
+          cd out
+          sha256sum -c "scoreboard-$VERSION.img.xz.sha256"
+          # The .sha256 file travelled in the same artifact as the image, so
+          # matching it only proves the pair wasn't corrupted in transit.
+          # Compare against the value the build job emitted as a job output,
+          # which is independent of the artifact bundle.
+          actual="$(sha256sum "scoreboard-$VERSION.img.xz" | cut -d' ' -f1)"
+          [ "$actual" = "$EXPECTED_SHA256" ] || {
+            echo "downloaded image sha256 ($actual) does not match what the build job attested ($EXPECTED_SHA256)" >&2
+            exit 1
+          }
+
+      - name: Verify the tag has not moved
+        run: |
+          set -euo pipefail
+          obj_type="$(gh api "repos/$GH_REPO/git/ref/tags/$VERSION" --jq .object.type)"
+          obj_sha="$(gh api "repos/$GH_REPO/git/ref/tags/$VERSION" --jq .object.sha)"
+          if [ "$obj_type" = tag ]; then
+            # An annotated tag object points at the commit; dereference it.
+            resolved="$(gh api "repos/$GH_REPO/git/tags/$obj_sha" --jq .object.sha)"
+          else
+            resolved="$obj_sha"
+          fi
+          [ "$resolved" = "$GITHUB_SHA" ] || {
+            echo "tag $VERSION now points at $resolved, not the commit this run built ($GITHUB_SHA)" >&2
+            exit 1
+          }
 
       - name: Create the GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
         run: |
           gh release create "$VERSION" \
             "out/scoreboard-$VERSION.img.xz" "out/scoreboard-$VERSION.img.xz.sha256" \

@@ -408,7 +408,7 @@ The gate is tested in this repository's CI against fixture root filesystems — 
 
 `.github/workflows/image.yml`, with every action pinned by commit SHA as in `ci.yml`.
 
-- **Triggers.** A pushed tag matching `v*` builds and publishes. Manual dispatch builds, gates and uploads a workflow artifact, but never publishes, and the AWS role in §9.5 would refuse it anyway.
+- **Triggers.** A pushed tag matching `v*` builds and publishes. Manual dispatch builds, gates and uploads a workflow artifact, but never publishes: the workflow itself refuses to publish anything but a tag push, checking both the triggering event and the ref before setting `publish=true`. It is not the AWS role in §9.5 that stops a manual dispatch run against a tag ref — that role trusts the `image-release` environment rather than the triggering event, so any job running in that environment can assume it regardless of how it was started.
 - **Build job** (`ubuntu-24.04`, 300-minute timeout, `permissions: contents: read, id-token: write, attestations: write`):
   1. Free runner disk by removing preinstalled toolchains the build does not use, and fail early if less than 25 GB is free.
   2. Check out pi-gen at the pinned SHA.
