@@ -108,3 +108,26 @@ test("the gate step always releases its loop device, even on failure", () => {
   assert.match(gate, /trap cleanup EXIT/);
   assert.match(gate, /udevadm settle/);
 });
+
+test("latest.json is compared against the current manifest before it can be overwritten", () => {
+  // Serializing publishes stops them interleaving, but not an older,
+  // late-approved release from rolling latest.json back to an earlier
+  // version. The mirror step has to read what's there and compare before
+  // it writes.
+  const publish = job("publish");
+  const mirror = publish.slice(publish.indexOf("Mirror to the image CDN"));
+  const read = mirror.indexOf('aws s3 cp "s3://$BUCKET/latest.json" -');
+  assert.ok(read > 0, "the mirror step never reads the existing manifest");
+  const write = mirror.indexOf("aws s3 cp latest.json");
+  assert.ok(write > read, "latest.json must be read before it can be overwritten");
+  assert.match(mirror, /should_write/);
+  assert.match(mirror, /::notice::/, "skipping an older release must still be visible in the run's log");
+  assert.match(mirror, /could not read the existing latest\.json/, "a read failure other than a missing object must fail the job");
+});
+
+test("the write token is scoped to the steps that need it, not the whole publish job", () => {
+  const publish = job("publish");
+  const header = publish.slice(0, publish.indexOf("\n    steps:\n"));
+  assert.doesNotMatch(header, /GH_TOKEN/, "GH_TOKEN must not sit in the publish job's shared env");
+  assert.match(publish, /GH_TOKEN: \$\{\{ github\.token \}\}/, "GH_TOKEN must still be set on the steps that call gh");
+});

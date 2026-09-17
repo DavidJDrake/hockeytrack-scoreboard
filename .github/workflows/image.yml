@@ -126,9 +126,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     environment: image-release
-    # Repo-wide, not per-ref: two tags approved close together must not
-    # race, or the one that finishes last wins latest.json regardless of
-    # which was meant to be newest.
+    # Repo-wide, not per-ref, so two publish runs can never interleave
+    # their S3/CloudFront writes. This alone does not decide which
+    # version should win when releases are approved out of order — the
+    # "Mirror to the image CDN" step below handles that by comparing
+    # versions before it ever overwrites latest.json.
     concurrency:
       group: image-publish
       cancel-in-progress: false
@@ -138,8 +140,6 @@ jobs:
     env:
       VERSION: ${{ needs.build.outputs.version }}
       EXPECTED_SHA256: ${{ needs.build.outputs.sha256 }}
-      GH_TOKEN: ${{ github.token }}
-      GH_REPO: ${{ github.repository }}
     steps:
       - name: Fetch the gated image
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -163,6 +163,9 @@ jobs:
           }
 
       - name: Verify the tag has not moved
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           obj_type="$(gh api "repos/$GH_REPO/git/ref/tags/$VERSION" --jq .object.type)"
@@ -179,6 +182,9 @@ jobs:
           }
 
       - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           gh release create "$VERSION" \
             "out/scoreboard-$VERSION.img.xz" "out/scoreboard-$VERSION.img.xz.sha256" \
@@ -208,13 +214,51 @@ jobs:
             --cache-control "public, max-age=31536000, immutable"
           aws s3 cp "out/$file.sha256" "s3://$BUCKET/images/$VERSION/$file.sha256" --region us-east-1 \
             --content-type text/plain --cache-control "public, max-age=31536000, immutable"
-          python3 - "$VERSION" "$file" "$sha" "$size" "$RELEASE_URL" >latest.json <<'PY'
+
+          # The concurrency group above only stops two publish runs from
+          # interleaving their writes; it does not order which version
+          # wins. An older release approved after a newer one has already
+          # published must not roll latest.json backwards, so read
+          # whatever is there now and compare versions numerically before
+          # ever overwriting it. A missing object means no release has
+          # published yet; any other read failure fails the job rather
+          # than publishing blind.
+          err="$(mktemp)"
+          current_version=""
+          if current_json="$(aws s3 cp "s3://$BUCKET/latest.json" - --region us-east-1 2>"$err")"; then
+            current_version="$(printf '%s' "$current_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("version",""))')"
+          elif grep -Eqi 'NoSuchKey|Not Found|404' "$err"; then
+            current_version=""
+          else
+            cat "$err" >&2
+            rm -f "$err"
+            echo "could not read the existing latest.json; refusing to publish blind" >&2
+            exit 1
+          fi
+          rm -f "$err"
+
+          should_write=yes
+          if [ -n "$current_version" ]; then
+            IFS=. read -r cur_major cur_minor cur_patch <<<"${current_version#v}"
+            IFS=. read -r new_major new_minor new_patch <<<"${VERSION#v}"
+            if [ "$cur_major" -gt "$new_major" ] || \
+               { [ "$cur_major" -eq "$new_major" ] && [ "$cur_minor" -gt "$new_minor" ]; } || \
+               { [ "$cur_major" -eq "$new_major" ] && [ "$cur_minor" -eq "$new_minor" ] && [ "$cur_patch" -gt "$new_patch" ]; }; then
+              should_write=no
+            fi
+          fi
+
+          if [ "$should_write" = yes ]; then
+            python3 - "$VERSION" "$file" "$sha" "$size" "$RELEASE_URL" >latest.json <<'PY'
           import datetime, json, sys
           version, file, sha, size, release = sys.argv[1:]
           released = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
           print(json.dumps({"version": version, "file": file, "sha256": sha, "size": int(size),
                             "released": released, "release": release}, indent=2))
           PY
-          aws s3 cp latest.json "s3://$BUCKET/latest.json" --region us-east-1 \
-            --content-type application/json --cache-control "public, max-age=60"
-          aws cloudfront create-invalidation --distribution-id "$DISTRIBUTION" --paths /latest.json
+            aws s3 cp latest.json "s3://$BUCKET/latest.json" --region us-east-1 \
+              --content-type application/json --cache-control "public, max-age=60"
+            aws cloudfront create-invalidation --distribution-id "$DISTRIBUTION" --paths /latest.json
+          else
+            echo "::notice::latest.json already points at $current_version, newer than $VERSION; leaving it in place ($file and the GitHub Release still published)"
+          fi

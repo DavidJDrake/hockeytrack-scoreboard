@@ -416,11 +416,12 @@ The gate is tested in this repository's CI against fixture root filesystems — 
   4. Loop-mount the image and run `tools/image-gate.sh`.
   5. Write `scoreboard-<version>.img.xz.sha256`.
   6. Create a build provenance attestation for the `.img.xz` with `actions/attest-build-provenance`.
-- **Publish job** (tags only, runs in the `image-release` environment, `permissions: contents: write, id-token: write`). It waits for the reviewer's approval before any step runs:
-  1. Create the GitHub Release with the image and its checksum; GitHub Releases is the source of truth.
-  2. Assume the publisher role over OIDC and upload both files to `images/<version>/`.
-  3. Write `latest.json`: `version`, `file`, `sha256`, `size`, `released`, and the release URL.
-  4. Invalidate `latest.json` only.
+- **Publish job** (a pushed tag only — the triggering event is checked, not just the ref — runs in the `image-release` environment, `permissions: contents: write, id-token: write`, one run at a time across the whole repository via a single `image-publish` concurrency group). It waits for the reviewer's approval before any step runs:
+  1. Re-check the downloaded image's checksum, both against the `.sha256` file in the same artifact and against the sha256 the build job recorded independently as a job output, so a bundle where both files were swapped together is still caught.
+  2. Re-resolve the `v*` tag (dereferencing an annotated tag object to the commit it points at) and require it still names the commit this run built, in case the tag moved during the approval wait.
+  3. Create the GitHub Release with the image and its checksum; GitHub Releases is the source of truth.
+  4. Assume the publisher role over OIDC and upload both files to `images/<version>/`.
+  5. Read the manifest currently at `latest.json` (a missing object means none has published yet) and compare its version numerically against this run's. `latest.json` is written and `images/`'s invalidation triggered only when this run's version is the same as or newer than what's there; an older, late-approved release still publishes its Release and `images/<version>/` objects, but never moves `latest.json` backwards. Any read failure other than "no object yet" fails the job rather than publishing blind.
 
 ### 9.5 Hosting the mirror
 
