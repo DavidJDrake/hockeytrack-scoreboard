@@ -1,0 +1,7 @@
+python3-pygame
+python3-gpiozero
+python3-venv
+network-manager
+polkitd
+python3-cryptography
+ca-certificates

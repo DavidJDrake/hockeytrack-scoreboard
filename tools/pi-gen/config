@@ -1,0 +1,19 @@
+# pi-gen configuration for the scoreboard image. Built from pi-gen's arm64
+# branch at the commit in PIGEN_REF.
+#
+# Deliberately absent, so pi-gen's own defaults keep the image credential-free
+# (docs/superpowers/specs/2026-09-12-device-image-design.md, 6.1 and 9.2): the
+# first-user password setting (unset: the first user is locked), the
+# first-boot user-rename disable flag (unset: the user is renamed at first
+# boot), and the SSH-enable setting (unset: SSH is off). Setting any of them
+# is a security decision, and device/tests/test_pi_gen_recipe.py fails the
+# build until the spec says otherwise.
+IMG_NAME=scoreboard
+RELEASE=trixie
+DEPLOY_COMPRESSION=xz
+TARGET_HOSTNAME=scoreboard
+LOCALE_DEFAULT=en_US.UTF-8
+KEYBOARD_KEYMAP=us
+KEYBOARD_LAYOUT="English (US)"
+TIMEZONE_DEFAULT=America/New_York
+STAGE_LIST="stage0 stage1 stage2 stage-scoreboard"
