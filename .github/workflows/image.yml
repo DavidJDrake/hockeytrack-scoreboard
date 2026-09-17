@@ -1,0 +1,169 @@
+name: Image
+
+# Builds the scoreboard SD card image. A tag builds, gates and attests it,
+# then waits for approval of the image-release environment before anything is
+# published. A manual run builds and gates only. See
+# docs/superpowers/specs/2026-09-12-device-image-design.md, section 9.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build, gate and attest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      publish: ${{ steps.version.outputs.publish }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Decide the version
+        id: version
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          RUN: ${{ github.run_number }}
+        run: |
+          if [ "$REF_TYPE" = tag ] && [[ "$REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "version=$REF_NAME" >>"$GITHUB_OUTPUT"
+            echo "publish=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "version=v0.0.0-dev.$RUN" >>"$GITHUB_OUTPUT"
+            echo "publish=false" >>"$GITHUB_OUTPUT"
+          fi
+
+      # pi-gen needs about 20 GB; the runner image ships toolchains this build
+      # never uses. Fail here rather than two hours into the build.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune --all --force
+          free_gb="$(df --output=avail -BG / | tail -n 1 | tr -dc 0-9)"
+          echo "free: ${free_gb} GB"
+          [ "$free_gb" -ge 25 ] || { echo "need 25 GB free, have ${free_gb} GB" >&2; exit 1; }
+
+      - name: Build the image
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: tools/pi-gen/build.sh "$VERSION" "$RUNNER_TEMP/pi-gen"
+
+      - name: Gate the image
+        run: |
+          set -euo pipefail
+          img="$(ls "$RUNNER_TEMP"/pi-gen/deploy/*-scoreboard.img.xz)"
+          xz -dc "$img" >"$RUNNER_TEMP/scoreboard.img"
+          loop="$(sudo losetup --find --show --partscan --read-only "$RUNNER_TEMP/scoreboard.img")"
+          mkdir -p "$RUNNER_TEMP/rootfs" "$RUNNER_TEMP/bootfs"
+          sudo mount -o ro "${loop}p2" "$RUNNER_TEMP/rootfs"
+          sudo mount -o ro "${loop}p1" "$RUNNER_TEMP/bootfs"
+          sudo tools/image-gate.sh "$RUNNER_TEMP/rootfs" "$RUNNER_TEMP/bootfs" "$GITHUB_WORKSPACE"
+          sudo umount "$RUNNER_TEMP/rootfs" "$RUNNER_TEMP/bootfs"
+          sudo losetup -d "$loop"
+          rm "$RUNNER_TEMP/scoreboard.img"
+
+      - name: Name and checksum
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          mkdir -p out
+          mv "$RUNNER_TEMP"/pi-gen/deploy/*-scoreboard.img.xz "out/scoreboard-$VERSION.img.xz"
+          (cd out && sha256sum "scoreboard-$VERSION.img.xz" >"scoreboard-$VERSION.img.xz.sha256")
+          cat "out/scoreboard-$VERSION.img.xz.sha256"
+
+      - name: Attest build provenance
+        if: steps.version.outputs.publish == 'true'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: out/scoreboard-${{ steps.version.outputs.version }}.img.xz
+
+      - name: Keep the image for the publish job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: image
+          path: out/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  publish:
+    name: Publish
+    needs: build
+    if: needs.build.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    environment: image-release
+    permissions:
+      contents: write
+      id-token: write
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - name: Fetch the gated image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: image
+          path: out
+
+      - name: Re-check the checksum
+        run: cd out && sha256sum -c "scoreboard-$VERSION.img.xz.sha256"
+
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release create "$VERSION" \
+            "out/scoreboard-$VERSION.img.xz" "out/scoreboard-$VERSION.img.xz.sha256" \
+            --verify-tag \
+            --title "Scoreboard image $VERSION" \
+            --notes "Verify before you flash: https://scoreboard.davidjdrake.com/download/"
+
+      - name: Assume the publisher role
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.IMAGE_PUBLISHER_ROLE_ARN }}
+          role-session-name: image-publish-${{ github.run_id }}
+          aws-region: us-east-1
+
+      - name: Mirror to the image CDN
+        env:
+          BUCKET: ${{ vars.IMAGES_BUCKET }}
+          DISTRIBUTION: ${{ vars.IMAGES_DISTRIBUTION_ID }}
+          RELEASE_URL: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          file="scoreboard-$VERSION.img.xz"
+          sha="$(cut -d' ' -f1 "out/$file.sha256")"
+          size="$(stat -c %s "out/$file")"
+          aws s3 cp "out/$file" "s3://$BUCKET/images/$VERSION/$file" --region us-east-1 \
+            --checksum-algorithm SHA256 --content-type application/x-xz \
+            --cache-control "public, max-age=31536000, immutable"
+          aws s3 cp "out/$file.sha256" "s3://$BUCKET/images/$VERSION/$file.sha256" --region us-east-1 \
+            --content-type text/plain --cache-control "public, max-age=31536000, immutable"
+          python3 - "$VERSION" "$file" "$sha" "$size" "$RELEASE_URL" >latest.json <<'PY'
+          import datetime, json, sys
+          version, file, sha, size, release = sys.argv[1:]
+          released = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+          print(json.dumps({"version": version, "file": file, "sha256": sha, "size": int(size),
+                            "released": released, "release": release}, indent=2))
+          PY
+          aws s3 cp latest.json "s3://$BUCKET/latest.json" --region us-east-1 \
+            --content-type application/json --cache-control "public, max-age=60"
+          aws cloudfront create-invalidation --distribution-id "$DISTRIBUTION" --paths /latest.json
