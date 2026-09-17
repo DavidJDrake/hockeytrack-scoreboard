@@ -50,8 +50,11 @@ test("the publisher role trusts only the approved release environment", () => {
   const trust = code(block(images, 'data "aws_iam_policy_document" "image_publisher_trust" {'));
   assert.match(trust, /"sts:AssumeRoleWithWebIdentity"/);
   assert.match(trust, /test\s*=\s*"StringEquals"\s*\n\s*variable\s*=\s*"token\.actions\.githubusercontent\.com:sub"\s*\n\s*values\s*=\s*\["repo:DavidJDrake\/hockeytrack-scoreboard:environment:image-release"\]/);
-  assert.match(trust, /variable\s*=\s*"token\.actions\.githubusercontent\.com:aud"\s*\n\s*values\s*=\s*\["sts\.amazonaws\.com"\]/);
+  assert.match(trust, /test\s*=\s*"StringEquals"\s*\n\s*variable\s*=\s*"token\.actions\.githubusercontent\.com:aud"\s*\n\s*values\s*=\s*\["sts\.amazonaws\.com"\]/);
   assert.doesNotMatch(trust, /StringLike|refs\/heads|refs\/tags/, "the trust must name the environment exactly, not a ref pattern");
+
+  const trustStatements = braceBodies(trust, "statement {");
+  assert.equal(trustStatements.length, 1, "the trust document must have exactly one statement");
 });
 
 test("the provider is looked up, not created here", () => {
@@ -82,8 +85,17 @@ test("the publisher can upload, invalidate, and read only the manifest, and noth
   const uploadStatement = statements.find((s) => /"s3:PutObject"/.test(s));
   assert.ok(uploadStatement, "no statement grants s3:PutObject");
   assert.match(uploadStatement, /"s3:AbortMultipartUpload"/);
-  assert.match(uploadStatement, /\$\{aws_s3_bucket\.images\.arn\}\/images\/\*/);
-  assert.match(uploadStatement, /\$\{aws_s3_bucket\.images\.arn\}\/latest\.json/);
+  // A resources list checked only with doesNotMatch(/"\*"/) and two presence
+  // checks would still pass a third entry granting the whole bucket (a bare
+  // "${arn}/*" is not literally "*"), so pin the list exactly, the same way
+  // GetObject's resources are pinned below.
+  const uploadResources = [...uploadStatement.matchAll(/resources\s*=\s*\[([^\]]*)\]/g)].map((m) => m[1].trim());
+  assert.equal(uploadResources.length, 1, "the Upload statement must have exactly one resources assignment");
+  assert.equal(
+    uploadResources[0],
+    '"${aws_s3_bucket.images.arn}/images/*", "${aws_s3_bucket.images.arn}/latest.json"',
+    "the Upload statement's resources must be exactly images/* and latest.json, nothing wider",
+  );
 
   const getStatement = statements.find((s) => /"s3:GetObject"/.test(s));
   assert.ok(getStatement, "no statement grants s3:GetObject");
@@ -112,20 +124,78 @@ test("the bucket is private, versioned and TLS-only", () => {
     assert.match(bpa, new RegExp(`${key}\\s*=\\s*true`), key);
   }
   assert.match(code(block(images, 'resource "aws_s3_bucket_versioning" "images" {')), /status\s*=\s*"Enabled"/);
+
   const policy = code(block(images, 'data "aws_iam_policy_document" "images_bucket" {'));
-  assert.match(policy, /aws:SecureTransport/);
-  assert.match(policy, /AWS:SourceArn/);
+  const bucketStatements = braceBodies(policy, "statement {");
+  assert.equal(bucketStatements.length, 2, "the bucket policy must have exactly the CloudFront-read Allow and the TLS-only Deny, nothing else");
+
+  const allowStatement = bucketStatements.find((s) => !/effect\s*=\s*"Deny"/.test(s));
+  assert.ok(allowStatement, "no Allow statement found");
+  const allowActions = [...allowStatement.matchAll(/actions\s*=\s*\[([^\]]*)\]/g)].map((m) => m[1].trim());
+  assert.equal(allowActions.length, 1);
+  assert.equal(allowActions[0], '"s3:GetObject"', "the Allow statement must grant only s3:GetObject");
+  const allowPrincipals = braceBodies(allowStatement, "principals {");
+  assert.equal(allowPrincipals.length, 1);
+  assert.match(allowPrincipals[0], /type\s*=\s*"Service"/);
+  assert.match(allowPrincipals[0], /identifiers\s*=\s*\["cloudfront\.amazonaws\.com"\]/);
+  const allowConditions = braceBodies(allowStatement, "condition {");
+  assert.equal(allowConditions.length, 1);
+  assert.match(allowConditions[0], /test\s*=\s*"StringEquals"/);
+  assert.match(allowConditions[0], /variable\s*=\s*"AWS:SourceArn"/);
+  assert.match(allowConditions[0], /values\s*=\s*\[\s*aws_cloudfront_distribution\.images\.arn\s*\]/);
+
+  const denyStatement = bucketStatements.find((s) => /effect\s*=\s*"Deny"/.test(s));
+  assert.ok(denyStatement, "no Deny statement found");
+  const denyConditions = braceBodies(denyStatement, "condition {");
+  assert.equal(denyConditions.length, 1);
+  assert.match(denyConditions[0], /test\s*=\s*"Bool"/);
+  assert.match(denyConditions[0], /variable\s*=\s*"aws:SecureTransport"/);
+  assert.match(denyConditions[0], /values\s*=\s*\["false"\]/);
 });
 
 test("only the site may read the manifest cross-origin", () => {
-  const cors = code(block(images, 'resource "aws_cloudfront_response_headers_policy" "images" {'));
+  const headersPolicy = code(block(images, 'resource "aws_cloudfront_response_headers_policy" "images" {'));
+
+  const corsConfigs = braceBodies(headersPolicy, "cors_config {");
+  assert.equal(corsConfigs.length, 1);
+  const cors = corsConfigs[0];
   assert.match(cors, /access_control_allow_origins\s*\{\s*items\s*=\s*\["https:\/\/\$\{var\.site_domain\}"\]/);
   assert.doesNotMatch(cors, /items\s*=\s*\["\*"\]/);
+
+  const methodsBlocks = braceBodies(cors, "access_control_allow_methods {");
+  assert.equal(methodsBlocks.length, 1);
+  const methods = [...methodsBlocks[0].matchAll(/"([A-Z]+)"/g)].map((m) => m[1]).sort();
+  assert.deepEqual(methods, ["GET", "HEAD"], "only GET and HEAD may be allowed cross-origin");
+
+  const securityConfigs = braceBodies(headersPolicy, "security_headers_config {");
+  assert.equal(securityConfigs.length, 1);
+  const security = securityConfigs[0];
+  assert.match(security, /strict_transport_security\s*\{/, "HSTS must be present");
+  assert.match(security, /content_type_options\s*\{/, "X-Content-Type-Options must be present");
+  assert.match(
+    security,
+    /referrer_policy\s*\{\s*\n\s*referrer_policy\s*=\s*"strict-origin-when-cross-origin"\s*\n\s*override\s*=\s*true/,
+    "referrer_policy must match site.tf's value",
+  );
+  assert.match(
+    security,
+    /frame_options\s*\{\s*\n\s*frame_option\s*=\s*"DENY"\s*\n\s*override\s*=\s*true/,
+    "frame_options must match site.tf's value",
+  );
 });
 
 test("the distribution reads the bucket through origin access control over HTTPS", () => {
   const dist = code(block(images, 'resource "aws_cloudfront_distribution" "images" {'));
   assert.match(dist, /origin_access_control_id\s*=\s*aws_cloudfront_origin_access_control\.images\.id/);
-  assert.match(dist, /viewer_protocol_policy\s*=\s*"redirect-to-https"/);
   assert.match(dist, /path_pattern\s*=\s*"\/latest\.json"/);
+  assert.match(dist, /minimum_protocol_version\s*=\s*"TLSv1\.2_2021"/);
+
+  const behaviors = [
+    ...braceBodies(dist, "default_cache_behavior {"),
+    ...braceBodies(dist, "ordered_cache_behavior {"),
+  ];
+  assert.ok(behaviors.length >= 2, `expected at least a default and one ordered cache behavior, found ${behaviors.length}`);
+  for (const behavior of behaviors) {
+    assert.match(behavior, /viewer_protocol_policy\s*=\s*"redirect-to-https"/, "every cache behavior must redirect to HTTPS");
+  }
 });
