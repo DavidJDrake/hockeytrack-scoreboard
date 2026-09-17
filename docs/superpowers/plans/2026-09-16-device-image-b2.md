@@ -2881,6 +2881,8 @@ Only the user can do this: it needs the Pi, a panel, an SD card and the user's W
 
 The user downloads from the page, runs all three verify commands, and flashes with Raspberry Pi Imager's **Use custom**, with no OS customization. The Imager's settings would write credentials the gate forbids, and the image has no cloud-init to read them. The user then follows the home page's setup steps, with a real setup file.
 
+H4's pass criterion was revised for the no-cloud-init image (see its note in `docs/hardware-checks.md`): declining customization is the pass, and a customization setting that takes effect is a finding.
+
 During H4 and H5, watch for pi-gen's first-boot user-rename wizard. `DISABLE_FIRST_BOOT_USER_RENAME` is deliberately unset, so `userconf-pi` runs its rename prompt on tty1 at first boot. It may compete with `scoreboard.service`, which also takes tty1 to become kmsdrm's DRM master. If the panel stays black or shows the wizard, record exactly what appears and which of the two holds the console: `journalctl -b -u scoreboard`, plus the rename service's own journal. Find its unit with `systemctl list-units --all 'userconf*'`; the unit name was not checked against `userconf-pi`'s package. That is a B1 finding, not something to work around by hand.
 
 - [ ] **Step 2: Run the checks in order**
