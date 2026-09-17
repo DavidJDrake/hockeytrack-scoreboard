@@ -18,6 +18,13 @@ const job = (name) => {
   return next < 0 ? wf.slice(start) : wf.slice(start, start + 1 + next);
 };
 
+const step = (jobText, name) => {
+  const start = jobText.indexOf(`- name: ${name}\n`);
+  assert.ok(start >= 0, `step ${name} not found`);
+  const next = jobText.indexOf("\n      - name: ", start + 1);
+  return next < 0 ? jobText.slice(start) : jobText.slice(start, next);
+};
+
 test("the workflow runs only on version tags and by hand", () => {
   const on = wf.slice(wf.indexOf("\non:"), wf.indexOf("\npermissions:"));
   assert.match(on, /tags: \["v\*"\]/);
@@ -35,18 +42,42 @@ test("every action is pinned to a full commit", () => {
   for (const u of uses) assert.match(u, /@[0-9a-f]{40}$/, `unpinned: ${u}`);
 });
 
-test("the image is gated before it is uploaded or attested", () => {
+test("the image is gated before it is uploaded, and only the uploaded, gated image is attested", () => {
   const build = job("build");
   const gate = build.indexOf("tools/image-gate.sh");
   assert.ok(gate > 0, "the build job never runs the gate");
-  for (const later of ["actions/upload-artifact", "actions/attest-build-provenance"]) {
-    assert.ok(build.indexOf(later) > gate, `${later} must come after the gate`);
-  }
+  assert.ok(build.indexOf("actions/upload-artifact") > gate, "actions/upload-artifact must come after the gate");
+  assert.doesNotMatch(build, /actions\/attest-build-provenance/, "attestation belongs to the attest job");
 });
 
-test("publishing waits for a tagged, approved release", () => {
+test("the privileged build job holds no token that can sign or attest", () => {
+  // pi-gen runs a --privileged container for two hours, executing apt
+  // maintainer scripts and a floating base image. A privileged container can
+  // read the runner's ACTIONS_ID_TOKEN_REQUEST_* variables, so the job that
+  // runs it must not have id-token or attestations permission at all.
+  const build = job("build");
+  assert.match(build, /\n    permissions:\n      contents: read\n    outputs:\n/);
+  const code = build.split("\n").filter((l) => !l.trim().startsWith("#")).join("\n");
+  assert.doesNotMatch(code, /id-token|attestations/);
+});
+
+test("a separate, unprivileged job attests the image only after re-checking its checksum", () => {
+  const attest = job("attest");
+  assert.match(attest, /\n    needs: build\n/);
+  assert.match(attest, /\n    if: needs\.build\.outputs\.publish == 'true' && github\.event_name == 'push'\n/);
+  assert.match(attest, /\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    [a-z]/);
+  assert.doesNotMatch(attest, /actions\/checkout|--privileged|docker /, "the attest job runs no build code");
+  assert.match(attest, /EXPECTED_SHA256: \$\{\{ needs\.build\.outputs\.sha256 \}\}/);
+  const fetch = attest.indexOf("actions/download-artifact");
+  const compare = attest.search(/\[ "\$actual" = "\$EXPECTED_SHA256" \] \|\|/);
+  const sign = attest.indexOf("actions/attest-build-provenance");
+  assert.ok(fetch > 0 && compare > fetch && sign > compare, "download, then compare the sha256, then attest");
+  assert.match(attest, /sha256sum "out\/scoreboard-\$VERSION\.img\.xz"/);
+});
+
+test("publishing waits for a tagged, attested, approved release", () => {
   const publish = job("publish");
-  assert.match(publish, /needs: build/);
+  assert.match(publish, /\n    needs: \[build, attest\]\n/);
   assert.match(publish, /if: needs\.build\.outputs\.publish == 'true'/);
   assert.match(publish, /environment: image-release/);
   assert.match(publish, /permissions:\n      contents: write\n      id-token: write\n/);
@@ -156,4 +187,44 @@ test("a re-run trusts an existing release only if it is published, complete and 
   assert.match(release, /::error::GitHub Release \$VERSION already exists but .*Fix or delete the Release by hand/);
   assert.doesNotMatch(release, /gh release (upload|edit|delete)/, "a bad release is never repaired automatically");
   assert.match(release, /gh release create "\$VERSION"/, "a release that does not exist yet must still be created");
+});
+
+test("the gate step cannot be softened into a warning", () => {
+  const build = job("build");
+  assert.doesNotMatch(build, /continue-on-error/);
+  const gate = step(build, "Gate the image");
+  assert.match(gate, /\n\s+set -euo pipefail\n/);
+  assert.doesNotMatch(gate, /set \+e/);
+  const calls = gate.split("\n").filter((l) => l.includes("image-gate.sh"));
+  assert.deepEqual(calls.map((l) => l.trim()),
+    ['sudo tools/image-gate.sh "$RUNNER_TEMP/rootfs" "$RUNNER_TEMP/bootfs" "$GITHUB_WORKSPACE"'],
+    "the gate is called exactly once, on its own line, with nothing that swallows its exit status");
+  assert.doesNotMatch(gate, /image-gate\.sh[^\n]*\|\|/);
+  assert.doesNotMatch(gate, /\|\|\s*(true|:)\s*\n[^\n]*image-gate/);
+});
+
+test("the rootfs is mounted without replaying its journal, the boot partition read-only", () => {
+  const gate = step(job("build"), "Gate the image");
+  assert.match(gate, /sudo mount -o ro,noload "\$\{loop\}p2" "\$RUNNER_TEMP\/rootfs"/);
+  assert.match(gate, /sudo mount -o ro "\$\{loop\}p1" "\$RUNNER_TEMP\/bootfs"/);
+});
+
+test("the gated image outlives the longest approval wait", () => {
+  // An environment approval can wait up to 30 days; the artifact must too.
+  assert.match(step(job("build"), "Keep the image for the publish job"), /retention-days: 30\n/);
+});
+
+test("an older release approved late is not marked GitHub's Latest", () => {
+  // gh release create marks a new release Latest by default, so a v0.1.0
+  // approved after v0.2.0 would become Latest and the monitor would page
+  // every twelve hours.
+  const release = step(job("publish"), "Create the GitHub Release");
+  const read = release.indexOf('gh api "repos/$GH_REPO/releases/latest" --jq .tag_name');
+  const create = release.indexOf('gh release create "$VERSION"');
+  assert.ok(read > 0 && create > read, "GitHub's latest release must be read before creating this one");
+  assert.match(release, /grep -q 'HTTP 404'/, "only a 404 means there is no latest release yet");
+  assert.match(release, /could not read GitHub's latest release/, "any other error fails the job");
+  assert.match(release, /\[\[ ! "\$current_latest" =~ \^v\[0-9\]\+\\\.\[0-9\]\+\\\.\[0-9\]\+\$ \]\]/, "the latest tag is validated before it is compared");
+  assert.match(release, /make_latest=false/);
+  assert.match(release, /--latest="\$make_latest"/);
 });
