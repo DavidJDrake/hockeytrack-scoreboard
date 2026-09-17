@@ -25,12 +25,27 @@ export function formatSize(bytes) {
   return `${Math.round(bytes / (1024 * 1024))} MB`;
 }
 
+// Every command below is built only from validManifest's fields: a version
+// matching VERSION, a file name derived from it, and a 64-hex checksum.
+
+// Against the mirror's own latest.json: proves the download is intact, not
+// where it came from, since the checksum and the image share a host.
 export function verifyChecksumCommand(m) {
   return `echo "${m.sha256}  ${m.file}" | sha256sum -c -`;
 }
 
+// Against the checksum published with the GitHub Release, fetched from GitHub.
+export function verifyReleaseChecksumCommand(m) {
+  return `gh release download ${m.version} --repo ${REPO} --pattern '${m.file}.sha256'`
+    + ` && sha256sum -c ${m.file}.sha256`;
+}
+
+// Origin: signed by this repository's release workflow, for this version's tag.
+// --repo alone would accept an attestation from any workflow or ref in it.
 export function verifyAttestationCommand(m) {
-  return `gh attestation verify ${m.file} --repo ${REPO}`;
+  return `gh attestation verify ${m.file} --repo ${REPO}`
+    + ` --signer-workflow ${REPO}/.github/workflows/image.yml`
+    + ` --source-ref refs/tags/${m.version}`;
 }
 
 export async function loadManifest(fetchImpl = fetch) {
@@ -49,6 +64,7 @@ export function render(doc, m) {
   link.href = imageUrl(m);
   link.textContent = `Download ${m.file}`;
   doc.getElementById("verify-sha").textContent = verifyChecksumCommand(m);
+  doc.getElementById("verify-release-sha").textContent = verifyReleaseChecksumCommand(m);
   doc.getElementById("verify-attest").textContent = verifyAttestationCommand(m);
   doc.getElementById("image-details").hidden = false;
   doc.getElementById("image-download").hidden = false;

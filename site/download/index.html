@@ -36,18 +36,21 @@
   <section class="card" aria-labelledby="verify-heading">
     <h2 id="verify-heading">Verify it before you flash it</h2>
     <ol>
-      <li>Check the file you downloaded matches the published checksum:
+      <li>Check the download is intact. This checksum comes from the same mirror as the image, so it only proves the download is intact, not where it came from:
         <pre><code id="verify-sha"></code></pre></li>
-      <li>Check it was built from this project's source by its release workflow (needs the <a href="https://cli.github.com/">GitHub CLI</a>):
+      <li>Check it against the checksum published with the GitHub Release, fetched from GitHub rather than this mirror (needs the <a href="https://cli.github.com/">GitHub CLI</a>):
+        <pre><code id="verify-release-sha"></code></pre></li>
+      <li>Check it was built from this project's source by its release workflow, for this version's tag. This is the check that proves where the image came from:
         <pre><code id="verify-attest"></code></pre></li>
     </ol>
-    <p>If either check fails, do not flash the image.</p>
+    <p>If any check fails, do not flash the image.</p>
   </section>
 
   <section class="card" aria-labelledby="flash-heading">
     <h2 id="flash-heading">Flash it</h2>
     <ol>
       <li>Open Raspberry Pi Imager, choose your board, then <strong>Use custom</strong> and pick the downloaded file.</li>
+      <li>When Imager asks whether to apply OS customization settings, choose <strong>No</strong>. The panel sets itself up, and the image ignores those settings.</li>
       <li>Write it to the SD card, then follow <a href="/#add">Set up a new panel</a>.</li>
     </ol>
   </section>
