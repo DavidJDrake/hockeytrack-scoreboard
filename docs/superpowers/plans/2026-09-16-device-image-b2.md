@@ -2526,7 +2526,7 @@ Expected:
 - the invoke's response has no `FunctionError`;
 - the log has `image mirror agrees with its release` and no ERROR line.
 
-With no GitHub release and no `latest.json` (a 404 from GitHub's `releases/latest` and a NoSuchKey from S3), `Check` returns no problems and no error. So that line is how this state appears; the code has no separate "no release yet" message. An AccessDenied on `latest.json` or a GitHub error would instead come back as a `FunctionError` with an ERROR log line: stop and report. Then confirm the not-running alarm returns to OK within a few minutes:
+With no GitHub release and no `latest.json` (a 404 from GitHub's `releases/latest` and a NoSuchKey from S3), `Check` returns no problems and no error. So that line is how this state appears; the code has no separate "no release yet" message. An AccessDenied on `latest.json` or a GitHub error would instead come back as a `FunctionError` with an ERROR log line: stop and report. Then confirm the not-running alarm returns to OK. It is a 24-hour-period alarm, so the flip can lag the invoke by more than a few minutes; re-check later before treating a slow flip as a failure:
 
 ```bash
 aws cloudwatch describe-alarms --alarm-names scoreboard-imagecheck-not-running --region us-east-1 --query 'MetricAlarms[0].StateValue'
