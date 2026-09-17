@@ -215,7 +215,7 @@ test("the monitor can read the mirror and alert, and nothing else", () => {
 });
 
 test("the monitor's own failures page the security topic", () => {
-  for (const name of ["imagecheck_errors", "imagecheck_throttles"]) {
+  for (const name of ["imagecheck_errors", "imagecheck_throttles", "imagecheck_not_running"]) {
     const alarm = code(block(imagecheck, `resource "aws_cloudwatch_metric_alarm" "${name}" {`));
     assert.match(alarm, /alarm_actions\s*=\s*\[data\.aws_sns_topic\.security_alerts\.arn\]/);
     assert.match(alarm, /FunctionName\s*=\s*aws_lambda_function\.imagecheck\.function_name/);
@@ -225,4 +225,19 @@ test("the monitor's own failures page the security topic", () => {
 test("the monitor runs daily", () => {
   const schedule = code(block(imagecheck, 'resource "aws_scheduler_schedule" "imagecheck" {'));
   assert.match(schedule, /schedule_expression\s*=\s*"cron\(0 11 \* \* \? \*\)"/);
+});
+
+// Unlike the errors/throttles alarms (which only fire when the function
+// runs and fails), this one has to catch the function never running at
+// all, which means it needs the metric's longest period and a breaching
+// read on missing data -- both easy to get backwards, so pin them exactly.
+test("the monitor pages if it stops running entirely, not just if it fails", () => {
+  const alarm = code(block(imagecheck, 'resource "aws_cloudwatch_metric_alarm" "imagecheck_not_running" {'));
+  assert.match(alarm, /alarm_name\s*=\s*"scoreboard-imagecheck-not-running"/);
+  assert.match(alarm, /metric_name\s*=\s*"Invocations"/);
+  assert.match(alarm, /comparison_operator\s*=\s*"LessThanThreshold"/);
+  assert.match(alarm, /threshold\s*=\s*1/);
+  assert.match(alarm, /period\s*=\s*86400/);
+  assert.match(alarm, /statistic\s*=\s*"Sum"/);
+  assert.match(alarm, /treat_missing_data\s*=\s*"breaching"/);
 });

@@ -54,8 +54,17 @@ resource "aws_lambda_function" "imagecheck" {
   handler          = "bootstrap"
   filename         = data.archive_file.imagecheck.output_path
   source_code_hash = data.archive_file.imagecheck.output_base64sha256
-  timeout          = 300
-  memory_size      = 256
+  # Lambda's CPU and network throughput scale with memory, not just RAM
+  # headroom. The function streams the whole mirrored image through SHA-256
+  # in one pass (io.Copy straight into the hasher), so both the S3 download
+  # and the hashing need real CPU: at 256 MB (roughly an eighth of a vCPU)
+  # a multi-hundred-MB to low-GB .img.xz could plausibly miss the 300s
+  # timeout on a slow day. 1024 MB (roughly half a vCPU) gives both steps
+  # enough throughput to comfortably clear a several-GB image well inside
+  # 300s, so the timeout itself is left unchanged rather than papering over
+  # a throughput problem with more wall-clock time.
+  timeout     = 300
+  memory_size = 1024
   environment {
     variables = {
       IMAGES_BUCKET = aws_s3_bucket.images.bucket
@@ -100,6 +109,41 @@ resource "aws_cloudwatch_metric_alarm" "imagecheck_errors" {
   EOT
   alarm_actions      = [data.aws_sns_topic.security_alerts.arn]
   treat_missing_data = "notBreaching"
+}
+
+# The errors and throttles alarms above only fire when the function runs and
+# something goes wrong; they say nothing if the schedule itself stops
+# invoking it at all (a deleted or disabled schedule, a scheduler role that
+# can no longer assume or invoke, or the function itself being deleted or
+# renamed). 86400s is CloudWatch's maximum alarm period, matching the
+# function's own daily cadence; treat_missing_data is deliberately
+# "breaching" here (unlike the two alarms above) because Invocations
+# publishes no data point at all when the function never runs -- a true
+# "went quiet", not a reported zero -- and a monitor that can go silently
+# quiet is worse than one that pages on deploy day.
+resource "aws_cloudwatch_metric_alarm" "imagecheck_not_running" {
+  alarm_name          = "scoreboard-imagecheck-not-running"
+  comparison_operator = "LessThanThreshold"
+  evaluation_periods  = 1
+  threshold           = 1
+  period              = 86400
+  statistic           = "Sum"
+  namespace           = "AWS/Lambda"
+  metric_name         = "Invocations"
+  dimensions = {
+    FunctionName = aws_lambda_function.imagecheck.function_name
+  }
+  alarm_description  = <<-EOT
+    The daily image mirror check has not run at all in the last 24 hours --
+    no Invocations data point, not merely zero successful runs. Check that
+    aws_scheduler_schedule.imagecheck still exists and is ENABLED, that
+    aws_iam_role.scheduler (scheduler.tf) still trusts the
+    schedule-group/scoreboard group ARN and is still allowed to invoke
+    scoreboard-imagecheck, and that the function itself has not been
+    deleted or renamed.
+  EOT
+  alarm_actions      = [data.aws_sns_topic.security_alerts.arn]
+  treat_missing_data = "breaching"
 }
 
 resource "aws_cloudwatch_metric_alarm" "imagecheck_throttles" {

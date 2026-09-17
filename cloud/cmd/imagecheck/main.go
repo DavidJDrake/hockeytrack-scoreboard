@@ -57,7 +57,7 @@ func main() {
 		os.Exit(1)
 	}
 	objs := bucket{client: s3.NewFromConfig(cfg), name: name}
-	rel := GitHub{Repo: repo, API: "https://api.github.com", Web: "https://github.com", Client: &http.Client{Timeout: 30 * time.Second}}
+	rel := GitHub{Repo: repo, API: "https://api.github.com", Web: "https://github.com", Client: &http.Client{Timeout: 30 * time.Second, CheckRedirect: redirectPolicy}}
 	n := topic{client: sns.NewFromConfig(cfg), arn: topicARN}
 	lambda.Start(func(ctx context.Context) error { return Run(ctx, objs, rel, n) })
 }

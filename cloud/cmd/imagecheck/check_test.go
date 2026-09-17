@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,11 +16,17 @@ import (
 
 type fakeObjects struct {
 	objects map[string][]byte
-	read    []string
+	// errs, keyed by object key, lets a test simulate a non-404 read
+	// failure (a real outage) distinct from a missing object.
+	errs map[string]error
+	read []string
 }
 
 func (f *fakeObjects) Get(_ context.Context, key string) (io.ReadCloser, error) {
 	f.read = append(f.read, key)
+	if err, ok := f.errs[key]; ok {
+		return nil, err
+	}
 	b, ok := f.objects[key]
 	if !ok {
 		return nil, ErrNotFound
@@ -35,11 +42,18 @@ type fakeReleases struct {
 }
 
 func (f fakeReleases) LatestTag(context.Context) (string, error) { return f.latest, f.latestErr }
+
+// Checksum mirrors the real GitHub client: a tag/file combination that was
+// never published 404s (ErrNoChecksum), it does not silently answer "".
 func (f fakeReleases) Checksum(_ context.Context, tag, file string) (string, error) {
 	if f.sumErr != nil {
 		return "", f.sumErr
 	}
-	return f.sums[tag+"/"+file], nil
+	sum, ok := f.sums[tag+"/"+file]
+	if !ok {
+		return "", ErrNoChecksum
+	}
+	return sum, nil
 }
 
 type fakeNotifier struct{ subjects, messages []string }
@@ -56,6 +70,13 @@ func sum(b []byte) string { s := sha256.Sum256(b); return hex.EncodeToString(s[:
 
 func manifest(version, file, sha string) []byte {
 	return []byte(`{"version":"` + version + `","file":"` + file + `","sha256":"` + sha + `","size":27,"released":"2026-09-16T00:00:00Z","release":"https://github.com/x"}`)
+}
+
+// manifestSized is manifest with an independently chosen size, for testing
+// a latest.json whose size field was rewritten but whose version, file and
+// checksum are otherwise legitimate.
+func manifestSized(version, file, sha string, size int) []byte {
+	return []byte(fmt.Sprintf(`{"version":%q,"file":%q,"sha256":%q,"size":%d,"released":"2026-09-16T00:00:00Z","release":"https://github.com/x"}`, version, file, sha, size))
 }
 
 func agreeing() (*fakeObjects, fakeReleases) {
@@ -107,6 +128,16 @@ func TestProblems(t *testing.T) {
 		"latest.json is not JSON": {func(o *fakeObjects, _ *fakeReleases) {
 			o.objects["latest.json"] = []byte("<html>")
 		}, "not a valid manifest"},
+		"the mirror has no image object at all": {func(o *fakeObjects, _ *fakeReleases) {
+			delete(o.objects, "images/v0.1.0/scoreboard-v0.1.0.img.xz")
+		}, "the mirror has no image object for v0.1.0"},
+		"latest.json exists but GitHub has no release at all": {func(_ *fakeObjects, r *fakeReleases) {
+			r.latest = ""
+			r.latestErr = ErrNoRelease
+		}, "GitHub has no release at all"},
+		"latest.json's size does not match the object": {func(o *fakeObjects, _ *fakeReleases) {
+			o.objects["latest.json"] = manifestSized("v0.1.0", "scoreboard-v0.1.0.img.xz", sum(image), 999)
+		}, "is 27 bytes but latest.json says 999 bytes"},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -208,5 +239,85 @@ func TestGitHubWithNoReleasesSaysSo(t *testing.T) {
 	g := GitHub{Repo: "DavidJDrake/hockeytrack-scoreboard", API: srv.URL, Web: srv.URL, Client: srv.Client()}
 	if _, err := g.LatestTag(context.Background()); !errors.Is(err, ErrNoRelease) {
 		t.Errorf("err = %v, want ErrNoRelease", err)
+	}
+}
+
+func TestGitHubForbiddenOrRateLimitedIsAnErrorNotNoRelease(t *testing.T) {
+	for _, status := range []int{http.StatusForbidden, http.StatusTooManyRequests} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(status)
+			}))
+			defer srv.Close()
+			g := GitHub{Repo: "DavidJDrake/hockeytrack-scoreboard", API: srv.URL, Web: srv.URL, Client: srv.Client()}
+			_, err := g.LatestTag(context.Background())
+			if err == nil {
+				t.Fatal("want an error")
+			}
+			if errors.Is(err, ErrNoRelease) {
+				t.Errorf("a %d was treated as ErrNoRelease, which means no notification and no error alarm", status)
+			}
+		})
+	}
+}
+
+func TestGitHubRefusesARedirectToAnotherHost(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "https://evil.example.com/scoreboard-v0.1.0.img.xz.sha256", http.StatusFound)
+	}))
+	defer srv.Close()
+	g := GitHub{
+		Repo:   "DavidJDrake/hockeytrack-scoreboard",
+		API:    srv.URL,
+		Web:    srv.URL,
+		Client: &http.Client{CheckRedirect: redirectPolicy},
+	}
+	if _, err := g.Checksum(context.Background(), "v0.1.0", "scoreboard-v0.1.0.img.xz"); err == nil {
+		t.Error("a redirect to an unexpected host was followed instead of refused")
+	}
+}
+
+// A forged version is not merely an infrastructure error: latest.json names
+// a version GitHub never released, and the fake's Checksum 404s exactly
+// like the real client would. This used to discard every problem already
+// found (including the version mismatch itself) and surface only as an
+// error, so the errors alarm -- whose own description says a GitHub outage
+// clears itself on the next run -- was the only signal, and nobody was
+// told the mirror might have been tampered with.
+func TestAVersionGitHubDoesNotHaveIsReportedAsTampering(t *testing.T) {
+	objs, rel := agreeing()
+	objs.objects["latest.json"] = manifest("v9.9.9", "scoreboard-v9.9.9.img.xz", sum(image))
+	objs.objects["images/v9.9.9/scoreboard-v9.9.9.img.xz"] = image
+	n := &fakeNotifier{}
+	if err := Run(context.Background(), objs, rel, n); err != nil {
+		t.Fatal(err)
+	}
+	if len(n.subjects) != 1 || n.subjects[0] != alertSubject {
+		t.Fatalf("subjects %q, want exactly one alert", n.subjects)
+	}
+	for _, want := range []string{"latest GitHub release is v0.1.0", "no release checksum for v9.9.9"} {
+		if !strings.Contains(n.messages[0], want) {
+			t.Errorf("message lacks %q:\n%s", want, n.messages[0])
+		}
+	}
+}
+
+// A problem found early (the version mismatch) must still be published even
+// when a later step -- here, reading the image object -- fails outright,
+// rather than the whole check being discarded as a bare error.
+func TestProblemsFoundSoFarArePublishedEvenIfALaterStepErrors(t *testing.T) {
+	objs, rel := agreeing()
+	rel.latest = "v0.2.0"
+	objs.errs = map[string]error{"images/v0.1.0/scoreboard-v0.1.0.img.xz": errors.New("connection reset")}
+	n := &fakeNotifier{}
+	err := Run(context.Background(), objs, rel, n)
+	if err == nil {
+		t.Fatal("want an error so the function's error alarm also fires")
+	}
+	if len(n.subjects) != 1 || n.subjects[0] != alertSubject {
+		t.Fatalf("subjects %q, want the alert published despite the later error", n.subjects)
+	}
+	if !strings.Contains(n.messages[0], "latest GitHub release is v0.2.0") {
+		t.Errorf("message lacks the problem already found:\n%s", n.messages[0])
 	}
 }

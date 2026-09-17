@@ -156,7 +156,7 @@ test("every alarm keeps the prefix HockeyTrack watches for rewriting", () => {
     .map((f) => code(readFileSync(new URL(f, dir), "utf8")));
   const alarms = sources.flatMap((src) => [...src.matchAll(/resource\s+"aws_cloudwatch_metric_alarm"\s+"[^"]+"/g)]).length;
   const names = sources.flatMap((src) => [...src.matchAll(/alarm_name\s*=\s*"([^"$]+)"/g)].map((m) => m[1]));
-  assert.ok(alarms >= 16, `found only ${alarms} aws_cloudwatch_metric_alarm resources`);
+  assert.ok(alarms >= 17, `found only ${alarms} aws_cloudwatch_metric_alarm resources`);
   assert.equal(names.length, alarms, "every aws_cloudwatch_metric_alarm needs a literal alarm_name, with no interpolation");
   for (const n of names) assert.ok(n.startsWith("scoreboard-"), `alarm "${n}" lacks the scoreboard- prefix`);
 });

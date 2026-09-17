@@ -31,6 +31,11 @@ var (
 	ErrNotFound = errors.New("object not found")
 	// ErrNoRelease means the repository has published no release yet.
 	ErrNoRelease = errors.New("no release published")
+	// ErrNoChecksum means GitHub has no checksum asset for that release and
+	// file. Unlike ErrNoRelease (nothing published at all), this happens
+	// when latest.json names a version GitHub never released -- itself a
+	// disagreement worth alerting on, not merely a failed check.
+	ErrNoChecksum = errors.New("no release checksum found")
 )
 
 // Manifest is latest.json as the release workflow writes it.
@@ -67,8 +72,11 @@ func clip(s string) string {
 	return s
 }
 
-// Check returns every disagreement it finds. An error means the check could
-// not be completed, which is not the same as the mirror being wrong.
+// Check returns every disagreement it finds, alongside an error if the
+// check could not be completed in full. A non-nil error does not discard
+// problems already found: whatever was collected before the failing step is
+// still returned, so a forged manifest is never hidden behind an unrelated
+// failure later in the comparison (Run publishes both).
 func Check(ctx context.Context, objs Objects, rel Releases) ([]string, error) {
 	latest, err := rel.LatestTag(ctx)
 	noRelease := errors.Is(err, ErrNoRelease)
@@ -109,9 +117,17 @@ func Check(ctx context.Context, objs Objects, rel Releases) ([]string, error) {
 	if latest != m.Version {
 		problems = append(problems, fmt.Sprintf("the mirror serves %s but the latest GitHub release is %s", m.Version, clip(latest)))
 	}
+
+	// A 404 here means latest.json names a version (or file) GitHub never
+	// released -- a disagreement in its own right, not a failed check, so
+	// it is reported as a problem instead of discarding what was already
+	// found above and surfacing only as an error.
 	released, err := rel.Checksum(ctx, m.Version, m.File)
+	if errors.Is(err, ErrNoChecksum) {
+		return append(problems, fmt.Sprintf("GitHub has no release checksum for %s", m.Version)), nil
+	}
 	if err != nil {
-		return nil, fmt.Errorf("reading the GitHub release checksum for %s: %w", m.Version, err)
+		return problems, fmt.Errorf("reading the GitHub release checksum for %s: %w", m.Version, err)
 	}
 	if released != m.SHA256 {
 		problems = append(problems, fmt.Sprintf("latest.json's checksum for %s differs from the GitHub release's", m.Version))
@@ -122,34 +138,43 @@ func Check(ctx context.Context, objs Objects, rel Releases) ([]string, error) {
 		return append(problems, fmt.Sprintf("the mirror has no image object for %s", m.Version)), nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("reading the image object: %w", err)
+		return problems, fmt.Errorf("reading the image object: %w", err)
 	}
 	h := sha256.New()
-	_, err = io.Copy(h, obj)
+	n, err := io.Copy(h, obj)
 	obj.Close()
 	if err != nil {
-		return nil, fmt.Errorf("hashing the image object: %w", err)
+		return problems, fmt.Errorf("hashing the image object: %w", err)
 	}
 	if hex.EncodeToString(h.Sum(nil)) != released {
 		problems = append(problems, fmt.Sprintf("the mirrored image for %s does not hash to the GitHub release's checksum", m.Version))
 	}
+	if n != m.Size {
+		problems = append(problems, fmt.Sprintf("the mirrored image for %s is %d bytes but latest.json says %d bytes", m.Version, n, m.Size))
+	}
 	return problems, nil
 }
 
-// Run checks once and raises one alert naming every problem found.
+// Run checks once and raises one alert naming every problem found. A
+// problem is published even when Check also returns an error, because a
+// disagreement found before a later failure is real: the caller (the
+// scheduled Lambda) should still see the error too, so its own errors alarm
+// fires and someone looks at why the check could not finish.
 func Run(ctx context.Context, objs Objects, rel Releases, n Notifier) error {
 	problems, err := Check(ctx, objs, rel)
-	if err != nil {
-		return err
-	}
 	if len(problems) == 0 {
-		slog.Info("image mirror agrees with its release")
-		return nil
+		if err == nil {
+			slog.Info("image mirror agrees with its release")
+		}
+		return err
 	}
 	slog.Warn("image mirror disagrees with its release", "problems", len(problems))
 	msg := "The scoreboard image mirror at images.scoreboard.davidjdrake.com disagrees with its GitHub release:\n\n- " +
 		strings.Join(problems, "\n- ") +
 		"\n\nIf this was not a release in progress, assume the image strangers download may have been replaced. " +
 		"See HockeyTrack's docs/threat-model.md, section 7."
-	return n.Notify(ctx, alertSubject, msg)
+	if notifyErr := n.Notify(ctx, alertSubject, msg); notifyErr != nil {
+		return errors.Join(err, notifyErr)
+	}
+	return err
 }

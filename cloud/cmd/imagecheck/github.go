@@ -19,6 +19,31 @@ type GitHub struct {
 	Client *http.Client
 }
 
+// allowedRedirectHosts are the only hosts a github.com or api.github.com
+// request may legitimately be redirected to (release assets are served from
+// GitHub's object storage). redirectPolicy is meant to be set as an
+// http.Client's CheckRedirect, so a captive proxy, DNS hijack or compromised
+// intermediary cannot make this function fetch a "checksum" -- or anything
+// else -- from an attacker's server just by 30x-ing a request there.
+var allowedRedirectHosts = map[string]bool{
+	"github.com":                           true,
+	"release-assets.githubusercontent.com": true,
+	"objects.githubusercontent.com":        true,
+}
+
+func redirectPolicy(req *http.Request, via []*http.Request) error {
+	if len(via) >= 5 {
+		return errors.New("stopped after 5 redirects")
+	}
+	if req.URL.Scheme != "https" {
+		return fmt.Errorf("refusing a redirect to a non-https URL: %s", req.URL)
+	}
+	if !allowedRedirectHosts[req.URL.Hostname()] {
+		return fmt.Errorf("refusing a redirect to an unexpected host: %s", req.URL.Hostname())
+	}
+	return nil
+}
+
 func (g GitHub) get(ctx context.Context, url string, limit int64) ([]byte, int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -62,6 +87,9 @@ func (g GitHub) Checksum(ctx context.Context, tag, file string) (string, error) 
 	body, status, err := g.get(ctx, g.Web+"/"+g.Repo+"/releases/download/"+tag+"/"+file+".sha256", 4096)
 	if err != nil {
 		return "", err
+	}
+	if status == http.StatusNotFound {
+		return "", ErrNoChecksum
 	}
 	if status != http.StatusOK {
 		return "", fmt.Errorf("checksum for %s: status %d", tag, status)
