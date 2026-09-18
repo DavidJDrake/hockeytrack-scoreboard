@@ -146,6 +146,26 @@ def test_the_wizard_is_disarmed_in_the_stage_not_by_the_config_switch():
     assert "FIRST_USER_PASS" not in (PIGEN / "config").read_text()
 
 
+REMOTE_ACCESS_RUN = PIGEN / "stage-scoreboard" / "03-no-remote-access" / "00-run.sh"
+
+
+def test_the_stage_removes_the_remote_access_agent():
+    # pi-gen's stage2/01-sys-tweaks/00-packages installs rpi-connect-lite, a
+    # remote-access agent, from the same list that brings ssh, sudo and
+    # console-setup -- so the SKIP-the-sub-stage mechanism used for cloud-init
+    # is not available, and the package is purged in this stage instead. Purge,
+    # not remove: a removed-but-not-purged package keeps its stanza in
+    # /var/lib/dpkg/status, which is the signal the gate reads.
+    run = REMOTE_ACCESS_RUN.read_text()
+    assert "on_chroot" in run
+    assert "apt-get purge" in run
+    for package in ("rpi-connect", "rpi-connect-lite"):
+        assert package in run
+    assert "apt-get remove" not in run
+    # pi-gen skips a sub-stage script that is not executable, silently.
+    assert os.access(REMOTE_ACCESS_RUN, os.X_OK), f"{REMOTE_ACCESS_RUN} must be executable or pi-gen skips it"
+
+
 def test_the_stage_documents_its_tmpfs_assumption():
     run = (PIGEN / "stage-scoreboard" / "01-install" / "00-run.sh").read_text()
     assert "tmpfs" in run
