@@ -11,7 +11,7 @@ Spec: `docs/superpowers/specs/2026-09-12-device-image-design.md`
 | H2 | polkit grant | The `scoreboard` account applies a connection | not yet run |
 | H3 | Real `nmcli` scan and apply | Networks list; joining one succeeds | not yet run |
 | H4 | Imager customisation on a custom image | The dialog is offered and the settings take effect | not yet run |
-| H5 | Image boots | Both boards boot and the panel lights up | not yet run |
+| H5 | Image boots | Both boards boot and the panel lights up | failed on v0.1.0, 2026-09-18 — first-boot wizard; fixed for v0.1.1 |
 | H6 | CMA on the Zero 2 W | 480×1920 renders without CMA exhaustion | not yet run |
 | H7 | Keyboard under kmsdrm | A USB keyboard drives the settings screen | not yet run |
 | H8 | A panel enrolls itself | Pairing, claim and restart all work end to end against real AWS | not yet run |
@@ -84,6 +84,27 @@ B1 and the gate, not a pass.
 Flash and boot on a Pi 4 and a Zero 2 W. Pass: both reach the "Not registered"
 screen. Note the time to first pixel on the Zero — it is the number that decides
 whether anything needs optimising.
+
+**2026-09-18 — failed on v0.1.0.** The image was flashed and booted on a real
+Pi and never reached the "Not registered" screen. The console showed Raspberry
+Pi OS's first-boot user-creation wizard instead: `userconf-pi`'s
+`userconfig.service`, a whiptail dialog on tty8 asking for a new username and a
+password. pi-gen arms it in `export-image/01-user-rename`, which runs
+`rename-user -f -s` against the mounted image after every stage has finished,
+because `DISABLE_FIRST_BOOT_USER_RENAME` is left at its default of 0 — and it
+is left there on purpose, since pi-gen refuses to build with it set unless
+`FIRST_USER_PASS` bakes a shared password into the image as well. An owner with
+no keyboard cannot answer the dialog, so the panel is stuck with the wizard on
+screen.
+
+Fixed in v0.1.1: `tools/pi-gen/stage-scoreboard/02-no-first-boot-wizard` masks
+`userconfig.service`, which makes that `systemctl enable` fail and create
+nothing, and `tools/image-gate.sh` now fails the build if the wizard is enabled
+in any unit tree or if any getty drop-in configures an autologin. The image
+boots with no login prompt on tty1 — `rename-user` disables `getty@tty1` after
+the stage runs and nothing there can put it back — which is acceptable: every
+account is locked, so the prompt would be decorative, and the console is left
+to the panel. Re-run this check on v0.1.1.
 
 ## H6 — CMA on the Zero 2 W
 
