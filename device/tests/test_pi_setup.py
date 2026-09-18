@@ -3,6 +3,7 @@ real script and unit template are exercised without touching this machine.
 Only --print-unit and --preflight are run here; both are read-only."""
 import os
 import pwd
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -129,6 +130,124 @@ def test_appliance_still_refuses_bookworm(checkout):
     done = run(checkout, "--appliance", "--preflight", codename="bookworm")
     assert done.returncode != 0
     assert "kmsdrm" in done.stderr
+
+
+def _definitions_only(script_text):
+    """The function and variable definitions at the top of pi-setup.sh,
+    without the dispatch loop at the bottom -- so sourcing this cannot
+    itself run install()/install_appliance() (which need apt-get, sudo,
+    useradd and usermod, none of which this suite may invoke)."""
+    marker = 'for arg in "$@"'
+    assert marker in script_text, "pi-setup.sh no longer has the expected dispatch loop"
+    return script_text.split(marker, 1)[0]
+
+
+def _run_probe(tmp_path, script_text, tail):
+    # Written to a real file, not `bash -c`, so ${BASH_SOURCE[0]} resolves
+    # normally under `set -u` and REPO/DEVICE compute to paths under
+    # tmp_path -- never the real checkout's device/config.
+    tools = tmp_path / "tools"
+    tools.mkdir(exist_ok=True)
+    probe = tools / "probe.sh"
+    probe.write_text(_definitions_only(script_text) + "\n" + tail + "\n")
+    return subprocess.run(["bash", str(probe)], capture_output=True, text=True, timeout=30)
+
+
+def test_appliance_install_dash_d_reaches_coreutils_install(tmp_path):
+    """Runs tools/pi-setup.sh:121 for real: `install -d -o ... -m 700
+    "$STATE_DIR"`, the line install_appliance uses to create the service's
+    state directory. tools/pi-setup.sh also defines a shell function named
+    install() (the checkout-mode installer at line 57), which shadows the
+    coreutils binary for this exact call.
+
+    This reproduces the failure from GitHub Actions run 35295966741: with
+    the shadow in place, `install -d ...` re-enters the checkout install()
+    function instead of creating the directory. That function immediately
+    calls preflight(), which -- since no device/config exists under this
+    throwaway root -- dies with "missing .../device.json", so the state
+    directory is never created and this test fails. Fixed, `install -d`
+    must reach coreutils and actually create it.
+    """
+    target = tmp_path / "var-lib-scoreboard"
+    tail = (
+        'SERVICE_USER="$(id -un)"\n'
+        f'install -d -o "$SERVICE_USER" -g "$SERVICE_USER" -m 700 {shlex.quote(str(target))}\n'
+    )
+    r = _run_probe(tmp_path, (REPO / "tools" / "pi-setup.sh").read_text(), tail)
+    assert r.returncode == 0, (
+        "install -d did not run coreutils install(1) -- it almost certainly "
+        f"re-entered the checkout install() function instead; stderr: {r.stderr}"
+    )
+    assert target.is_dir(), f"the state directory was never created; stderr: {r.stderr}"
+    assert oct(target.stat().st_mode & 0o777) == "0o700"
+
+
+def test_appliance_install_dash_D_reaches_coreutils_install(tmp_path):
+    """Same shadowing bug, same shell function, the other call site: line
+    148's `install -D -m 644 "$DEVICE/polkit/..." /etc/polkit-1/rules.d/...`
+    installs the polkit rule. The real destination is under /etc and needs
+    root, which this suite cannot use, so this probes the identical `install
+    -D -m 644 SRC DST` shape against a writable DST instead -- proving the
+    same shadow affects this call site too, without touching the real
+    filesystem.
+    """
+    src = tmp_path / "10-scoreboard-network.rules"
+    src.write_text("polkit.addRule(function(){});\n")
+    dst = tmp_path / "installed" / "10-scoreboard-network.rules"
+    tail = f"install -D -m 644 {shlex.quote(str(src))} {shlex.quote(str(dst))}\n"
+    r = _run_probe(tmp_path, (REPO / "tools" / "pi-setup.sh").read_text(), tail)
+    assert r.returncode == 0, (
+        "install -D did not run coreutils install(1) -- it almost certainly "
+        f"re-entered the checkout install() function instead; stderr: {r.stderr}"
+    )
+    assert dst.is_file(), f"the polkit rule was never installed; stderr: {r.stderr}"
+    assert oct(dst.stat().st_mode & 0o777) == "0o644"
+    assert dst.read_text() == src.read_text()
+
+
+def test_no_function_shadows_a_command_this_script_calls():
+    """Backstop for the whole class of bug, not just install(): if any
+    function this script defines has the same name as a real command it (or
+    a function it calls) invokes unqualified, the function silently wins,
+    the same way install() ate `install -d` at line 121. Anything found here
+    should either be renamed or called via `command <name>`.
+    """
+    import shutil as _shutil
+
+    text = (REPO / "tools" / "pi-setup.sh").read_text()
+    lines = text.splitlines()
+    func_names = set()
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("function "):
+            func_names.add(stripped.split()[1].split("(")[0])
+            continue
+        head = stripped.split("(")[0].strip()
+        if stripped.endswith("{") and stripped[len(head):].replace(" ", "").startswith("()") and head.isidentifier():
+            func_names.add(head)
+
+    offenders = []
+    for name in sorted(func_names):
+        if _shutil.which(name) is None:
+            continue  # not a real command on this system, so it cannot be shadowed
+        for line in lines:
+            s = line.strip()
+            if s.startswith(f"{name}(") or s.startswith(f"function {name}"):
+                continue  # the definition itself
+            if f"command {name}" in s:
+                continue  # already qualified
+            # A call is this name as the first word of a simple command,
+            # optionally after `sudo`.
+            words = s.split()
+            first = words[0] if words else ""
+            if first == "sudo" and len(words) > 1:
+                first = words[1]
+            if first == name:
+                offenders.append((name, line))
+    assert not offenders, (
+        "function name(s) collide with a real command this script calls "
+        f"unqualified, and will shadow it: {offenders}"
+    )
 
 
 # The two checks below read the script's source rather than running

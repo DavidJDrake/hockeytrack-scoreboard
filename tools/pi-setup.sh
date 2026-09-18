@@ -54,7 +54,7 @@ preflight() {
   esac
 }
 
-install() {
+install_checkout() {
   [ "$(id -u)" -ne 0 ] || die "run this as the user the service should run as, not root; it uses sudo where it must"
   preflight
 
@@ -140,7 +140,7 @@ install_appliance() {
 
   echo "==> units and polkit"
   # Rendered before tee opens the target, so a failure cannot leave an empty
-  # unit behind -- see the checkout install() above for why this matters.
+  # unit behind -- see install_checkout() above for why this matters.
   local unit
   unit="$(render_unit)"
   printf '%s\n' "$unit" | tee /etc/systemd/system/scoreboard.service >/dev/null
@@ -173,6 +173,6 @@ case "${ACTION:-}" in
       [ "$(id -u)" -eq 0 ] || die "--appliance installs system-wide; run it as root"
       install_appliance
     else
-      install
+      install_checkout
     fi ;;
 esac
