@@ -222,12 +222,11 @@ ok "accounts are locked"
 # makes that `systemctl enable` fail and create nothing, and this is the check
 # that proves the mask still holds.
 #
-# Only an enablement symlink counts. Every Raspberry Pi OS image carries the
-# unit file itself (userconf-pi is a Recommends of raspberrypi-sys-mods), and
-# the mask -- /etc/systemd/system/userconfig.service pointing at /dev/null --
-# is the fix rather than the fault, so neither of those fails the gate. Both
-# unit trees are scanned: a package can ship a .wants symlink under /usr/lib
-# just as an enable writes one under /etc.
+# Only an enablement symlink counts as "enabled". Every Raspberry Pi OS image
+# carries the unit file itself (userconf-pi is a Recommends of
+# raspberrypi-sys-mods), so its presence is not a fault. Both unit trees are
+# scanned: a package can ship a .wants symlink under /usr/lib just as an
+# enable writes one under /etc.
 for units in "$ROOT/etc/systemd/system" "$ROOT/usr/lib/systemd/system"; do
   reject_symlink "$units" "${units#"$ROOT"}"
   [ -d "$units" ] || continue
@@ -236,28 +235,126 @@ for units in "$ROOT/etc/systemd/system" "$ROOT/usr/lib/systemd/system"; do
   [ -z "$FOUND" ] || fail "the first-boot user-creation wizard is enabled (${FOUND#"$ROOT"}); nobody can answer it on a panel with no keyboard"
 done
 
-# An autologin drop-in would hand a shell to whoever walks up to the panel,
-# without the password that every account in the image deliberately lacks.
+# The mask itself is asserted, not merely assumed. "If the mask stopped working
+# the enable would succeed, and the rule above would catch the symlink" covers
+# unmask-then-enable, but not unmask-WITHOUT-enable: dh_installsystemd's
+# postinst only re-enables a unit that was already enabled, so a path that
+# leaves userconfig.service present, unmasked and unenabled passes that rule,
+# boots perfectly, and is armed for the next thing that enables it on a panel
+# already in the field. The mask is the control; the control has to be visible.
+mask="$ROOT/etc/systemd/system/userconfig.service"
+[ -L "$mask" ] || fail "the first-boot wizard's unit is not masked (/etc/systemd/system/userconfig.service is not a symlink); only a mask stops it being enabled later"
+mask_target="$(readlink "$mask")"
+[ "$mask_target" = "/dev/null" ] \
+  || fail "the first-boot wizard's unit is not masked (/etc/systemd/system/userconfig.service points at $(sanitize_for_log "$mask_target"), not /dev/null)"
+
+# An autologin would hand a shell to whoever walks up to the panel, without
+# the password that every account in the image deliberately lacks.
 # raspi-config writes one whenever a boot behaviour of B2 or B4 is chosen, and
 # rename-user's undo path goes through exactly that code. A getty drop-in is
 # not suspicious by itself -- noclear.conf is a common and harmless one -- so
 # only agetty's autologin spellings fail: "--autologin <user>", which
-# raspi-config writes, and the "-a <user>" short form agetty also accepts,
-# which is only matched on a line that runs agetty so that a stray "-a" in
-# some other directive cannot trip it. A plain login prompt on tty1 is fine;
-# a session nobody had to log into is not.
+# raspi-config writes, and the short form agetty also accepts, detached
+# ("-a pi") or attached ("-api"). The short form is matched only on a line
+# that runs agetty, so a stray "-a" in some other directive cannot trip it.
+#
+# Four unit families can carry it -- getty@, serial-getty@, autovt@ and
+# console-getty -- as a drop-in in either unit tree, or as a full unit file
+# placed directly in /etc/systemd/system, which overrides the packaged one
+# outright. Nothing stock lives in either of those places: pi-gen ships no
+# getty drop-in at all, and no getty unit under /etc, so a false positive here
+# is impossible on a stock image rather than merely unlikely. (The packaged
+# templates under /usr/lib are deliberately NOT read: they are stock by
+# definition, and their comments discuss agetty's options.)
+autologin_re_long='--autologin'
+autologin_re_short='agetty.*[[:space:]]-a'
 for units in "$ROOT/etc/systemd/system" "$ROOT/usr/lib/systemd/system"; do
   [ -d "$units" ] || continue
-  run_find "$units" -type f \
-    \( -path '*/getty@*.service.d/*' -o -path '*/serial-getty@*.service.d/*' \) -print
-  while IFS= read -r dropin; do
-    [ -n "$dropin" ] || continue
-    if grep_or_fail -qE -e '--autologin' -e 'agetty.*[[:space:]]-a[[:space:]]' "$dropin"; then
-      fail "a console autologin drop-in is present (${dropin#"$ROOT"}); the panel's console must not log anyone in"
+  # find -P does not descend into a directory that is itself a symlink, so a
+  # symlinked drop-in directory would hide every file in it from the scan.
+  run_find "$units" -type l \
+    \( -name 'getty@*.service.d' -o -name 'serial-getty@*.service.d' \
+       -o -name 'autovt@*.service.d' -o -name 'console-getty.service.d' \) -print -quit
+  [ -z "$FOUND" ] || fail "a getty drop-in directory is a symlink (${FOUND#"$ROOT"}); it must be a real directory so the gate can see inside it"
+  # -xtype f, not -type f: a drop-in that is a symlink to a real file is read
+  # by systemd and must be read here too.
+  run_find "$units" -xtype f \
+    \( -path '*/getty@*.service.d/*' -o -path '*/serial-getty@*.service.d/*' \
+       -o -path '*/autovt@*.service.d/*' -o -path '*/console-getty.service.d/*' \) -print
+  while IFS= read -r conf; do
+    [ -n "$conf" ] || continue
+    if grep_or_fail -qE -e "$autologin_re_long" -e "$autologin_re_short" "$conf"; then
+      fail "a console autologin drop-in is present (${conf#"$ROOT"}); the panel's console must not log anyone in"
     fi
   done <<<"$FOUND"
 done
-ok "the first-boot user-creation wizard is not armed, and no console autologin"
+# A replacement unit, as opposed to a drop-in, only overrides the packaged one
+# when it sits directly in /etc/systemd/system -- hence -maxdepth 1, which also
+# keeps the enablement symlinks in getty.target.wants/ out of this scan.
+run_find "$ROOT/etc/systemd/system" -maxdepth 1 -xtype f \
+  \( -name 'getty@*.service' -o -name 'serial-getty@*.service' \
+     -o -name 'autovt@*.service' -o -name 'console-getty.service' \) -print
+while IFS= read -r unit_override; do
+  [ -n "$unit_override" ] || continue
+  if grep_or_fail -qE -e "$autologin_re_long" -e "$autologin_re_short" "$unit_override"; then
+    fail "a console autologin is configured (${unit_override#"$ROOT"}); the panel's console must not log anyone in"
+  fi
+done <<<"$FOUND"
+ok "the first-boot user-creation wizard is masked and not armed, and no console autologin"
+
+# With no getty on tty1 and the panel owning the console, a startup failure
+# shows a black screen and nothing else: scoreboard-appliance.service sends
+# stdout and stderr to the journal, a display failure exits 78 and
+# RestartPreventExitStatus=78 then stops the service outright, and every other
+# crash restarts every 3 s in silence. raspberrypi-sys-mods ships
+# /usr/lib/systemd/journald.conf.d/40-rpi-volatile-storage.conf with
+# Storage=volatile, so unless the stage overrides it the journal is RAM-only
+# and pulling the card yields nothing at all. The card is the last diagnosis
+# surface an appliance has, so this asserts it works.
+#
+# It asserts the EFFECTIVE setting, not the presence of our file. journald
+# sorts every drop-in from /etc, /run, /usr/local/lib and /usr/lib by filename
+# across all of those directories at once, and the lexicographically last file
+# to set an option wins -- so a later-sorting drop-in could put volatile back,
+# and a rule that only looked for our own file would wave that through. Ties
+# on the same filename go to /etc, which is how a drop-in gets masked.
+journal_conf="$ROOT/etc/systemd/journald.conf"
+journal_dirs=()
+for dir in "$ROOT/usr/lib/systemd/journald.conf.d" "$ROOT/etc/systemd/journald.conf.d"; do
+  reject_symlink "$dir" "${dir#"$ROOT"}"
+  if [ -d "$dir" ]; then
+    journal_dirs+=("$dir")
+  fi
+done
+read_storage() {
+  # Echoes the last Storage= value in $1, or nothing if it sets none.
+  if grep_line_or_fail -iE '^[[:space:]]*Storage[[:space:]]*=' "$1"; then
+    printf '%s\n' "$LINE" | tail -n 1 \
+      | sed -E 's/^[[:space:]]*[Ss][Tt][Oo][Rr][Aa][Gg][Ee][[:space:]]*=[[:space:]]*//; s/[[:space:]]+$//'
+  fi
+}
+journal_storage=""
+if [ -f "$journal_conf" ]; then
+  journal_storage="$(read_storage "$journal_conf")"
+fi
+if [ "${#journal_dirs[@]}" -gt 0 ]; then
+  run_find "${journal_dirs[@]}" -maxdepth 1 -xtype f -name '*.conf' -print
+  sorted="$(printf '%s\n' "$FOUND" \
+    | awk -v etc="$ROOT/etc/systemd/journald.conf.d/" \
+        '$0 != "" { name = $0; sub(/.*\//, "", name); print name "\t" (index($0, etc) == 1 ? 1 : 0) "\t" $0 }' \
+    | LC_ALL=C sort -t "$(printf '\t')" -k1,1 -k2,2n | cut -f3-)"
+  while IFS= read -r conf; do
+    [ -n "$conf" ] || continue
+    value="$(read_storage "$conf")"
+    [ -z "$value" ] || journal_storage="$value"
+  done <<<"$sorted"
+fi
+[ "$journal_storage" = "persistent" ] \
+  || fail "the journal is not persistent (journald Storage resolves to '$(sanitize_for_log "${journal_storage:-unset}")'); a panel that fails to start would leave nothing on the card to read"
+reject_symlink "$ROOT/var/log/journal" "/var/log/journal"
+[ -d "$ROOT/var/log/journal" ] \
+  || fail "/var/log/journal is missing, so the journal has nowhere on the card to persist to"
+ok "the journal is persistent and /var/log/journal exists"
 
 # Only the real SSH unit names count -- Raspberry Pi OS ships sshswitch.service
 # enabled in multi-user.target.wants on every image; it only starts sshd when

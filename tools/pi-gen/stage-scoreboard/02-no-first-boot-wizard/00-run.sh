@@ -14,17 +14,30 @@
 # raspi-config's get_boot_cli reports 0 (default.target is multi-user and
 # lightdm is not installed), so rename-user skips its whole desktop branch --
 # no rpi-first-boot-wizard account, no piwiz.desktop, no sudoers drop-in --
-# and does exactly three things: writes /etc/ssh/sshd_config.d/rename_user.conf,
-# runs `systemctl disable getty@tty1`, and runs `systemctl enable userconfig`.
-# Anything this stage deleted would simply be written again afterwards, and
-# upstream's own undo, `cancel-rename`, cannot run any earlier than the thing
-# it undoes.
+# and does only this: consults raspi-config's get_autologin (whose other branch
+# would clear /var/lib/userconf-pi/autologin, a marker this image does not
+# have), writes /etc/ssh/sshd_config.d/rename_user.conf, runs `systemctl
+# disable getty@tty1`, and runs `systemctl enable userconfig`. Anything this
+# stage deleted would simply be written again afterwards, and upstream's own
+# undo, `cancel-rename`, cannot run any earlier than the thing it undoes.
+#
+# The export stage keeps going afterwards: export-image/02-set-sources runs
+# `apt-get update` and `apt-get -y dist-upgrade --auto-remove --purge` inside
+# the image, so a userconf-pi upgrade can land after the arming. The mask
+# survives that too -- deb-systemd-helper's unmask removes only a mask it
+# created itself (init-system-helpers 1.69: "We cannot unconditionally unmask
+# because that would interfere with the user's decision to mask a service"),
+# and this one is an administrator's own symlink with no state file behind it.
 #
 # WHAT SURVIVES. Masking the unit. systemctl refuses to enable a masked unit
-# and creates no symlink ("Failed to enable unit ... is masked", exit 1), and
-# rename-user does not run under `set -e`: its last command is an echo, so the
-# export sub-stage still exits 0 and the build still succeeds. The mask is
-# also what stops the unit being started by anything that enables it later.
+# and creates no symlink ("Failed to enable unit ... is masked", exit 1). The
+# export sub-stage still succeeds, and the precise reason matters: on_chroot
+# feeds its heredoc to `bash -e`, so errexit IS in effect there. It does not
+# matter, because the only command in that heredoc is `rename-user`, which is
+# a separate script with no `set -e` of its own (SHELLOPTS is not exported
+# into it) and whose last command is an echo -- so it exits 0 whatever the
+# masked enable did. The mask is also what stops the unit being started by
+# anything that enables it later.
 #
 # WHY NOT THE CONFIG SWITCH. DISABLE_FIRST_BOOT_USER_RENAME=1 would skip
 # rename-user entirely, but pi-gen's build.sh refuses to build without

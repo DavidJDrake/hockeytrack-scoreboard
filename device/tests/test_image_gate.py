@@ -53,6 +53,18 @@ def clean_image(tmp_path: Path) -> tuple[Path, Path]:
     (units / "getty@tty1.service.d").mkdir()
     (units / "getty@tty1.service.d" / "noclear.conf").write_text(
         "[Service]\nExecStart=\nExecStart=-/sbin/agetty --noclear %I $TERM\nTTYVTDisallocate=no\n")
+    # The journal is the only diagnosis surface left once the panel owns tty1.
+    # raspberrypi-sys-mods ships the volatile drop-in on every image, so the
+    # stage's own file has to sort after it to win.
+    lib_journal = root / "usr" / "lib" / "systemd" / "journald.conf.d"
+    lib_journal.mkdir(parents=True)
+    (lib_journal / "40-rpi-volatile-storage.conf").write_text("[Journal]\nStorage=volatile\n")
+    etc_journal = root / "etc" / "systemd" / "journald.conf.d"
+    etc_journal.mkdir(parents=True)
+    (etc_journal / "95-scoreboard-persistent-journal.conf").write_text(
+        "[Journal]\nStorage=persistent\nSystemMaxUse=50M\n")
+    (root / "etc" / "systemd" / "journald.conf").write_text("[Journal]\n#Storage=auto\n#Compress=yes\n")
+    (root / "var" / "log" / "journal").mkdir(parents=True)
     rules = root / "etc" / "polkit-1" / "rules.d"
     rules.mkdir(parents=True)
     shutil.copy(REPO / "device" / "polkit" / "10-scoreboard-network.rules", rules)
@@ -381,6 +393,63 @@ BREAKS = {
     "a Raspberry Pi Connect sign-in path unit in the rootfs": (
         lambda r, b: _write(r / "usr/lib/systemd/user/rpi-connect-signin.path", "[Path]\n"),
         "Raspberry Pi Connect"),
+    # Fix round 1. The mask is the control, so its absence is a finding on its
+    # own: an unmask WITHOUT a re-enable leaves the unit live for the next
+    # thing that enables it, and every other wizard rule still passes.
+    "the wizard's mask missing entirely": (
+        lambda r, b: (r / "etc/systemd/system/userconfig.service").unlink(), "not masked"),
+    "the wizard's mask replaced by a regular file": (
+        lambda r, b: ((r / "etc/systemd/system/userconfig.service").unlink(),
+                      _write(r / "etc/systemd/system/userconfig.service", "[Unit]\n")), "not masked"),
+    "the wizard's mask pointing somewhere other than /dev/null": (
+        lambda r, b: ((r / "etc/systemd/system/userconfig.service").unlink(),
+                      (r / "etc/systemd/system/userconfig.service").symlink_to(
+                          "/usr/lib/systemd/system/userconfig.service")), "not masked"),
+    # Autologin scan gaps found in review.
+    "an autologin drop-in that is a symlink to a file": (
+        lambda r, b: (_write(r / "etc/elsewhere.conf",
+                             "[Service]\nExecStart=-/sbin/agetty --autologin pi %I $TERM\n"),
+                      (r / "etc/systemd/system/getty@tty1.service.d/50-link.conf").symlink_to(
+                          "../../../elsewhere.conf")), "autologin"),
+    "a getty drop-in directory that is itself a symlink": (
+        lambda r, b: ((r / "etc/real-dropins").mkdir(),
+                      _write(r / "etc/real-dropins/autologin.conf",
+                             "[Service]\nExecStart=-/sbin/agetty --autologin pi %I $TERM\n"),
+                      (r / "etc/systemd/system/getty@tty2.service.d").symlink_to("../../real-dropins")),
+        "symlink"),
+    "an autologin drop-in using agetty's attached short flag": (
+        lambda r, b: _write(r / "etc/systemd/system/getty@tty1.service.d/60-attached.conf",
+                            "[Service]\nExecStart=\nExecStart=-/sbin/agetty -api --noclear %I $TERM\n"),
+        "autologin"),
+    "an autologin drop-in on autovt@": (
+        lambda r, b: _write(r / "etc/systemd/system/autovt@tty3.service.d/autologin.conf",
+                            "[Service]\nExecStart=\nExecStart=-/sbin/agetty --autologin pi %I $TERM\n"),
+        "autologin"),
+    "an autologin drop-in on console-getty": (
+        lambda r, b: _write(r / "etc/systemd/system/console-getty.service.d/autologin.conf",
+                            "[Service]\nExecStart=\nExecStart=-/sbin/agetty --autologin root - $TERM\n"),
+        "autologin"),
+    "a full getty unit override configuring autologin": (
+        lambda r, b: _write(r / "etc/systemd/system/getty@tty1.service",
+                            "[Service]\nExecStart=-/sbin/agetty --autologin pi --noclear %I $TERM\n"),
+        "autologin"),
+    "a full console-getty unit override configuring autologin": (
+        lambda r, b: _write(r / "etc/systemd/system/console-getty.service",
+                            "[Service]\nExecStart=-/sbin/agetty -aroot - $TERM\n"),
+        "autologin"),
+    # The journal is the last diagnosis surface; a volatile one leaves nothing
+    # on the card when a panel fails to start.
+    "the persistent-journal drop-in missing": (
+        lambda r, b: (r / "etc/systemd/journald.conf.d/95-scoreboard-persistent-journal.conf").unlink(),
+        "journal is not persistent"),
+    "a later-sorting drop-in putting the journal back in RAM": (
+        lambda r, b: _write(r / "etc/systemd/journald.conf.d/99-volatile-again.conf",
+                            "[Journal]\nStorage=volatile\n"), "journal is not persistent"),
+    "the journal storage set to none": (
+        lambda r, b: (r / "etc/systemd/journald.conf.d/95-scoreboard-persistent-journal.conf").write_text(
+            "[Journal]\nStorage=none\n"), "journal is not persistent"),
+    "/var/log/journal missing": (
+        lambda r, b: (r / "var/log/journal").rmdir(), "nowhere on the card"),
 }
 
 
