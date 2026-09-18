@@ -47,26 +47,63 @@
 # 9.2 keep both settings out of tools/pi-gen/config, and
 # device/tests/test_pi_gen_recipe.py fails the build if either appears.
 #
-# TTY1. rename-user disables getty@tty1 after this stage and nothing here can
-# put it back, so the image boots with no login prompt on tty1 and the console
-# is left to the panel, which draws through kmsdrm. Of the two acceptable
-# outcomes -- a plain login prompt, or none -- this is the one pi-gen leaves,
-# and it costs nothing: every account in the image is locked, so a prompt
-# would be decorative. What is not acceptable is an autologin shell on a panel
+# TTY1, and what it costs. rename-user disables getty@tty1 after this stage
+# and nothing here can put it back, so the image boots with no login prompt on
+# tty1 and the console is left to the panel, which draws through kmsdrm. Of the
+# two acceptable outcomes -- a plain login prompt, or none -- this is the one
+# pi-gen leaves. A prompt would be decorative *for access*, since every account
+# in the image is locked; but the console was also the only place a startup
+# failure could be read, and losing it is a real cost. What replaces it is the
+# journal, which 04-persistent-journal keeps on the card for exactly this
+# reason: a panel that fails to start now shows a black screen, and the card is
+# where the reason is. What is not acceptable is an autologin shell on a panel
 # anyone can walk up to, and nothing here creates one. tools/image-gate.sh
-# fails the build if either the wizard or an autologin drop-in is present.
+# fails the build if either the wizard or an autologin is present.
 ln -sfn /dev/null "${ROOTFS_DIR}/etc/systemd/system/userconfig.service"
 
-# Nothing arms the wizard this early today, so these two find nothing. They
-# are here so that a pi-gen bump which moves the arming into a stage is undone
-# outright rather than only masked, and so the state this stage guarantees is
-# written down where it is enforced.
+# Nothing arms the wizard this early today, so none of the sweeps below find
+# anything. They are here so that a pi-gen bump which moves the arming into a
+# stage is undone outright rather than only masked, and so that a shape
+# tools/image-gate.sh refuses is cleaned here rather than failing a release
+# build thirty-five minutes in. The gate and this file must therefore refuse
+# the same shapes: device/tests/test_pi_gen_recipe.py asserts that the two
+# agree on the unit-name set and on the autologin patterns, so they cannot
+# drift apart again.
 find "${ROOTFS_DIR}/etc/systemd/system" \
 	\( -path '*.wants/*' -o -path '*.requires/*' -o -path '*.upholds/*' \) \
 	-name 'userconfig.service' -delete
-while IFS= read -r dropin; do
-	if grep -qE -e '--autologin' -e 'agetty.*[[:space:]]-a[[:space:]]' "$dropin"; then
-		rm -f "$dropin"
+
+# Both unit trees, because the gate reads both. Removing a drop-in that came
+# from a package would leave dpkg believing the file is still there; nothing
+# ships one today, and an image that fails the gate is worse.
+for units in "${ROOTFS_DIR}/etc/systemd/system" "${ROOTFS_DIR}/usr/lib/systemd/system"; do
+	[ -d "$units" ] || continue
+	# A drop-in directory that is itself a symlink hides its contents from
+	# find -P, so neither this sweep nor the gate can see into one; the gate
+	# fails the build on it, so it goes.
+	while IFS= read -r linkdir; do
+		rm -f "$linkdir"
+	done < <(find "$units" -type l \
+		\( -name 'getty@*.service.d' -o -name 'serial-getty@*.service.d' \
+		   -o -name 'autovt@*.service.d' -o -name 'console-getty.service.d' \) -print)
+	# -xtype f: a drop-in symlinked to a real file is read by systemd, so it
+	# is read here. The short form is matched attached (-api) as well as
+	# detached (-a pi).
+	while IFS= read -r dropin; do
+		if grep -qE -e '--autologin' -e 'agetty.*[[:space:]]-a' "$dropin"; then
+			rm -f "$dropin"
+		fi
+	done < <(find "$units" -xtype f \
+		\( -path '*/getty@*.service.d/*' -o -path '*/serial-getty@*.service.d/*' \
+		   -o -path '*/autovt@*.service.d/*' -o -path '*/console-getty.service.d/*' \) -print)
+done
+# A replacement unit overrides the packaged one only when it sits directly in
+# /etc/systemd/system -- hence -maxdepth 1, which also leaves the enablement
+# symlinks under getty.target.wants/ alone.
+while IFS= read -r override; do
+	if grep -qE -e '--autologin' -e 'agetty.*[[:space:]]-a' "$override"; then
+		rm -f "$override"
 	fi
-done < <(find "${ROOTFS_DIR}/etc/systemd/system" -type f \
-	\( -path '*/getty@*.service.d/*' -o -path '*/serial-getty@*.service.d/*' \) -print)
+done < <(find "${ROOTFS_DIR}/etc/systemd/system" -maxdepth 1 -xtype f \
+	\( -name 'getty@*.service' -o -name 'serial-getty@*.service' \
+	   -o -name 'autovt@*.service' -o -name 'console-getty.service' \) -print)

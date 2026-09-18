@@ -27,12 +27,17 @@
 # so a pi-gen bump that switches packages is covered; apt exits 0 for a package
 # it knows but has not installed.
 #
-# NO AUTOREMOVE. The only package this purge can orphan is dbus-user-session:
+# WHAT AUTOREMOVE DOES TO THE EXPORTED IMAGE. This stage runs none -- but
+# pi-gen's own export-image/02-set-sources does, afterwards, as
+# `apt-get -y dist-upgrade --auto-remove --purge` against the mounted image.
+# So the question is not whether an autoremove happens; it is what survives
+# one. The only package this purge can orphan is dbus-user-session:
 # rpi-connect-lite's other dependency, init-system-helpers, is Priority
 # required and is never autoremoved. dbus-user-session is also a Recommends of
-# libpam-systemd, which this image installs, so apt's default
-# (APT::AutoRemove::RecommendsImportant) would keep it regardless. Running
-# autoremove blind inside a chroot to gain nothing is the wrong trade.
+# libpam-systemd, which this image installs, and apt keeps a package wanted by
+# an installed package's Recommends under its default
+# APT::AutoRemove::RecommendsImportant -- so it stays in the exported image,
+# and adding an autoremove of our own here would change nothing.
 on_chroot <<EOF
 DEBIAN_FRONTEND=noninteractive apt-get purge -y rpi-connect rpi-connect-lite
 EOF

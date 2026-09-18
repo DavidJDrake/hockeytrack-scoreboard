@@ -183,6 +183,60 @@ def test_the_stage_keeps_the_journal_on_the_card():
     assert os.access(JOURNAL_RUN, os.X_OK), f"{JOURNAL_RUN} must be executable or pi-gen skips it"
 
 
+def test_the_journal_drop_in_shortens_the_sync_interval():
+    # journald's default SyncIntervalSec is 5 minutes for ERR and below, and
+    # the scoreboard's startup failures are logged at ERR. Someone watching a
+    # black screen pulls the power long before five minutes are up, losing
+    # exactly the line this feature exists to capture.
+    assert "SyncIntervalSec=30s" in JOURNAL_RUN.read_text()
+
+
+GATE = REPO / "tools" / "image-gate.sh"
+WIZARD_STAGE = PIGEN / "stage-scoreboard" / "02-no-first-boot-wizard" / "00-run.sh"
+# The quoted find predicates both files use to name a getty-ish unit or its
+# drop-in directory: -name 'getty@*.service', -path '*/getty@*.service.d/*'.
+UNIT_GLOB = re.compile(
+    r"'(?:\*/)?((?:serial-getty|autovt|getty)@\*?\.service(?:\.d)?|console-getty\.service(?:\.d)?)(?:/\*)?'")
+
+
+def autologin_unit_globs(text: str) -> set[str]:
+    return {m.group(1) for m in UNIT_GLOB.finditer(text)}
+
+
+def test_the_stage_and_the_gate_refuse_the_same_autologin_shapes():
+    # The stage cleans what the gate refuses. If the two drift, a pi-gen bump
+    # shipping a newly covered shape fails a release build thirty-five minutes
+    # in rather than being cleaned by the stage that exists to clean it.
+    expected = {
+        "getty@*.service", "serial-getty@*.service", "autovt@*.service", "console-getty.service",
+        "getty@*.service.d", "serial-getty@*.service.d", "autovt@*.service.d", "console-getty.service.d",
+    }
+    gate_globs = autologin_unit_globs(GATE.read_text())
+    stage_globs = autologin_unit_globs(WIZARD_STAGE.read_text())
+    assert gate_globs == expected, f"the gate's unit set changed: {gate_globs ^ expected}"
+    assert stage_globs == gate_globs, f"the stage and the gate disagree: {stage_globs ^ gate_globs}"
+
+
+def test_the_stage_and_the_gate_match_the_same_autologin_spellings():
+    # --autologin is what raspi-config writes; the short form must be matched
+    # attached (-api) as well as detached (-a pi), so neither pattern may
+    # require a space after -a.
+    for path in (WIZARD_STAGE, GATE):
+        text = path.read_text()
+        assert "--autologin" in text
+        assert "agetty.*[[:space:]]-a" in text
+        assert "agetty.*[[:space:]]-a[[:space:]]" not in text, \
+            f"{path} still requires a space after -a, so the attached form (-api) slips through"
+
+
+def test_the_stage_reads_drop_ins_the_way_systemd_does():
+    # -xtype f so a drop-in symlinked to a real file is read, and -type l to
+    # find the symlinked drop-in directory that find -P will not descend into.
+    text = WIZARD_STAGE.read_text()
+    assert "-xtype f" in text
+    assert "-type l" in text
+
+
 def test_the_journal_drop_in_sorts_after_the_volatile_one():
     # journald sorts drop-ins by filename across /etc, /run and /usr/lib at
     # once, and the lexicographically last file to set an option wins -- so

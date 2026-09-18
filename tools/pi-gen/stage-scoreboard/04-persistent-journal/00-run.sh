@@ -25,6 +25,14 @@ cat >"${ROOTFS_DIR}/etc/systemd/journald.conf.d/95-scoreboard-persistent-journal
 	[Journal]
 	Storage=persistent
 	SystemMaxUse=50M
+	# journald's default SyncIntervalSec is 5 minutes for anything at ERR or
+	# below, and the lines this whole feature exists to capture are ERR --
+	# "cannot open the display: ..." among them. Someone watching a black
+	# screen pulls the power long before five minutes are up, and would lose
+	# exactly that line. 30s is the window instead. It costs extra fsyncs,
+	# which an appliance that logs almost nothing when healthy barely
+	# notices; CRIT and above are synced immediately either way.
+	SyncIntervalSec=30s
 EOF
 chmod 644 "${ROOTFS_DIR}/etc/systemd/journald.conf.d/95-scoreboard-persistent-journal.conf"
 
@@ -47,4 +55,7 @@ EOF
 # logged only as whether one exists. The collection token and the private key
 # are never logged at all. What does land here is a panel's IoT thing name
 # ("claimed as %s"), the game id it is following, nmcli's own error text, and
-# the path of the boot-partition file it read -- never that file's contents.
+# the path of the boot-partition file it read. Not that file's contents, with
+# one exact exception: a malformed country line is echoed back as
+# `country must be a two-letter code such as US, got 'xyz'`, which is the
+# user's typo and not a secret. Never the password, and never the SSID.
