@@ -314,6 +314,34 @@ for path in etc/cloud/cloud.cfg usr/bin/cloud-init; do
 done
 ok "no cloud-init"
 
+# Raspberry Pi Connect is a remote-access agent, and pi-gen's stage2 installs
+# rpi-connect-lite as a matter of course. `rpi-connect signin` links the device
+# to a Raspberry Pi account that can then open a shell on it from a browser.
+# An appliance whose posture is that nobody can reach a panel -- including the
+# people who build it -- carries no such agent, so the scoreboard stage purges
+# it and this is the check that it stayed purged. dpkg's status file is the
+# package signal, the same one the cloud-init rule uses, and it catches a
+# `remove` that should have been a `purge` too: that leaves a
+# "Status: deinstall ok config-files" stanza behind, still with a Package: line.
+# The two programs and three user units are a backstop for a copy installed
+# outside dpkg.
+#
+# Those paths are named exactly rather than scanned for by name, because the
+# package also ships thirteen rpi-connect-*.1.gz manual pages -- and "a scan
+# that cannot tell a program from its documentation" is the bug that already
+# failed one real build (GitHub Actions run 35298398347).
+if grep_or_fail -qxE 'Package: (rpi-connect|rpi-connect-lite)' "$status"; then
+  fail "Raspberry Pi Connect is installed (dpkg lists it); an appliance carries no remote-access agent"
+fi
+for path in usr/bin/rpi-connect usr/bin/rpi-connectd \
+            usr/lib/systemd/user/rpi-connect.service \
+            usr/lib/systemd/user/rpi-connect-signin.service \
+            usr/lib/systemd/user/rpi-connect-signin.path; do
+  [ ! -e "$ROOT/$path" ] && [ ! -L "$ROOT/$path" ] \
+    || fail "Raspberry Pi Connect is installed (/$path exists); an appliance carries no remote-access agent"
+done
+ok "no remote-access agent"
+
 cfg="$ROOT/opt/scoreboard/.venv/pyvenv.cfg"
 [ -f "$cfg" ] || fail "no virtualenv at /opt/scoreboard/.venv"
 grep -qE '^include-system-site-packages[[:space:]]*=[[:space:]]*true' "$cfg" \

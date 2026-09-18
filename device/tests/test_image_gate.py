@@ -353,6 +353,34 @@ BREAKS = {
         lambda r, b: _write(r / "usr/lib/systemd/system/getty@tty1.service.d/autologin.conf",
                             "[Service]\nExecStart=\n"
                             "ExecStart=-/sbin/agetty --autologin pi %I $TERM\n"), "autologin"),
+    # Raspberry Pi Connect: pi-gen's stage2 installs rpi-connect-lite, and the
+    # scoreboard stage purges it. The dpkg rule comes first because a `remove`
+    # that should have been a `purge` leaves the stanza behind.
+    "Raspberry Pi Connect recorded as a package by dpkg": (
+        lambda r, b: (r / "var/lib/dpkg/status").write_text(
+            (r / "var/lib/dpkg/status").read_text()
+            + "\nPackage: rpi-connect-lite\nStatus: install ok installed\nVersion: 2.12.2\n"),
+        "Raspberry Pi Connect"),
+    "the full Raspberry Pi Connect recorded as a package by dpkg": (
+        lambda r, b: (r / "var/lib/dpkg/status").write_text(
+            (r / "var/lib/dpkg/status").read_text()
+            + "\nPackage: rpi-connect\nStatus: install ok installed\nVersion: 2.12.2\n"),
+        "Raspberry Pi Connect"),
+    "Raspberry Pi Connect removed but not purged": (
+        lambda r, b: (r / "var/lib/dpkg/status").write_text(
+            (r / "var/lib/dpkg/status").read_text()
+            + "\nPackage: rpi-connect-lite\nStatus: deinstall ok config-files\nVersion: 2.12.2\n"),
+        "Raspberry Pi Connect"),
+    "the Raspberry Pi Connect agent binary in the rootfs": (
+        lambda r, b: _write(r / "usr/bin/rpi-connectd", "#!/bin/sh\n"), "Raspberry Pi Connect"),
+    "the Raspberry Pi Connect command in the rootfs": (
+        lambda r, b: _write(r / "usr/bin/rpi-connect", "#!/bin/sh\n"), "Raspberry Pi Connect"),
+    "a Raspberry Pi Connect user unit in the rootfs": (
+        lambda r, b: _write(r / "usr/lib/systemd/user/rpi-connect.service", "[Unit]\n"),
+        "Raspberry Pi Connect"),
+    "a Raspberry Pi Connect sign-in path unit in the rootfs": (
+        lambda r, b: _write(r / "usr/lib/systemd/user/rpi-connect-signin.path", "[Path]\n"),
+        "Raspberry Pi Connect"),
 }
 
 
