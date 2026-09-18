@@ -259,10 +259,25 @@ data "aws_iam_openid_connect_provider" "github" {
   url = "https://token.actions.githubusercontent.com"
 }
 
-# GitHub gives a job the subject repo:<owner>/<repo>:environment:<name> only
-# when it runs in that environment, and image-release is restricted to v*
-# tags behind a required reviewer. So this role trusts an approved release,
-# not a tag push, a branch, a pull request, or another repository.
+# GitHub gives a job an environment-scoped subject only when it runs in that
+# environment, and image-release is restricted to v* tags behind a required
+# reviewer. So this role trusts an approved release, not a tag push, a branch,
+# a pull request, or another repository.
+#
+# This repository has immutable subject claims enabled, so the subject carries
+# numeric IDs rather than names:
+#
+#   repo:<owner>@<owner id>/<repo>@<repo id>:environment:<name>
+#
+# That is the stronger form and the reason this is spelled out rather than
+# built from names: renaming the repository, or deleting it and creating
+# another with the same name, produces a different subject and cannot assume
+# this role. The IDs are public (GET /repos/DavidJDrake/hockeytrack-scoreboard
+# gives the repository's, /users/DavidJDrake the owner's) and the prefix can be
+# read back with
+#   gh api repos/DavidJDrake/hockeytrack-scoreboard/actions/oidc/customization/sub
+# The first release (v0.1.0) failed here: the trust named the plain form, the
+# token carried the immutable one, and AWS refused the assume.
 data "aws_iam_policy_document" "image_publisher_trust" {
   statement {
     actions = ["sts:AssumeRoleWithWebIdentity"]
@@ -278,7 +293,7 @@ data "aws_iam_policy_document" "image_publisher_trust" {
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:DavidJDrake/hockeytrack-scoreboard:environment:image-release"]
+      values   = ["repo:DavidJDrake@95321084/hockeytrack-scoreboard@1359574103:environment:image-release"]
     }
   }
 }

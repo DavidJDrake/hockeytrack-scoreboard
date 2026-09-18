@@ -49,7 +49,13 @@ function braceBodies(text, header) {
 test("the publisher role trusts only the approved release environment", () => {
   const trust = code(block(images, 'data "aws_iam_policy_document" "image_publisher_trust" {'));
   assert.match(trust, /"sts:AssumeRoleWithWebIdentity"/);
-  assert.match(trust, /test\s*=\s*"StringEquals"\s*\n\s*variable\s*=\s*"token\.actions\.githubusercontent\.com:sub"\s*\n\s*values\s*=\s*\["repo:DavidJDrake\/hockeytrack-scoreboard:environment:image-release"\]/);
+  // The subject carries numeric owner and repository IDs because this
+  // repository has immutable subject claims enabled, so a rename or a
+  // same-named replacement cannot assume the role. The plain-name form is
+  // what the first release tried and AWS refused, so it is banned outright.
+  assert.match(trust, /test\s*=\s*"StringEquals"\s*\n\s*variable\s*=\s*"token\.actions\.githubusercontent\.com:sub"\s*\n\s*values\s*=\s*\["repo:DavidJDrake@\d+\/hockeytrack-scoreboard@\d+:environment:image-release"\]/);
+  assert.doesNotMatch(trust, /"repo:DavidJDrake\/hockeytrack-scoreboard:environment/,
+    "the plain-name subject never matches a token from a repository with immutable subject claims");
   assert.match(trust, /test\s*=\s*"StringEquals"\s*\n\s*variable\s*=\s*"token\.actions\.githubusercontent\.com:aud"\s*\n\s*values\s*=\s*\["sts\.amazonaws\.com"\]/);
   assert.doesNotMatch(trust, /StringLike|refs\/heads|refs\/tags/, "the trust must name the environment exactly, not a ref pattern");
 
