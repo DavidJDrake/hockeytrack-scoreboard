@@ -62,7 +62,7 @@ def clean_image(tmp_path: Path) -> tuple[Path, Path]:
     etc_journal = root / "etc" / "systemd" / "journald.conf.d"
     etc_journal.mkdir(parents=True)
     (etc_journal / "95-scoreboard-persistent-journal.conf").write_text(
-        "[Journal]\nStorage=persistent\nSystemMaxUse=50M\n")
+        "[Journal]\nStorage=persistent\nSystemMaxUse=50M\nSyncIntervalSec=30s\n")
     (root / "etc" / "systemd" / "journald.conf").write_text("[Journal]\n#Storage=auto\n#Compress=yes\n")
     (root / "var" / "log" / "journal").mkdir(parents=True)
     rules = root / "etc" / "polkit-1" / "rules.d"
@@ -450,6 +450,24 @@ BREAKS = {
             "[Journal]\nStorage=none\n"), "journal is not persistent"),
     "/var/log/journal missing": (
         lambda r, b: (r / "var/log/journal").rmdir(), "nowhere on the card"),
+    # Fix round 2: the replay must match journald, not a simplification of it.
+    "a volatile drop-in in /usr/local/lib that sorts last": (
+        lambda r, b: _write(r / "usr/local/lib/systemd/journald.conf.d/99-local.conf",
+                            "[Journal]\nStorage=volatile\n"), "journal is not persistent"),
+    "Storage=auto with no /var/log/journal": (
+        lambda r, b: ((r / "etc/systemd/journald.conf.d/95-scoreboard-persistent-journal.conf").write_text(
+                          "[Journal]\nStorage=auto\nSyncIntervalSec=30s\n"),
+                      (r / "var/log/journal").rmdir()), "stays in RAM"),
+    "the main journald.conf turning storage off with no drop-in to fix it": (
+        lambda r, b: ((r / "etc/systemd/journald.conf").write_text("[Journal]\nStorage=none\n"),
+                      (r / "etc/systemd/journald.conf.d/95-scoreboard-persistent-journal.conf").write_text(
+                          "[Journal]\nSyncIntervalSec=30s\n")), "journal is not persistent"),
+    "the sync interval left at journald's five-minute default": (
+        lambda r, b: (r / "etc/systemd/journald.conf.d/95-scoreboard-persistent-journal.conf").write_text(
+            "[Journal]\nStorage=persistent\nSystemMaxUse=50M\n"), "SyncIntervalSec"),
+    "a later drop-in relaxing the sync interval": (
+        lambda r, b: _write(r / "etc/systemd/journald.conf.d/99-slow-sync.conf",
+                            "[Journal]\nSyncIntervalSec=5min\n"), "SyncIntervalSec"),
 }
 
 
@@ -542,6 +560,53 @@ def test_sshd_config_with_multiple_conf_d_files_each_with_the_default_passes(tmp
     result = gate(root, boot)
     assert result.returncode == 0, result.stderr
     assert "image-gate: all checks passed" in result.stdout
+
+
+def test_storage_auto_with_the_journal_directory_present_passes(tmp_path):
+    # Storage=auto means "persistent if /var/log/journal exists", so it is as
+    # good as persistent here and must not be refused.
+    root, boot = clean_image(tmp_path)
+    (root / "etc/systemd/journald.conf.d/95-scoreboard-persistent-journal.conf").write_text(
+        "[Journal]\nStorage=auto\nSyncIntervalSec=30s\n")
+    result = gate(root, boot)
+    assert result.returncode == 0, result.stderr
+
+
+def test_a_vendor_drop_in_shadowed_by_an_etc_file_of_the_same_name_does_not_count(tmp_path):
+    # systemd reads only the highest-priority file of a given name -- it does
+    # not read both -- so an /etc file named 40-rpi-volatile-storage.conf
+    # replaces the vendor one outright. With the vendor's Storage=volatile
+    # gone, the default (auto) plus the directory is persistent, and the gate
+    # must not still be counting the file systemd never read.
+    root, boot = clean_image(tmp_path)
+    (root / "etc/systemd/journald.conf.d/95-scoreboard-persistent-journal.conf").unlink()
+    _write(root / "etc/systemd/journald.conf.d/40-rpi-volatile-storage.conf",
+           "[Journal]\nSyncIntervalSec=30s\n")
+    result = gate(root, boot)
+    assert result.returncode == 0, result.stderr
+
+
+def test_a_vendor_drop_in_disabled_by_a_dev_null_symlink_does_not_count(tmp_path):
+    # Symlinking a drop-in name to /dev/null is the documented way to disable a
+    # vendor drop-in: that name then contributes nothing at all, rather than
+    # falling through to the vendor file it shadows.
+    root, boot = clean_image(tmp_path)
+    (root / "etc/systemd/journald.conf.d/95-scoreboard-persistent-journal.conf").unlink()
+    (root / "etc/systemd/journald.conf.d/40-rpi-volatile-storage.conf").symlink_to("/dev/null")
+    _write(root / "etc/systemd/journald.conf.d/96-scoreboard-sync.conf",
+           "[Journal]\nSyncIntervalSec=30s\n")
+    result = gate(root, boot)
+    assert result.returncode == 0, result.stderr
+
+
+def test_a_relative_mask_symlink_is_still_a_mask(tmp_path):
+    # ../../../dev/null resolves to /dev/null and systemd treats it as a mask,
+    # so the gate must judge the resolved target, not the literal string.
+    root, boot = clean_image(tmp_path)
+    (root / "etc/systemd/system/userconfig.service").unlink()
+    (root / "etc/systemd/system/userconfig.service").symlink_to("../../../dev/null")
+    result = gate(root, boot)
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="running as root can read anything, so an unreadable fixture proves nothing")

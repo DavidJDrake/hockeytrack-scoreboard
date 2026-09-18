@@ -242,11 +242,26 @@ done
 # leaves userconfig.service present, unmasked and unenabled passes that rule,
 # boots perfectly, and is armed for the next thing that enables it on a panel
 # already in the field. The mask is the control; the control has to be visible.
+#
+# A mask is any symlink that RESOLVES to /dev/null, so the target is
+# canonicalized rather than string-compared: ../../../dev/null is as valid a
+# mask as /dev/null and systemd treats them alike. A relative target is
+# resolved inside the image and then made image-absolute again, so a link that
+# climbs out of the rootfs cannot pass by landing on the host's /dev/null.
+# (/dev/null is in fact the one target where the image/host distinction is
+# moot -- it is the same path either way and nothing is read through it -- but
+# resolving inside the root is what makes that a fact rather than an accident.)
 mask="$ROOT/etc/systemd/system/userconfig.service"
 [ -L "$mask" ] || fail "the first-boot wizard's unit is not masked (/etc/systemd/system/userconfig.service is not a symlink); only a mask stops it being enabled later"
 mask_target="$(readlink "$mask")"
-[ "$mask_target" = "/dev/null" ] \
-  || fail "the first-boot wizard's unit is not masked (/etc/systemd/system/userconfig.service points at $(sanitize_for_log "$mask_target"), not /dev/null)"
+case "$mask_target" in
+  /*) mask_resolved="$mask_target" ;;
+  *)  mask_resolved="$(readlink -m -- "$ROOT/etc/systemd/system/$mask_target")"
+      root_resolved="$(readlink -m -- "$ROOT")"
+      mask_resolved="${mask_resolved#"$root_resolved"}" ;;
+esac
+[ "$mask_resolved" = "/dev/null" ] \
+  || fail "the first-boot wizard's unit is not masked (/etc/systemd/system/userconfig.service resolves to $(sanitize_for_log "$mask_resolved"), not /dev/null)"
 
 # An autologin would hand a shell to whoever walks up to the panel, without
 # the password that every account in the image deliberately lacks.
@@ -312,49 +327,108 @@ ok "the first-boot user-creation wizard is masked and not armed, and no console 
 # and pulling the card yields nothing at all. The card is the last diagnosis
 # surface an appliance has, so this asserts it works.
 #
-# It asserts the EFFECTIVE setting, not the presence of our file. journald
-# sorts every drop-in from /etc, /run, /usr/local/lib and /usr/lib by filename
-# across all of those directories at once, and the lexicographically last file
-# to set an option wins -- so a later-sorting drop-in could put volatile back,
-# and a rule that only looked for our own file would wave that through. Ties
-# on the same filename go to /etc, which is how a drop-in gets masked.
-journal_conf="$ROOT/etc/systemd/journald.conf"
+# It asserts the EFFECTIVE settings, not the presence of our file, and it
+# models what journald actually does rather than a simplification of it:
+#
+#  - The main file is read first and drop-ins override it, so the base value is
+#    read rather than assumed. Only the highest-priority copy of journald.conf
+#    is read (/etc over /run over /usr/local/lib over /usr/lib).
+#  - All four drop-in directories are read, not just /etc and /usr/lib.
+#  - Of several drop-ins sharing a NAME, systemd reads only the one from the
+#    highest-priority directory -- it does not read both -- which is how a
+#    vendor drop-in gets shadowed. A drop-in symlinked to /dev/null is the
+#    documented way to disable one: that name then contributes nothing, rather
+#    than falling through to the vendor copy it is shadowing.
+#  - The chosen files are then sorted by filename, and the last one to set an
+#    option wins. So a later-sorting drop-in could put Storage=volatile back,
+#    and a rule that only looked for our own file would wave that through.
+#
+# Storage=auto means "persistent if /var/log/journal exists", so it passes when
+# the directory is there; volatile and none never do. The directory is asserted
+# separately, which is what makes auto safe to accept.
+journal_conf=""
 journal_dirs=()
-for dir in "$ROOT/usr/lib/systemd/journald.conf.d" "$ROOT/etc/systemd/journald.conf.d"; do
+for base in etc run usr/local/lib usr/lib; do
+  candidate="$ROOT/$base/systemd/journald.conf"
+  if [ -z "$journal_conf" ] && [ -f "$candidate" ]; then
+    journal_conf="$candidate"
+  fi
+  dir="$ROOT/$base/systemd/journald.conf.d"
   reject_symlink "$dir" "${dir#"$ROOT"}"
   if [ -d "$dir" ]; then
     journal_dirs+=("$dir")
   fi
 done
-read_storage() {
-  # Echoes the last Storage= value in $1, or nothing if it sets none.
-  if grep_line_or_fail -iE '^[[:space:]]*Storage[[:space:]]*=' "$1"; then
-    printf '%s\n' "$LINE" | tail -n 1 \
-      | sed -E 's/^[[:space:]]*[Ss][Tt][Oo][Rr][Aa][Gg][Ee][[:space:]]*=[[:space:]]*//; s/[[:space:]]+$//'
+
+# Reads one setting out of one journald config file into SETTING_VALUE, empty
+# when the file does not set it. Called directly, never through a command
+# substitution: grep_line_or_fail can fail() inside, and inside $(...) that
+# would kill a subshell and let the gate carry on.
+SETTING_VALUE=""
+read_setting() {
+  local file="$1" name="$2"
+  SETTING_VALUE=""
+  if grep_line_or_fail -iE "^[[:space:]]*${name}[[:space:]]*=" "$file"; then
+    SETTING_VALUE="$(printf '%s\n' "$LINE" | tail -n 1 | sed -E "s/^[[:space:]]*[^=]*=[[:space:]]*//; s/[[:space:]]+\$//")"
   fi
 }
+
 journal_storage=""
-if [ -f "$journal_conf" ]; then
-  journal_storage="$(read_storage "$journal_conf")"
+journal_sync=""
+if [ -n "$journal_conf" ]; then
+  read_setting "$journal_conf" Storage
+  journal_storage="$SETTING_VALUE"
+  read_setting "$journal_conf" SyncIntervalSec
+  journal_sync="$SETTING_VALUE"
 fi
 if [ "${#journal_dirs[@]}" -gt 0 ]; then
-  run_find "${journal_dirs[@]}" -maxdepth 1 -xtype f -name '*.conf' -print
-  sorted="$(printf '%s\n' "$FOUND" \
-    | awk -v etc="$ROOT/etc/systemd/journald.conf.d/" \
-        '$0 != "" { name = $0; sub(/.*\//, "", name); print name "\t" (index($0, etc) == 1 ? 1 : 0) "\t" $0 }' \
-    | LC_ALL=C sort -t "$(printf '\t')" -k1,1 -k2,2n | cut -f3-)"
+  # rank orders the directories by priority so that, for one filename, the
+  # highest-priority copy is the one kept; then the kept files are ordered by
+  # filename, which is the order systemd applies them in.
+  run_find "${journal_dirs[@]}" -maxdepth 1 \( -type f -o -type l \) -name '*.conf' -print
+  chosen="$(printf '%s\n' "$FOUND" | awk -v root="$ROOT" '
+      $0 == "" { next }
+      { rel = substr($0, length(root) + 1)
+        rank = 4
+        if (rel ~ /^\/etc\//) rank = 1
+        else if (rel ~ /^\/run\//) rank = 2
+        else if (rel ~ /^\/usr\/local\/lib\//) rank = 3
+        name = $0; sub(/.*\//, "", name)
+        if (!(name in best) || rank < bestrank[name]) { best[name] = $0; bestrank[name] = rank }
+      }
+      END { for (n in best) print n "\t" best[n] }' \
+    | LC_ALL=C sort -t "$(printf '\t')" -k1,1 | cut -f2-)"
   while IFS= read -r conf; do
     [ -n "$conf" ] || continue
-    value="$(read_storage "$conf")"
-    [ -z "$value" ] || journal_storage="$value"
-  done <<<"$sorted"
+    # A drop-in symlinked to /dev/null disables that name outright: it
+    # contributes nothing, and because it already shadowed any lower-priority
+    # copy of the same name, nothing else contributes under that name either.
+    if [ -L "$conf" ] && [ "$(readlink -m -- "$conf")" = "/dev/null" ]; then
+      continue
+    fi
+    [ -f "$conf" ] || continue
+    read_setting "$conf" Storage
+    [ -z "$SETTING_VALUE" ] || journal_storage="$SETTING_VALUE"
+    read_setting "$conf" SyncIntervalSec
+    [ -z "$SETTING_VALUE" ] || journal_sync="$SETTING_VALUE"
+  done <<<"$chosen"
 fi
-[ "$journal_storage" = "persistent" ] \
-  || fail "the journal is not persistent (journald Storage resolves to '$(sanitize_for_log "${journal_storage:-unset}")'); a panel that fails to start would leave nothing on the card to read"
 reject_symlink "$ROOT/var/log/journal" "/var/log/journal"
+case "$journal_storage" in
+  persistent) ;;
+  auto | "") [ -d "$ROOT/var/log/journal" ] \
+      || fail "the journal is not persistent (journald Storage resolves to '$(sanitize_for_log "${journal_storage:-auto, the default}")' and /var/log/journal does not exist, so it stays in RAM)" ;;
+  *) fail "the journal is not persistent (journald Storage resolves to '$(sanitize_for_log "$journal_storage")'); a panel that fails to start would leave nothing on the card to read" ;;
+esac
 [ -d "$ROOT/var/log/journal" ] \
   || fail "/var/log/journal is missing, so the journal has nowhere on the card to persist to"
-ok "the journal is persistent and /var/log/journal exists"
+# journald's default SyncIntervalSec is 5 minutes for ERR and below, and the
+# scoreboard's startup failures are logged at ERR. Someone watching a black
+# screen pulls the power long before five minutes, which would lose exactly the
+# line this whole feature exists to capture.
+[ "$journal_sync" = "30s" ] \
+  || fail "journald SyncIntervalSec resolves to '$(sanitize_for_log "${journal_sync:-unset, so 5min}")', not 30s; a failure logged at ERR could be lost when the power is pulled"
+ok "the journal is persistent, capped and synced every 30s, and /var/log/journal exists"
 
 # Only the real SSH unit names count -- Raspberry Pi OS ships sshswitch.service
 # enabled in multi-user.target.wants on every image; it only starts sshd when
