@@ -166,6 +166,37 @@ def test_the_stage_removes_the_remote_access_agent():
     assert os.access(REMOTE_ACCESS_RUN, os.X_OK), f"{REMOTE_ACCESS_RUN} must be executable or pi-gen skips it"
 
 
+JOURNAL_RUN = PIGEN / "stage-scoreboard" / "04-persistent-journal" / "00-run.sh"
+VOLATILE_DROPIN = "40-rpi-volatile-storage.conf"
+
+
+def test_the_stage_keeps_the_journal_on_the_card():
+    # Once the panel owns tty1 there is no console to read, so a startup
+    # failure shows a black screen and nothing else. raspberrypi-sys-mods ships
+    # /usr/lib/systemd/journald.conf.d/40-rpi-volatile-storage.conf with
+    # Storage=volatile, which would leave nothing on the card either.
+    run = JOURNAL_RUN.read_text()
+    assert "Storage=persistent" in run
+    assert "SystemMaxUse=" in run
+    assert "/var/log/journal" in run
+    # pi-gen skips a sub-stage script that is not executable, silently.
+    assert os.access(JOURNAL_RUN, os.X_OK), f"{JOURNAL_RUN} must be executable or pi-gen skips it"
+
+
+def test_the_journal_drop_in_sorts_after_the_volatile_one():
+    # journald sorts drop-ins by filename across /etc, /run and /usr/lib at
+    # once, and the lexicographically last file to set an option wins -- so
+    # living under /etc is not enough on its own.
+    # Only the files the stage writes into the rootfs; the volatile drop-in is
+    # named in the comments too, and it is the thing being beaten, not a file
+    # this stage creates.
+    names = re.findall(r"\$\{ROOTFS_DIR\}/etc/systemd/journald\.conf\.d/([A-Za-z0-9._-]+\.conf)",
+                       JOURNAL_RUN.read_text())
+    assert names, "the stage no longer writes a journald drop-in"
+    for name in names:
+        assert name > VOLATILE_DROPIN, f"{name} does not sort after {VOLATILE_DROPIN}, so volatile would win"
+
+
 def test_the_stage_documents_its_tmpfs_assumption():
     run = (PIGEN / "stage-scoreboard" / "01-install" / "00-run.sh").read_text()
     assert "tmpfs" in run
