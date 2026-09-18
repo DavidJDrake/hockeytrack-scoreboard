@@ -38,6 +38,21 @@ def clean_image(tmp_path: Path) -> tuple[Path, Path]:
     # checked separately, so it must not itself trip the SSH-enabled check.
     (units / "sshswitch.service").write_text("[Unit]\n")
     (wants / "sshswitch.service").symlink_to("/etc/systemd/system/sshswitch.service")
+    # userconf-pi is a Recommends of raspberrypi-sys-mods, so every Raspberry
+    # Pi OS image carries its unit file whether the wizard is armed or not,
+    # and the scoreboard stage's fix is the mask symlink beside it. Neither is
+    # an armed wizard -- only an enablement symlink is -- so both belong in
+    # the clean fixture.
+    lib_units = root / "usr" / "lib" / "systemd" / "system"
+    lib_units.mkdir(parents=True)
+    (lib_units / "userconfig.service").write_text(
+        "[Unit]\nDescription=User configuration dialog\n[Install]\nWantedBy=multi-user.target\n")
+    (units / "userconfig.service").symlink_to("/dev/null")
+    # A getty drop-in is not itself a finding: noclear.conf is the common one
+    # and it logs nobody in. Only an autologin drop-in may fail the gate.
+    (units / "getty@tty1.service.d").mkdir()
+    (units / "getty@tty1.service.d" / "noclear.conf").write_text(
+        "[Service]\nExecStart=\nExecStart=-/sbin/agetty --noclear %I $TERM\nTTYVTDisallocate=no\n")
     rules = root / "etc" / "polkit-1" / "rules.d"
     rules.mkdir(parents=True)
     shutil.copy(REPO / "device" / "polkit" / "10-scoreboard-network.rules", rules)
@@ -310,6 +325,34 @@ BREAKS = {
     "AuthorizedKeysCommand set to a plain command": (
         lambda r, b: _write(r / "etc/ssh/sshd_config", "AuthorizedKeysCommand /usr/bin/whatever\n"),
         "AuthorizedKeysCommand"),
+    # Round 4: v0.1.0 booted to the first-boot user-creation wizard on real
+    # hardware (docs/hardware-checks.md, H5) and the gate saw nothing wrong
+    # with it.
+    "the first-boot user-creation wizard enabled": (
+        lambda r, b: (r / "etc/systemd/system/multi-user.target.wants/userconfig.service").symlink_to(
+            "/usr/lib/systemd/system/userconfig.service"), "wizard"),
+    "the first-boot user-creation wizard enabled through a requires directory": (
+        lambda r, b: _write(r / "etc/systemd/system/multi-user.target.requires/userconfig.service", ""), "wizard"),
+    "the first-boot user-creation wizard enabled through an upholds directory": (
+        lambda r, b: _write(r / "etc/systemd/system/graphical.target.upholds/userconfig.service", ""), "wizard"),
+    "the first-boot user-creation wizard enabled from /usr/lib": (
+        lambda r, b: _write(r / "usr/lib/systemd/system/multi-user.target.wants/userconfig.service", ""), "wizard"),
+    "a console autologin drop-in": (
+        lambda r, b: _write(r / "etc/systemd/system/getty@tty1.service.d/autologin.conf",
+                            "[Service]\nExecStart=\n"
+                            "ExecStart=-/sbin/agetty --autologin pi --noclear %I $TERM\n"), "autologin"),
+    "a serial console autologin drop-in": (
+        lambda r, b: _write(r / "etc/systemd/system/serial-getty@ttyAMA0.service.d/autologin.conf",
+                            "[Service]\nExecStart=\n"
+                            "ExecStart=-/sbin/agetty --autologin root %I $TERM\n"), "autologin"),
+    "a console autologin drop-in using agetty's short flag": (
+        lambda r, b: _write(r / "etc/systemd/system/getty@tty1.service.d/50-auto.conf",
+                            "[Service]\nExecStart=\n"
+                            "ExecStart=-/sbin/agetty -a pi --noclear %I $TERM\n"), "autologin"),
+    "a console autologin drop-in shipped under /usr/lib": (
+        lambda r, b: _write(r / "usr/lib/systemd/system/getty@tty1.service.d/autologin.conf",
+                            "[Service]\nExecStart=\n"
+                            "ExecStart=-/sbin/agetty --autologin pi %I $TERM\n"), "autologin"),
 }
 
 

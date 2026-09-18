@@ -210,6 +210,55 @@ while IFS=: read -r name pass _; do
 done <"$ROOT/etc/passwd"
 ok "accounts are locked"
 
+# Locked accounts are only half of it: Raspberry Pi OS creates the first
+# account at first boot instead, and an account created there would be neither
+# locked nor in the image this gate just read. pi-gen's
+# export-image/01-user-rename arms that with `rename-user -f -s`, which
+# enables userconf-pi's userconfig.service; the unit then opens a whiptail
+# dialog on tty8 asking for a new username and password, and will not let the
+# boot finish until someone answers. A panel has no keyboard, so an image that
+# ships it armed is a brick -- v0.1.0 was exactly that
+# (docs/hardware-checks.md, H5). The scoreboard stage masks the unit, which
+# makes that `systemctl enable` fail and create nothing, and this is the check
+# that proves the mask still holds.
+#
+# Only an enablement symlink counts. Every Raspberry Pi OS image carries the
+# unit file itself (userconf-pi is a Recommends of raspberrypi-sys-mods), and
+# the mask -- /etc/systemd/system/userconfig.service pointing at /dev/null --
+# is the fix rather than the fault, so neither of those fails the gate. Both
+# unit trees are scanned: a package can ship a .wants symlink under /usr/lib
+# just as an enable writes one under /etc.
+for units in "$ROOT/etc/systemd/system" "$ROOT/usr/lib/systemd/system"; do
+  reject_symlink "$units" "${units#"$ROOT"}"
+  [ -d "$units" ] || continue
+  run_find "$units" \( -path '*.wants/*' -o -path '*.requires/*' -o -path '*.upholds/*' \) \
+    -name 'userconfig.service' -print -quit
+  [ -z "$FOUND" ] || fail "the first-boot user-creation wizard is enabled (${FOUND#"$ROOT"}); nobody can answer it on a panel with no keyboard"
+done
+
+# An autologin drop-in would hand a shell to whoever walks up to the panel,
+# without the password that every account in the image deliberately lacks.
+# raspi-config writes one whenever a boot behaviour of B2 or B4 is chosen, and
+# rename-user's undo path goes through exactly that code. A getty drop-in is
+# not suspicious by itself -- noclear.conf is a common and harmless one -- so
+# only agetty's autologin spellings fail: "--autologin <user>", which
+# raspi-config writes, and the "-a <user>" short form agetty also accepts,
+# which is only matched on a line that runs agetty so that a stray "-a" in
+# some other directive cannot trip it. A plain login prompt on tty1 is fine;
+# a session nobody had to log into is not.
+for units in "$ROOT/etc/systemd/system" "$ROOT/usr/lib/systemd/system"; do
+  [ -d "$units" ] || continue
+  run_find "$units" -type f \
+    \( -path '*/getty@*.service.d/*' -o -path '*/serial-getty@*.service.d/*' \) -print
+  while IFS= read -r dropin; do
+    [ -n "$dropin" ] || continue
+    if grep_or_fail -qE -e '--autologin' -e 'agetty.*[[:space:]]-a[[:space:]]' "$dropin"; then
+      fail "a console autologin drop-in is present (${dropin#"$ROOT"}); the panel's console must not log anyone in"
+    fi
+  done <<<"$FOUND"
+done
+ok "the first-boot user-creation wizard is not armed, and no console autologin"
+
 # Only the real SSH unit names count -- Raspberry Pi OS ships sshswitch.service
 # enabled in multi-user.target.wants on every image; it only starts sshd when
 # a marker file is on the boot partition, which is checked separately below.
