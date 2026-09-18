@@ -128,8 +128,19 @@ which v0.1.1 makes persistent (`Storage=persistent`, capped at 50 MB, spec
 §9.2): pull the card, mount its **second** partition on another machine, and
 read `var/log/journal/`. `journalctl -D <mountpoint>/var/log/journal -b -1` is
 the useful invocation. An on-screen failure painter is a follow-up, recorded in
-spec §9.12. Re-run this check on v0.1.1, and check the journal survives a power
-cut while you are there.
+spec §9.12.
+
+Re-run this check on v0.1.1, and while you are there **check the journal
+survives a power cut** — with a number to compare against. The drop-in sets
+`SyncIntervalSec=30s`, against journald's 5-minute default, because the
+scoreboard's failure lines are logged at ERR and journald syncs ERR and below
+only on that interval. So a line written more than ~30 s before the power is
+pulled must be on the card afterwards; one written in the last few seconds may
+not be. Test it: let the panel run, note the last line and its timestamp in
+`journalctl -f`, wait a minute, pull the power, then read the card — that line
+must be there. If lines from *minutes* earlier are missing, the drop-in did not
+take effect; on a panel that does boot, check
+`systemd-analyze cat-config systemd/journald.conf` and `journalctl --disk-usage`.
 
 ## H6 — CMA on the Zero 2 W
 
