@@ -486,6 +486,36 @@ The scoreboard Terraform was applied from a saved plan: 26 added, 7 changed, 0 d
 - **The monitor** was invoked once by hand so that `scoreboard-imagecheck-not-running` had a datapoint: no error, "image mirror agrees with its release" (no release and no manifest), 290 ms of a 300 s timeout, 45 MB of 1024 MB.
 - **GitHub settings**, all read back after writing: the three repository variables; the `image-release` environment with the owner as required reviewer and exactly one deployment policy, `{"name":"v*","type":"tag"}`; the active `release tags` ruleset (id 23629753) restricting creation, update, deletion and non-fast-forward on `refs/tags/v*` to the admin role; immutable releases enabled.
 
+### 9.9c Verified, 2026-09-18: the first release
+
+`v0.1.0`, built from `041f51d`, is published. What was checked, and what it cost:
+
+**Three builds to get there, each finding something real.**
+
+1. The first failed in our own installer: `tools/pi-setup.sh` defined a shell function `install()`, which shadowed coreutils `install` inside `install_appliance()`. Appliance mode had never completed — the checkout path was the only one ever exercised. Fixed by renaming the function, with tests that run the shadowed call shapes.
+2. The second reached the gate, which rejected `/usr/share/man/man5/authorized_keys.5.gz` — OpenSSH's own manual page. The rule searched the whole filesystem by name. Narrowed to `.ssh` directories and `/etc/ssh`, and paired with a check that `AuthorizedKeysFile` and `AuthorizedKeysCommand` do not point outside what is scanned, judged token by token rather than by spelling.
+3. The third passed every rule. Several claims this design had only made on paper were confirmed against a real image for the first time: cloud-init absent, nothing installed from PyPI and no pip cache, the virtualenv resolving pygame to the distribution's build, exactly one certificate, no private keys, both units enabled, and the polkit rule byte-identical.
+
+**The release itself then failed at AWS,** after the GitHub Release was already published: the role trusted `repo:DavidJDrake/hockeytrack-scoreboard:environment:image-release`, but this repository has immutable subject claims enabled, so the token carries `repo:DavidJDrake@95321084/hockeytrack-scoreboard@1359574103:environment:image-release`. The trust now names the immutable form, which is the stronger one: a rename, or a same-named replacement repository, produces a subject this role does not trust. Re-running the publish job took the re-run path — it accepted the existing release only after checking it was published, complete, and matched the build's checksum — and then mirrored.
+
+**Verification, run as a stranger would:**
+
+- `sha256sum -c` on the downloaded release: OK.
+- `gh attestation verify … --signer-workflow …/image.yml --source-ref refs/tags/v0.1.0`: passes. Naming `ci.yml` instead fails, so the constraint is load-bearing rather than decorative.
+- The mirrored image hashes to the release's checksum, `52329e01…13aa`, and the mirrored `.sha256` matches.
+- `latest.json` carries the six expected fields and points at the release.
+- The monitor, invoked by hand: "image mirror agrees with its release". Hashing 653 MB took 13.7 s of a 300 s timeout and 45 MB of 1024 MB, which settles the sizing question the review raised.
+
+**Tamper test.** The `funandgames` IAM user, which is not the publisher role, overwrote the mirrored image with nine bytes.
+
+- The monitor reported `disagrees with its release problems=2` — both the size and the hash.
+- Section 15 paged on the `PutObject`, and again on the `DeleteObject` that restored the original version.
+- A third page in the same window was this design's own change: `UpdateAssumeRolePolicy` on the publisher role, from the Terraform apply above. That is the rule doing its job.
+- Every write by the publisher role in the same window stayed silent: eight `UploadPart` calls, the checksum and manifest `PutObject`s, and `CreateInvalidation`. Failed invocations: 0. Dead-letter queue: empty.
+- Restoring deleted the tampered version, so the original is current again and the monitor agrees.
+
+**Known, unfixed:** the monitor's log carries `SDK WARN Skipped validation of multipart checksum` — S3 stores a composite checksum for a multipart upload, which the SDK will not validate whole. It weakens nothing here, because the monitor hashes the bytes itself and compares against GitHub's published checksum, but the warning should be silenced so the log stays readable.
+
 ### 9.10 Order of work and proof
 
 1. **Code:** the gate and its fixtures, the pi-gen recipe, the workflow, `images.tf`, the monitor, and the download page, each test-first where it can be.
