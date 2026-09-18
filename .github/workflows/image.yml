@@ -1,0 +1,394 @@
+name: Image
+
+# Builds the scoreboard SD card image. A tag builds and gates it, attests it in
+# a separate job that runs no build code, then waits for approval of the
+# image-release environment before anything is published. A manual run builds
+# and gates only. See
+# docs/superpowers/specs/2026-09-12-device-image-design.md, section 9.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    # Read-only on purpose. pi-gen runs a --privileged container for about two
+    # hours, executing apt maintainer scripts, a floating Docker base image and
+    # third-party code; a privileged container can read the runner's
+    # ACTIONS_ID_TOKEN_REQUEST_* variables. With no id-token or attestations
+    # permission here, there is no token for it to steal: the attest job signs.
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      publish: ${{ steps.version.outputs.publish }}
+      sha256: ${{ steps.checksum.outputs.sha256 }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Decide the version
+        id: version
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          RUN: ${{ github.run_number }}
+        run: |
+          # A workflow_dispatch run against a tag ref sets ref_type=tag and
+          # ref_name=<tag>, same as a real tag push, so the event is checked
+          # too. Only a push of the tag may publish.
+          if [ "$EVENT" = push ] && [ "$REF_TYPE" = tag ] && [[ "$REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "version=$REF_NAME" >>"$GITHUB_OUTPUT"
+            echo "publish=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "version=v0.0.0-dev.$RUN" >>"$GITHUB_OUTPUT"
+            echo "publish=false" >>"$GITHUB_OUTPUT"
+          fi
+
+      # pi-gen needs about 20 GB; the runner image ships toolchains this build
+      # never uses. Fail here rather than two hours into the build.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune --all --force
+          free_gb="$(df --output=avail -BG / | tail -n 1 | tr -dc 0-9)"
+          echo "free: ${free_gb} GB"
+          [ "$free_gb" -ge 25 ] || { echo "need 25 GB free, have ${free_gb} GB" >&2; exit 1; }
+
+      - name: Build the image
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: tools/pi-gen/build.sh "$VERSION" "$RUNNER_TEMP/pi-gen"
+
+      - name: Gate the image
+        run: |
+          set -euo pipefail
+          img="$(ls "$RUNNER_TEMP"/pi-gen/deploy/*-scoreboard.img.xz)"
+          xz -dc "$img" >"$RUNNER_TEMP/scoreboard.img"
+          mkdir -p "$RUNNER_TEMP/rootfs" "$RUNNER_TEMP/bootfs"
+          loop="$(sudo losetup --find --show --partscan --read-only "$RUNNER_TEMP/scoreboard.img")"
+          # Belt and suspenders: if the gate (or anything after it) fails,
+          # still unmount and detach the loop device instead of leaking it
+          # into the next step or the runner teardown.
+          cleanup() {
+            sudo umount "$RUNNER_TEMP/rootfs" "$RUNNER_TEMP/bootfs" 2>/dev/null || true
+            sudo losetup -d "$loop" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          sudo udevadm settle
+          # noload: a read-only mount of an ext4 that wants journal recovery
+          # would otherwise refuse to mount (or replay the journal).
+          sudo mount -o ro,noload "${loop}p2" "$RUNNER_TEMP/rootfs"
+          sudo mount -o ro "${loop}p1" "$RUNNER_TEMP/bootfs"
+          sudo tools/image-gate.sh "$RUNNER_TEMP/rootfs" "$RUNNER_TEMP/bootfs" "$GITHUB_WORKSPACE"
+          rm "$RUNNER_TEMP/scoreboard.img"
+
+      - name: Name and checksum
+        id: checksum
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          mkdir -p out
+          mv "$RUNNER_TEMP"/pi-gen/deploy/*-scoreboard.img.xz "out/scoreboard-$VERSION.img.xz"
+          (cd out && sha256sum "scoreboard-$VERSION.img.xz" >"scoreboard-$VERSION.img.xz.sha256")
+          cat "out/scoreboard-$VERSION.img.xz.sha256"
+          echo "sha256=$(cut -d' ' -f1 "out/scoreboard-$VERSION.img.xz.sha256")" >>"$GITHUB_OUTPUT"
+
+      - name: Keep the image for the publish job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: image
+          path: out/
+          if-no-files-found: error
+          # An image-release approval can wait up to 30 days.
+          retention-days: 30
+          compression-level: 0
+
+  attest:
+    name: Attest build provenance
+    needs: build
+    # Only an image that will be offered for publishing is attested, and only
+    # here: this job checks out nothing and runs no build code, so the token
+    # that can mint an attestation under this workflow's identity never shares
+    # a runner with pi-gen.
+    if: needs.build.outputs.publish == 'true' && github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+      EXPECTED_SHA256: ${{ needs.build.outputs.sha256 }}
+    steps:
+      - name: Fetch the gated image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: image
+          path: out
+
+      - name: Check it is the image the build job gated
+        run: |
+          set -euo pipefail
+          # The build job's output travels outside the artifact, so a swapped
+          # artifact (image and .sha256 together) cannot pass this.
+          actual="$(sha256sum "out/scoreboard-$VERSION.img.xz" | cut -d' ' -f1)"
+          [ "$actual" = "$EXPECTED_SHA256" ] || {
+            echo "downloaded image sha256 ($actual) does not match what the build job gated ($EXPECTED_SHA256)" >&2
+            exit 1
+          }
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: out/scoreboard-${{ needs.build.outputs.version }}.img.xz
+
+  publish:
+    name: Publish
+    needs: [build, attest]
+    # A workflow_dispatch run against a tag ref sets outputs.publish=true
+    # from the build job too; require the triggering event to have been an
+    # actual tag push, not just a build that looks like one.
+    if: needs.build.outputs.publish == 'true' && github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    environment: image-release
+    # Repo-wide, not per-ref, so two publish runs can never interleave
+    # their S3/CloudFront writes. This alone does not decide which
+    # version should win when releases are approved out of order — the
+    # "Mirror to the image CDN" step below handles that by comparing
+    # versions before it ever overwrites latest.json. A group holds one
+    # running and one pending job, so a third publish queuing cancels the
+    # pending one: that run ends cancelled, never half-published, and can be
+    # re-run while its artifact lives (30 days).
+    concurrency:
+      group: image-publish
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      id-token: write
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+      EXPECTED_SHA256: ${{ needs.build.outputs.sha256 }}
+    steps:
+      - name: Fetch the gated image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: image
+          path: out
+
+      - name: Re-check the checksum
+        run: |
+          set -euo pipefail
+          cd out
+          sha256sum -c "scoreboard-$VERSION.img.xz.sha256"
+          # The .sha256 file travelled in the same artifact as the image, so
+          # matching it only proves the pair wasn't corrupted in transit.
+          # Compare against the value the build job emitted as a job output,
+          # which is independent of the artifact bundle.
+          actual="$(sha256sum "scoreboard-$VERSION.img.xz" | cut -d' ' -f1)"
+          [ "$actual" = "$EXPECTED_SHA256" ] || {
+            echo "downloaded image sha256 ($actual) does not match what the build job attested ($EXPECTED_SHA256)" >&2
+            exit 1
+          }
+
+      - name: Verify the tag has not moved
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          obj_type="$(gh api "repos/$GH_REPO/git/ref/tags/$VERSION" --jq .object.type)"
+          obj_sha="$(gh api "repos/$GH_REPO/git/ref/tags/$VERSION" --jq .object.sha)"
+          if [ "$obj_type" = tag ]; then
+            # An annotated tag object points at the commit; dereference it.
+            resolved="$(gh api "repos/$GH_REPO/git/tags/$obj_sha" --jq .object.sha)"
+          else
+            resolved="$obj_sha"
+          fi
+          [ "$resolved" = "$GITHUB_SHA" ] || {
+            echo "tag $VERSION now points at $resolved, not the commit this run built ($GITHUB_SHA)" >&2
+            exit 1
+          }
+
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          file="scoreboard-$VERSION.img.xz"
+          work="$(mktemp -d "$RUNNER_TEMP/release.XXXXXX")"
+          trap 'rm -rf "$work"' EXIT
+          # gh release view finds a draft too (it falls back from the
+          # published-only releases/tags endpoint to a draft lookup), so a
+          # half-finished Release from an earlier attempt is seen here
+          # rather than mistaken for "not found".
+          if gh release view "$VERSION" --json isDraft,assets >"$work/release.json" 2>"$work/err"; then
+            # Re-running after a later step failed: the Release from the
+            # previous attempt is already there. Accept it only if it is
+            # published, complete and this build's image; anything else is
+            # left for a person to fix or delete, never repaired here.
+            refuse() {
+              echo "::error::GitHub Release $VERSION already exists but $1. Fix or delete the Release by hand, then re-run."
+              exit 1
+            }
+            [ "$(jq -r '.isDraft' "$work/release.json")" = false ] || refuse "is a draft (or its draft state is unreadable)"
+            for name in "$file" "$file.sha256"; do
+              state="$(jq -r --arg n "$name" '[.assets[] | select(.name == $n)] | if length == 1 then (.[0].state // "unknown") else "missing" end' "$work/release.json")"
+              [ "$state" = uploaded ] || refuse "asset $name is $state, not uploaded"
+            done
+            local_size="$(stat -c %s "out/$file")"
+            remote_size="$(jq -r --arg n "$file" '.assets[] | select(.name == $n) | .size' "$work/release.json")"
+            [ "$remote_size" = "$local_size" ] || refuse "asset $file is $remote_size bytes, not this build's $local_size"
+            # GitHub reports a digest for newer assets; older ones have null.
+            # Without it, size plus the published .sha256 below must do.
+            digest="$(jq -r --arg n "$file" '.assets[] | select(.name == $n) | .digest // ""' "$work/release.json")"
+            if [ -n "$digest" ]; then
+              [ "$digest" = "sha256:$EXPECTED_SHA256" ] || refuse "asset $file has digest $digest, not this build's sha256:$EXPECTED_SHA256"
+            else
+              echo "::notice::GitHub reports no digest for $file; relying on its size and published checksum"
+            fi
+            gh release download "$VERSION" --pattern "$file.sha256" --output "$work/existing.sha256" --clobber
+            existing_sha="$(cut -d' ' -f1 "$work/existing.sha256")"
+            if [ "$existing_sha" != "$EXPECTED_SHA256" ]; then
+              refuse "its published checksum ($existing_sha) does not match this build ($EXPECTED_SHA256)"
+            fi
+            echo "GitHub Release $VERSION already exists, is published and complete, and matches this build; continuing"
+          elif grep -qi 'release not found' "$work/err"; then
+            # gh release create marks a new Release as GitHub's Latest by
+            # default. An older version approved after a newer one must not
+            # take that from it (the monitor compares latest.json against
+            # GitHub's Latest and would page every run), so read the current
+            # Latest first. Only a 404 means there is none yet.
+            current_latest=""
+            if gh api "repos/$GH_REPO/releases/latest" --jq .tag_name >"$work/latest" 2>"$work/latest.err"; then
+              current_latest="$(cat "$work/latest")"
+              if [[ ! "$current_latest" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                echo "::error::GitHub's latest release has an unreadable or malformed tag; refusing to guess whether $VERSION is newer"
+                exit 1
+              fi
+            elif grep -q 'HTTP 404' "$work/latest.err"; then
+              current_latest=""
+            else
+              cat "$work/latest.err" >&2
+              echo "::error::could not read GitHub's latest release"
+              exit 1
+            fi
+            make_latest=true
+            if [ -n "$current_latest" ]; then
+              IFS=. read -r cur_major cur_minor cur_patch <<<"${current_latest#v}"
+              IFS=. read -r new_major new_minor new_patch <<<"${VERSION#v}"
+              if [ "$cur_major" -gt "$new_major" ] || \
+                 { [ "$cur_major" -eq "$new_major" ] && [ "$cur_minor" -gt "$new_minor" ]; } || \
+                 { [ "$cur_major" -eq "$new_major" ] && [ "$cur_minor" -eq "$new_minor" ] && [ "$cur_patch" -gt "$new_patch" ]; }; then
+                make_latest=false
+                echo "::notice::GitHub's Latest is $current_latest, newer than $VERSION; publishing $VERSION without marking it Latest"
+              fi
+            fi
+            gh release create "$VERSION" \
+              "out/$file" "out/$file.sha256" \
+              --verify-tag \
+              --latest="$make_latest" \
+              --title "Scoreboard image $VERSION" \
+              --notes "Verify before you flash: https://scoreboard.davidjdrake.com/download/"
+          else
+            cat "$work/err" >&2
+            echo "::error::could not check for an existing GitHub Release $VERSION"
+            exit 1
+          fi
+
+      - name: Assume the publisher role
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.IMAGE_PUBLISHER_ROLE_ARN }}
+          role-session-name: image-publish-${{ github.run_id }}
+          aws-region: us-east-1
+
+      - name: Mirror to the image CDN
+        env:
+          BUCKET: ${{ vars.IMAGES_BUCKET }}
+          DISTRIBUTION: ${{ vars.IMAGES_DISTRIBUTION_ID }}
+          RELEASE_URL: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          file="scoreboard-$VERSION.img.xz"
+          sha="$(cut -d' ' -f1 "out/$file.sha256")"
+          size="$(stat -c %s "out/$file")"
+          aws s3 cp "out/$file" "s3://$BUCKET/images/$VERSION/$file" --region us-east-1 \
+            --checksum-algorithm SHA256 --content-type application/x-xz \
+            --cache-control "public, max-age=31536000, immutable"
+          aws s3 cp "out/$file.sha256" "s3://$BUCKET/images/$VERSION/$file.sha256" --region us-east-1 \
+            --content-type text/plain --cache-control "public, max-age=31536000, immutable"
+
+          # The concurrency group above only stops two publish runs from
+          # interleaving their writes; it does not order which version
+          # wins. An older release approved after a newer one has already
+          # published must not roll latest.json backwards, so look up
+          # whatever is there now and compare versions numerically before
+          # ever overwriting it. A plain GetObject/HeadObject can't tell a
+          # missing key from one denied by a scoped policy without
+          # s3:ListBucket (both come back as 403, not 404), so look the
+          # object up with a ListObjectsV2 scoped to this one key instead:
+          # 0 means no release has published yet, 1 means it has and gets
+          # read, anything else (or any error from either call) fails the
+          # job rather than publishing blind.
+          count="$(aws s3api list-objects-v2 --bucket "$BUCKET" --prefix latest.json --max-keys 1 \
+            --query 'length(Contents[?Key==`latest.json`] || `[]`)' --output text --region us-east-1)"
+          current_version=""
+          case "$count" in
+            0)
+              ;;
+            1)
+              current_json="$(aws s3 cp "s3://$BUCKET/latest.json" - --region us-east-1)"
+              current_version="$(printf '%s' "$current_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("version",""))')"
+              if [[ ! "$current_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                echo "existing latest.json has an unreadable or malformed version; refusing to publish blind" >&2
+                exit 1
+              fi
+              ;;
+            *)
+              echo "unexpected object count for latest.json: $count" >&2
+              exit 1
+              ;;
+          esac
+
+          should_write=yes
+          if [ -n "$current_version" ]; then
+            IFS=. read -r cur_major cur_minor cur_patch <<<"${current_version#v}"
+            IFS=. read -r new_major new_minor new_patch <<<"${VERSION#v}"
+            if [ "$cur_major" -gt "$new_major" ] || \
+               { [ "$cur_major" -eq "$new_major" ] && [ "$cur_minor" -gt "$new_minor" ]; } || \
+               { [ "$cur_major" -eq "$new_major" ] && [ "$cur_minor" -eq "$new_minor" ] && [ "$cur_patch" -gt "$new_patch" ]; }; then
+              should_write=no
+            fi
+          fi
+
+          if [ "$should_write" = yes ]; then
+            python3 - "$VERSION" "$file" "$sha" "$size" "$RELEASE_URL" >latest.json <<'PY'
+          import datetime, json, sys
+          version, file, sha, size, release = sys.argv[1:]
+          released = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+          print(json.dumps({"version": version, "file": file, "sha256": sha, "size": int(size),
+                            "released": released, "release": release}, indent=2))
+          PY
+            aws s3 cp latest.json "s3://$BUCKET/latest.json" --region us-east-1 \
+              --content-type application/json --cache-control "public, max-age=60"
+            aws cloudfront create-invalidation --distribution-id "$DISTRIBUTION" --paths /latest.json
+          else
+            echo "::notice::latest.json already points at $current_version, newer than $VERSION; leaving it in place ($file and the GitHub Release still published)"
+          fi

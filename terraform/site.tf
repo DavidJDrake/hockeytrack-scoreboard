@@ -102,12 +102,14 @@ data "aws_cloudfront_cache_policy" "optimized" {
 # Security headers on every response.
 #
 # The CSP is wider than hockeytrack's only where it has to be. This site signs
-# users in and calls the admin API, so connect-src names exactly two hosts: the
-# API, and the Cognito hosted-UI domain the PKCE token exchange posts to. An
-# earlier version named cognito-idp.<region>.amazonaws.com instead -- the
-# user-pool API, which this site never calls -- and so blocked the one request
-# that turns an authorization code into a token. Both hosts are interpolated
-# from the resources themselves rather than typed in, so the policy cannot
+# users in, calls the admin API, and reads the image mirror's latest.json, so
+# connect-src names exactly three hosts: the API, the Cognito hosted-UI domain
+# the PKCE token exchange posts to, and the image mirror the download page
+# reads latest.json from. An earlier version named
+# cognito-idp.<region>.amazonaws.com instead -- the user-pool API, which this
+# site never calls -- and so blocked the one request that turns an
+# authorization code into a token. All three hosts are interpolated from the
+# resources or locals themselves rather than typed in, so the policy cannot
 # drift away from what it describes.
 #
 # require-trusted-types-for 'script' makes assigning a string to an HTML sink
@@ -152,7 +154,7 @@ resource "aws_cloudfront_response_headers_policy" "site" {
       content_security_policy = join("", [
         "default-src 'self'; script-src 'self'; style-src 'self'; ",
         "img-src 'self' data:; font-src 'self'; ",
-        "connect-src 'self' ${aws_apigatewayv2_api.admin.api_endpoint} https://${aws_cognito_user_pool_domain.admin.domain}; ",
+        "connect-src 'self' ${aws_apigatewayv2_api.admin.api_endpoint} https://${aws_cognito_user_pool_domain.admin.domain} https://${local.images_domain}; ",
         "base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; ",
         "require-trusted-types-for 'script'; trusted-types 'none'",
       ])

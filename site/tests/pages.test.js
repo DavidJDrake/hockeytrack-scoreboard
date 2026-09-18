@@ -39,3 +39,7 @@ test("the privacy page loads nothing from another origin", () => {
     assert.ok(url.startsWith("/") || url.startsWith("data:"), `loads from elsewhere: ${url}`);
   }
 });
+
+test("setting up a panel starts by downloading the image", () => {
+  assert.match(index, /<li><a href="\/download\/">Download the scoreboard image<\/a>/);
+});

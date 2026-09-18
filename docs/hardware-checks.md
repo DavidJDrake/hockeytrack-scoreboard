@@ -69,6 +69,16 @@ take effect on first boot. Fail: no dialog — in which case document
 `/boot/firmware/scoreboard-setup.txt` as the flash-time path in the README and
 say so plainly on the download page.
 
+**Revised 2026-09-16 (spec §9.2, §9.7).** The published image ships no
+cloud-init, and the download page tells people to answer No to OS
+customization; the setup file is the flash-time path. So "the settings take
+effect" is no longer a pass. Record whether the dialog is offered and, on a
+spare card only, what applying it changes (a `firstrun.sh` or a `cmdline.txt`
+edit on the boot partition, and whether SSH, a password, the hostname or Wi-Fi
+took effect). Pass: declining it boots to the "Not registered" screen. Any
+setting that does take effect, above all SSH or a password, is a finding for
+B1 and the gate, not a pass.
+
 ## H5 — image boots
 
 Flash and boot on a Pi 4 and a Zero 2 W. Pass: both reach the "Not registered"
