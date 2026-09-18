@@ -290,17 +290,26 @@ BREAKS = {
         lambda r, b: _write(r / "etc/ssh/authorized_keys2", "ssh-ed25519 AAAA test\n"), "authorized_keys"),
     "a per-user authorized_keys file under /etc/ssh": (
         lambda r, b: _write(r / "etc/ssh/authorized_keys/pi", "ssh-ed25519 AAAA test\n"), "authorized_keys"),
-    "a non-default AuthorizedKeysFile in sshd_config": (
+    # A per-user path under /etc/ssh (like the fixture above) is a token the
+    # narrowed scan already covers, so it must pass, not fail -- these are
+    # tokens the scan does NOT cover: an absolute path elsewhere entirely.
+    "an AuthorizedKeysFile token naming a path outside /etc/ssh": (
         lambda r, b: _write(r / "etc/ssh/sshd_config",
-                             "AuthorizedKeysFile /etc/ssh/authorized_keys.d/%u\n"), "AuthorizedKeysFile"),
+                             "AuthorizedKeysFile /var/lib/ssh-keys/%u\n"), "/var/lib/ssh-keys/%u"),
+    "an AuthorizedKeysFile token naming a path outside /etc/ssh, in sshd_config.d": (
+        lambda r, b: _write(r / "etc/ssh/sshd_config.d/50-custom.conf",
+                             "AuthorizedKeysFile .ssh/authorized_keys /etc/foo/%u\n"), "/etc/foo/%u"),
+    "AuthorizedKeysFile repeated in sshd_config": (
+        lambda r, b: _write(r / "etc/ssh/sshd_config",
+                             "AuthorizedKeysFile .ssh/authorized_keys\n"
+                             "AuthorizedKeysFile .ssh/authorized_keys2\n"), "AuthorizedKeysFile appears"),
     "an AuthorizedKeysCommand in sshd_config": (
         lambda r, b: _write(r / "etc/ssh/sshd_config",
                              "AuthorizedKeysCommand /usr/local/bin/fetch-keys %u\n"
                              "AuthorizedKeysCommandUser nobody\n"), "AuthorizedKeysCommand"),
-    "a non-default AuthorizedKeysFile in sshd_config.d": (
-        lambda r, b: _write(r / "etc/ssh/sshd_config.d/50-custom.conf",
-                             "AuthorizedKeysFile .ssh/authorized_keys /etc/ssh/authorized_keys/%u\n"),
-        "AuthorizedKeysFile"),
+    "AuthorizedKeysCommand set to a plain command": (
+        lambda r, b: _write(r / "etc/ssh/sshd_config", "AuthorizedKeysCommand /usr/bin/whatever\n"),
+        "AuthorizedKeysCommand"),
 }
 
 
@@ -366,6 +375,30 @@ def test_sshd_config_d_with_the_stock_default_passes(tmp_path):
     root, boot = clean_image(tmp_path)
     _write(root / "etc/ssh/sshd_config.d/50-scoreboard.conf",
            "AuthorizedKeysFile .ssh/authorized_keys .ssh/authorized_keys2\n")
+    result = gate(root, boot)
+    assert result.returncode == 0, result.stderr
+    assert "image-gate: all checks passed" in result.stdout
+
+
+def test_sshd_config_with_home_relative_authorized_keys_file_passes(tmp_path):
+    # %h expands to the target user's home directory; a token that reduces to
+    # .ssh/authorized_keys after stripping it is exactly what the plain
+    # .ssh/authorized_keys form already means, so it must pass too.
+    root, boot = clean_image(tmp_path)
+    _write(root / "etc/ssh/sshd_config", "AuthorizedKeysFile %h/.ssh/authorized_keys\n")
+    result = gate(root, boot)
+    assert result.returncode == 0, result.stderr
+    assert "image-gate: all checks passed" in result.stdout
+
+
+def test_sshd_config_with_multiple_conf_d_files_each_with_the_default_passes(tmp_path):
+    # Several sshd_config.d fragments, each spelling only the stock default,
+    # must all pass together -- the per-file repeat check must not confuse
+    # "the same directive lives in two files" with "the same directive
+    # appears twice in one file".
+    root, boot = clean_image(tmp_path)
+    _write(root / "etc/ssh/sshd_config.d/40-first.conf", "AuthorizedKeysFile .ssh/authorized_keys .ssh/authorized_keys2\n")
+    _write(root / "etc/ssh/sshd_config.d/50-second.conf", "AuthorizedKeysFile\t.ssh/authorized_keys\t.ssh/authorized_keys2\n")
     result = gate(root, boot)
     assert result.returncode == 0, result.stderr
     assert "image-gate: all checks passed" in result.stdout

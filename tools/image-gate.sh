@@ -138,18 +138,47 @@ ok "no authorized_keys outside a .ssh directory or /etc/ssh"
 # run an arbitrary program that fetches keys from anywhere at all. Either one
 # would quietly reopen the hole the narrower scan above just closed, so this
 # check exists to keep that scan honest -- it is not itself a secret scan.
+#
+# AuthorizedKeysFile is judged token by token rather than against one exact
+# string: a real sshd_config can write the stock default with tabs, extra
+# spaces, or %h/ in front of it, and none of that changes what sshd actually
+# reads. A token still passes after stripping a leading %h/ or ~/ (both mean
+# the user's own home directory) when what remains starts with .ssh/
+# (covered by the find above, for every user, not just the one the token
+# happens to name) or is itself under /etc/ssh/ (also covered above).
+# Anything else -- an absolute path elsewhere, a bare filename, a
+# %u-expanded path outside /etc/ssh -- names somewhere this gate cannot see
+# into, so it fails, naming the token. sshd itself only honors the first
+# AuthorizedKeysFile it reads, but every occurrence here is judged, and a
+# second one fails on its own even when every token in it is fine: sshd
+# would never reach it, so it can only be leftover configuration nobody
+# meant to leave live, not a working override this gate might miss.
 check_authorized_keys_directive() {
-  local file="$1" raw value
+  local file="$1" raw value token stripped occurrences
   [ -f "$file" ] || return 0
-  if grep_or_fail -iE '^[[:space:]]*AuthorizedKeysCommand[[:space:]]' "$file"; then
-    fail "AuthorizedKeysCommand is set in ${file#"$ROOT"}; it can fetch keys from anywhere, which this gate cannot scan"
+  if grep_line_or_fail -iE '^[[:space:]]*AuthorizedKeysCommand[[:space:]]+' "$file"; then
+    while IFS= read -r raw; do
+      [ -n "$raw" ] || continue
+      value="$(printf '%s\n' "$raw" | sed -E 's/^[[:space:]]*[Aa][Uu][Tt][Hh][Oo][Rr][Ii][Zz][Ee][Dd][Kk][Ee][Yy][Ss][Cc][Oo][Mm][Mm][Aa][Nn][Dd][[:space:]]+//; s/[[:space:]]+$//')"
+      [ "$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')" = "none" ] \
+        || fail "AuthorizedKeysCommand is set to '$(sanitize_for_log "$value")' in ${file#"$ROOT"}; it can fetch keys from anywhere, which this gate cannot scan"
+    done <<<"$LINE"
   fi
   if grep_line_or_fail -iE '^[[:space:]]*AuthorizedKeysFile[[:space:]]+' "$file"; then
+    occurrences="$(awk 'END { print NR }' <<<"$LINE")"
+    [ "$occurrences" -le 1 ] \
+      || fail "AuthorizedKeysFile appears $occurrences times in ${file#"$ROOT"}; sshd only honors the first, so the rest is dead configuration this gate treats as a mistake"
     while IFS= read -r raw; do
       [ -n "$raw" ] || continue
       value="$(printf '%s\n' "$raw" | sed -E 's/^[[:space:]]*[Aa][Uu][Tt][Hh][Oo][Rr][Ii][Zz][Ee][Dd][Kk][Ee][Yy][Ss][Ff][Ii][Ll][Ee][[:space:]]+//; s/[[:space:]]+$//')"
-      [ "$value" = ".ssh/authorized_keys .ssh/authorized_keys2" ] \
-        || fail "AuthorizedKeysFile is set to '$(sanitize_for_log "$value")' in ${file#"$ROOT"}, which this gate does not scan"
+      for token in $value; do
+        stripped="${token#%h/}"
+        stripped="${stripped#\~/}"
+        case "$stripped" in
+          .ssh/* | /etc/ssh/*) ;;
+          *) fail "AuthorizedKeysFile in ${file#"$ROOT"} names '$(sanitize_for_log "$token")', which this gate does not scan" ;;
+        esac
+      done
     done <<<"$LINE"
   fi
 }
