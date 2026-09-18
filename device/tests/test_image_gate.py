@@ -66,6 +66,16 @@ def clean_image(tmp_path: Path) -> tuple[Path, Path]:
     (root / "root").mkdir()
     boot.mkdir()
     (boot / "config.txt").write_text("dtparam=audio=on\n")
+    # The real image ships OpenSSH's own man page for the authorized_keys
+    # file format, plus other documentation -- neither is a credential, and
+    # the run that first met a real rootfs (GitHub Actions run 35298398347)
+    # failed here because the old rule could not tell the two apart.
+    (root / "usr" / "share" / "man" / "man5").mkdir(parents=True)
+    (root / "usr" / "share" / "man" / "man5" / "authorized_keys.5.gz").write_bytes(
+        b"not really gzipped; the gate only looks at the name")
+    (root / "usr" / "share" / "doc" / "openssh-server").mkdir(parents=True)
+    (root / "usr" / "share" / "doc" / "openssh-server" / "authorized_keys.example").write_text(
+        "ssh-ed25519 AAAAexample this is documentation, not a real key\n")
     return root, boot
 
 
@@ -263,6 +273,34 @@ BREAKS = {
         lambda r, b: _write(r / "etc/systemd/system/multi-user.target.requires/ssh.service", ""), "SSH"),
     "SSH enabled through an upholds directory": (
         lambda r, b: _write(r / "etc/systemd/system/multi-user.target.upholds/sshd.socket", ""), "SSH"),
+    # Round 3 fix: the rule above was narrowed to stop matching documentation
+    # (the man page and doc file are now in the clean fixture); these prove
+    # the narrowing did not also stop matching real key locations.
+    "an authorized_keys file under root's .ssh": (
+        lambda r, b: _write(r / "root/.ssh/authorized_keys", "ssh-ed25519 AAAA test\n"), "authorized_keys"),
+    "an authorized_keys2 file under root's .ssh": (
+        lambda r, b: _write(r / "root/.ssh/authorized_keys2", "ssh-ed25519 AAAA test\n"), "authorized_keys"),
+    "an authorized_keys file under a .ssh directory that is neither home nor root": (
+        lambda r, b: _write(r / "srv/app/.ssh/authorized_keys", "ssh-ed25519 AAAA test\n"), "authorized_keys"),
+    "an authorized_keys2 file under a .ssh directory that is neither home nor root": (
+        lambda r, b: _write(r / "srv/app/.ssh/authorized_keys2", "ssh-ed25519 AAAA test\n"), "authorized_keys"),
+    "authorized_keys directly under /etc/ssh": (
+        lambda r, b: _write(r / "etc/ssh/authorized_keys", "ssh-ed25519 AAAA test\n"), "authorized_keys"),
+    "authorized_keys2 directly under /etc/ssh": (
+        lambda r, b: _write(r / "etc/ssh/authorized_keys2", "ssh-ed25519 AAAA test\n"), "authorized_keys"),
+    "a per-user authorized_keys file under /etc/ssh": (
+        lambda r, b: _write(r / "etc/ssh/authorized_keys/pi", "ssh-ed25519 AAAA test\n"), "authorized_keys"),
+    "a non-default AuthorizedKeysFile in sshd_config": (
+        lambda r, b: _write(r / "etc/ssh/sshd_config",
+                             "AuthorizedKeysFile /etc/ssh/authorized_keys.d/%u\n"), "AuthorizedKeysFile"),
+    "an AuthorizedKeysCommand in sshd_config": (
+        lambda r, b: _write(r / "etc/ssh/sshd_config",
+                             "AuthorizedKeysCommand /usr/local/bin/fetch-keys %u\n"
+                             "AuthorizedKeysCommandUser nobody\n"), "AuthorizedKeysCommand"),
+    "a non-default AuthorizedKeysFile in sshd_config.d": (
+        lambda r, b: _write(r / "etc/ssh/sshd_config.d/50-custom.conf",
+                             "AuthorizedKeysFile .ssh/authorized_keys /etc/ssh/authorized_keys/%u\n"),
+        "AuthorizedKeysFile"),
 }
 
 
@@ -299,6 +337,35 @@ def test_a_blank_line_in_passwd_is_skipped_not_flagged(tmp_path):
     # produce a confusing "account ''" failure -- or any failure at all.
     root, boot = clean_image(tmp_path)
     (root / "etc/passwd").write_text((root / "etc/passwd").read_text() + "\n")
+    result = gate(root, boot)
+    assert result.returncode == 0, result.stderr
+    assert "image-gate: all checks passed" in result.stdout
+
+
+def test_sshd_config_with_the_stock_default_authorized_keys_file_passes(tmp_path):
+    # Written out in full, exactly as Debian's own sshd_config sometimes
+    # leaves it (uncommented), this must not trip the hole-closing check.
+    root, boot = clean_image(tmp_path)
+    _write(root / "etc/ssh/sshd_config", "AuthorizedKeysFile\t.ssh/authorized_keys .ssh/authorized_keys2\n")
+    result = gate(root, boot)
+    assert result.returncode == 0, result.stderr
+    assert "image-gate: all checks passed" in result.stdout
+
+
+def test_sshd_config_with_the_default_commented_out_passes(tmp_path):
+    # Debian ships this line commented out more often than not; a comment
+    # is not an override and must not fail the gate.
+    root, boot = clean_image(tmp_path)
+    _write(root / "etc/ssh/sshd_config", "#AuthorizedKeysFile\t.ssh/authorized_keys .ssh/authorized_keys2\n")
+    result = gate(root, boot)
+    assert result.returncode == 0, result.stderr
+    assert "image-gate: all checks passed" in result.stdout
+
+
+def test_sshd_config_d_with_the_stock_default_passes(tmp_path):
+    root, boot = clean_image(tmp_path)
+    _write(root / "etc/ssh/sshd_config.d/50-scoreboard.conf",
+           "AuthorizedKeysFile .ssh/authorized_keys .ssh/authorized_keys2\n")
     result = gate(root, boot)
     assert result.returncode == 0, result.stderr
     assert "image-gate: all checks passed" in result.stdout

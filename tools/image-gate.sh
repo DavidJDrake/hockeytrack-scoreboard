@@ -72,6 +72,24 @@ grep_or_fail() {
   esac
 }
 
+# Same fail-closed contract as grep_or_fail, but the match itself is kept (in
+# $LINE) instead of just its presence -- used below to read what an
+# AuthorizedKeysFile directive was actually set to. Same calling rule: call
+# it directly, never through command substitution.
+LINE=""
+grep_line_or_fail() {
+  local rc
+  set +e
+  LINE="$(grep "$@" 2>&1)"
+  rc=$?
+  set -e
+  case "$rc" in
+    0) return 0 ;;
+    1) LINE=""; return 1 ;;
+    *) fail "scanning failed (grep $*): ${LINE%%$'\n'*}" ;;
+  esac
+}
+
 [ -f "$ROOT/etc/passwd" ] && [ -f "$ROOT/etc/shadow" ] || fail "$ROOT is not a root filesystem (no /etc/passwd or /etc/shadow)"
 [ -d "$BOOT" ] || fail "$BOOT does not exist"
 
@@ -101,10 +119,50 @@ for dir in var/lib/scoreboard opt/scoreboard; do
 done
 ok "no identity or enrollment files"
 
+# sshd(1) reads authorized_keys only from a user's own .ssh directory (root's,
+# a home directory's, or one living anywhere else on the filesystem -- ssh
+# does not care who owns the parent) or from a path under /etc/ssh when
+# AuthorizedKeysFile points there (Debian's own docs suggest a per-user file
+# such as /etc/ssh/authorized_keys/%u for centralized administration).
 # authorized_keys2 is the same secret under a name ssh(1) also honors.
-run_find "$ROOT" -xdev -name 'authorized_keys*' -print -quit
+# Anywhere else, the same filename is just data: this is what let
+# /usr/share/man/man5/authorized_keys.5.gz -- OpenSSH's own man page -- fail
+# a real build (GitHub Actions run 35298398347) even though it holds no key.
+run_find "$ROOT" -xdev \( -path '*/.ssh/authorized_keys*' -o -path "$ROOT/etc/ssh/authorized_keys*" \) -print -quit
 [ -z "$FOUND" ] || fail "authorized_keys present at ${FOUND#"$ROOT"}"
-ok "no authorized_keys"
+ok "no authorized_keys outside a .ssh directory or /etc/ssh"
+
+# The scan just above only looks where sshd reads keys from by default. Both
+# AuthorizedKeysFile and AuthorizedKeysCommand can move that: AuthorizedKeysFile
+# can name a path the scan above does not cover, and AuthorizedKeysCommand can
+# run an arbitrary program that fetches keys from anywhere at all. Either one
+# would quietly reopen the hole the narrower scan above just closed, so this
+# check exists to keep that scan honest -- it is not itself a secret scan.
+check_authorized_keys_directive() {
+  local file="$1" raw value
+  [ -f "$file" ] || return 0
+  if grep_or_fail -iE '^[[:space:]]*AuthorizedKeysCommand[[:space:]]' "$file"; then
+    fail "AuthorizedKeysCommand is set in ${file#"$ROOT"}; it can fetch keys from anywhere, which this gate cannot scan"
+  fi
+  if grep_line_or_fail -iE '^[[:space:]]*AuthorizedKeysFile[[:space:]]+' "$file"; then
+    while IFS= read -r raw; do
+      [ -n "$raw" ] || continue
+      value="$(printf '%s\n' "$raw" | sed -E 's/^[[:space:]]*[Aa][Uu][Tt][Hh][Oo][Rr][Ii][Zz][Ee][Dd][Kk][Ee][Yy][Ss][Ff][Ii][Ll][Ee][[:space:]]+//; s/[[:space:]]+$//')"
+      [ "$value" = ".ssh/authorized_keys .ssh/authorized_keys2" ] \
+        || fail "AuthorizedKeysFile is set to '$(sanitize_for_log "$value")' in ${file#"$ROOT"}, which this gate does not scan"
+    done <<<"$LINE"
+  fi
+}
+check_authorized_keys_directive "$ROOT/etc/ssh/sshd_config"
+reject_symlink "$ROOT/etc/ssh/sshd_config.d" "/etc/ssh/sshd_config.d"
+if [ -d "$ROOT/etc/ssh/sshd_config.d" ]; then
+  run_find "$ROOT/etc/ssh/sshd_config.d" -maxdepth 1 -type f -name '*.conf' -print
+  while IFS= read -r conf; do
+    [ -n "$conf" ] || continue
+    check_authorized_keys_directive "$conf"
+  done <<<"$FOUND"
+fi
+ok "AuthorizedKeysFile and AuthorizedKeysCommand are not overridden"
 
 # Every passwd entry must delegate its password to /etc/shadow (an 'x' in the
 # password field); an empty field there is itself a passwordless login on
