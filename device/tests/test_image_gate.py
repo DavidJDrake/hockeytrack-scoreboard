@@ -38,6 +38,33 @@ def clean_image(tmp_path: Path) -> tuple[Path, Path]:
     # checked separately, so it must not itself trip the SSH-enabled check.
     (units / "sshswitch.service").write_text("[Unit]\n")
     (wants / "sshswitch.service").symlink_to("/etc/systemd/system/sshswitch.service")
+    # userconf-pi is a Recommends of raspberrypi-sys-mods, so every Raspberry
+    # Pi OS image carries its unit file whether the wizard is armed or not,
+    # and the scoreboard stage's fix is the mask symlink beside it. Neither is
+    # an armed wizard -- only an enablement symlink is -- so both belong in
+    # the clean fixture.
+    lib_units = root / "usr" / "lib" / "systemd" / "system"
+    lib_units.mkdir(parents=True)
+    (lib_units / "userconfig.service").write_text(
+        "[Unit]\nDescription=User configuration dialog\n[Install]\nWantedBy=multi-user.target\n")
+    (units / "userconfig.service").symlink_to("/dev/null")
+    # A getty drop-in is not itself a finding: noclear.conf is the common one
+    # and it logs nobody in. Only an autologin drop-in may fail the gate.
+    (units / "getty@tty1.service.d").mkdir()
+    (units / "getty@tty1.service.d" / "noclear.conf").write_text(
+        "[Service]\nExecStart=\nExecStart=-/sbin/agetty --noclear %I $TERM\nTTYVTDisallocate=no\n")
+    # The journal is the only diagnosis surface left once the panel owns tty1.
+    # raspberrypi-sys-mods ships the volatile drop-in on every image, so the
+    # stage's own file has to sort after it to win.
+    lib_journal = root / "usr" / "lib" / "systemd" / "journald.conf.d"
+    lib_journal.mkdir(parents=True)
+    (lib_journal / "40-rpi-volatile-storage.conf").write_text("[Journal]\nStorage=volatile\n")
+    etc_journal = root / "etc" / "systemd" / "journald.conf.d"
+    etc_journal.mkdir(parents=True)
+    (etc_journal / "95-scoreboard-persistent-journal.conf").write_text(
+        "[Journal]\nStorage=persistent\nSystemMaxUse=50M\nSyncIntervalSec=30s\n")
+    (root / "etc" / "systemd" / "journald.conf").write_text("[Journal]\n#Storage=auto\n#Compress=yes\n")
+    (root / "var" / "log" / "journal").mkdir(parents=True)
     rules = root / "etc" / "polkit-1" / "rules.d"
     rules.mkdir(parents=True)
     shutil.copy(REPO / "device" / "polkit" / "10-scoreboard-network.rules", rules)
@@ -310,6 +337,137 @@ BREAKS = {
     "AuthorizedKeysCommand set to a plain command": (
         lambda r, b: _write(r / "etc/ssh/sshd_config", "AuthorizedKeysCommand /usr/bin/whatever\n"),
         "AuthorizedKeysCommand"),
+    # Round 4: v0.1.0 booted to the first-boot user-creation wizard on real
+    # hardware (docs/hardware-checks.md, H5) and the gate saw nothing wrong
+    # with it.
+    "the first-boot user-creation wizard enabled": (
+        lambda r, b: (r / "etc/systemd/system/multi-user.target.wants/userconfig.service").symlink_to(
+            "/usr/lib/systemd/system/userconfig.service"), "wizard"),
+    "the first-boot user-creation wizard enabled through a requires directory": (
+        lambda r, b: _write(r / "etc/systemd/system/multi-user.target.requires/userconfig.service", ""), "wizard"),
+    "the first-boot user-creation wizard enabled through an upholds directory": (
+        lambda r, b: _write(r / "etc/systemd/system/graphical.target.upholds/userconfig.service", ""), "wizard"),
+    "the first-boot user-creation wizard enabled from /usr/lib": (
+        lambda r, b: _write(r / "usr/lib/systemd/system/multi-user.target.wants/userconfig.service", ""), "wizard"),
+    "a console autologin drop-in": (
+        lambda r, b: _write(r / "etc/systemd/system/getty@tty1.service.d/autologin.conf",
+                            "[Service]\nExecStart=\n"
+                            "ExecStart=-/sbin/agetty --autologin pi --noclear %I $TERM\n"), "autologin"),
+    "a serial console autologin drop-in": (
+        lambda r, b: _write(r / "etc/systemd/system/serial-getty@ttyAMA0.service.d/autologin.conf",
+                            "[Service]\nExecStart=\n"
+                            "ExecStart=-/sbin/agetty --autologin root %I $TERM\n"), "autologin"),
+    "a console autologin drop-in using agetty's short flag": (
+        lambda r, b: _write(r / "etc/systemd/system/getty@tty1.service.d/50-auto.conf",
+                            "[Service]\nExecStart=\n"
+                            "ExecStart=-/sbin/agetty -a pi --noclear %I $TERM\n"), "autologin"),
+    "a console autologin drop-in shipped under /usr/lib": (
+        lambda r, b: _write(r / "usr/lib/systemd/system/getty@tty1.service.d/autologin.conf",
+                            "[Service]\nExecStart=\n"
+                            "ExecStart=-/sbin/agetty --autologin pi %I $TERM\n"), "autologin"),
+    # Raspberry Pi Connect: pi-gen's stage2 installs rpi-connect-lite, and the
+    # scoreboard stage purges it. The dpkg rule comes first because a `remove`
+    # that should have been a `purge` leaves the stanza behind.
+    "Raspberry Pi Connect recorded as a package by dpkg": (
+        lambda r, b: (r / "var/lib/dpkg/status").write_text(
+            (r / "var/lib/dpkg/status").read_text()
+            + "\nPackage: rpi-connect-lite\nStatus: install ok installed\nVersion: 2.12.2\n"),
+        "Raspberry Pi Connect"),
+    "the full Raspberry Pi Connect recorded as a package by dpkg": (
+        lambda r, b: (r / "var/lib/dpkg/status").write_text(
+            (r / "var/lib/dpkg/status").read_text()
+            + "\nPackage: rpi-connect\nStatus: install ok installed\nVersion: 2.12.2\n"),
+        "Raspberry Pi Connect"),
+    "Raspberry Pi Connect removed but not purged": (
+        lambda r, b: (r / "var/lib/dpkg/status").write_text(
+            (r / "var/lib/dpkg/status").read_text()
+            + "\nPackage: rpi-connect-lite\nStatus: deinstall ok config-files\nVersion: 2.12.2\n"),
+        "Raspberry Pi Connect"),
+    "the Raspberry Pi Connect agent binary in the rootfs": (
+        lambda r, b: _write(r / "usr/bin/rpi-connectd", "#!/bin/sh\n"), "Raspberry Pi Connect"),
+    "the Raspberry Pi Connect command in the rootfs": (
+        lambda r, b: _write(r / "usr/bin/rpi-connect", "#!/bin/sh\n"), "Raspberry Pi Connect"),
+    "a Raspberry Pi Connect user unit in the rootfs": (
+        lambda r, b: _write(r / "usr/lib/systemd/user/rpi-connect.service", "[Unit]\n"),
+        "Raspberry Pi Connect"),
+    "a Raspberry Pi Connect sign-in path unit in the rootfs": (
+        lambda r, b: _write(r / "usr/lib/systemd/user/rpi-connect-signin.path", "[Path]\n"),
+        "Raspberry Pi Connect"),
+    # Fix round 1. The mask is the control, so its absence is a finding on its
+    # own: an unmask WITHOUT a re-enable leaves the unit live for the next
+    # thing that enables it, and every other wizard rule still passes.
+    "the wizard's mask missing entirely": (
+        lambda r, b: (r / "etc/systemd/system/userconfig.service").unlink(), "not masked"),
+    "the wizard's mask replaced by a regular file": (
+        lambda r, b: ((r / "etc/systemd/system/userconfig.service").unlink(),
+                      _write(r / "etc/systemd/system/userconfig.service", "[Unit]\n")), "not masked"),
+    "the wizard's mask pointing somewhere other than /dev/null": (
+        lambda r, b: ((r / "etc/systemd/system/userconfig.service").unlink(),
+                      (r / "etc/systemd/system/userconfig.service").symlink_to(
+                          "/usr/lib/systemd/system/userconfig.service")), "not masked"),
+    # Autologin scan gaps found in review.
+    "an autologin drop-in that is a symlink to a file": (
+        lambda r, b: (_write(r / "etc/elsewhere.conf",
+                             "[Service]\nExecStart=-/sbin/agetty --autologin pi %I $TERM\n"),
+                      (r / "etc/systemd/system/getty@tty1.service.d/50-link.conf").symlink_to(
+                          "../../../elsewhere.conf")), "autologin"),
+    "a getty drop-in directory that is itself a symlink": (
+        lambda r, b: ((r / "etc/real-dropins").mkdir(),
+                      _write(r / "etc/real-dropins/autologin.conf",
+                             "[Service]\nExecStart=-/sbin/agetty --autologin pi %I $TERM\n"),
+                      (r / "etc/systemd/system/getty@tty2.service.d").symlink_to("../../real-dropins")),
+        "symlink"),
+    "an autologin drop-in using agetty's attached short flag": (
+        lambda r, b: _write(r / "etc/systemd/system/getty@tty1.service.d/60-attached.conf",
+                            "[Service]\nExecStart=\nExecStart=-/sbin/agetty -api --noclear %I $TERM\n"),
+        "autologin"),
+    "an autologin drop-in on autovt@": (
+        lambda r, b: _write(r / "etc/systemd/system/autovt@tty3.service.d/autologin.conf",
+                            "[Service]\nExecStart=\nExecStart=-/sbin/agetty --autologin pi %I $TERM\n"),
+        "autologin"),
+    "an autologin drop-in on console-getty": (
+        lambda r, b: _write(r / "etc/systemd/system/console-getty.service.d/autologin.conf",
+                            "[Service]\nExecStart=\nExecStart=-/sbin/agetty --autologin root - $TERM\n"),
+        "autologin"),
+    "a full getty unit override configuring autologin": (
+        lambda r, b: _write(r / "etc/systemd/system/getty@tty1.service",
+                            "[Service]\nExecStart=-/sbin/agetty --autologin pi --noclear %I $TERM\n"),
+        "autologin"),
+    "a full console-getty unit override configuring autologin": (
+        lambda r, b: _write(r / "etc/systemd/system/console-getty.service",
+                            "[Service]\nExecStart=-/sbin/agetty -aroot - $TERM\n"),
+        "autologin"),
+    # The journal is the last diagnosis surface; a volatile one leaves nothing
+    # on the card when a panel fails to start.
+    "the persistent-journal drop-in missing": (
+        lambda r, b: (r / "etc/systemd/journald.conf.d/95-scoreboard-persistent-journal.conf").unlink(),
+        "journal is not persistent"),
+    "a later-sorting drop-in putting the journal back in RAM": (
+        lambda r, b: _write(r / "etc/systemd/journald.conf.d/99-volatile-again.conf",
+                            "[Journal]\nStorage=volatile\n"), "journal is not persistent"),
+    "the journal storage set to none": (
+        lambda r, b: (r / "etc/systemd/journald.conf.d/95-scoreboard-persistent-journal.conf").write_text(
+            "[Journal]\nStorage=none\n"), "journal is not persistent"),
+    "/var/log/journal missing": (
+        lambda r, b: (r / "var/log/journal").rmdir(), "nowhere on the card"),
+    # Fix round 2: the replay must match journald, not a simplification of it.
+    "a volatile drop-in in /usr/local/lib that sorts last": (
+        lambda r, b: _write(r / "usr/local/lib/systemd/journald.conf.d/99-local.conf",
+                            "[Journal]\nStorage=volatile\n"), "journal is not persistent"),
+    "Storage=auto with no /var/log/journal": (
+        lambda r, b: ((r / "etc/systemd/journald.conf.d/95-scoreboard-persistent-journal.conf").write_text(
+                          "[Journal]\nStorage=auto\nSyncIntervalSec=30s\n"),
+                      (r / "var/log/journal").rmdir()), "stays in RAM"),
+    "the main journald.conf turning storage off with no drop-in to fix it": (
+        lambda r, b: ((r / "etc/systemd/journald.conf").write_text("[Journal]\nStorage=none\n"),
+                      (r / "etc/systemd/journald.conf.d/95-scoreboard-persistent-journal.conf").write_text(
+                          "[Journal]\nSyncIntervalSec=30s\n")), "journal is not persistent"),
+    "the sync interval left at journald's five-minute default": (
+        lambda r, b: (r / "etc/systemd/journald.conf.d/95-scoreboard-persistent-journal.conf").write_text(
+            "[Journal]\nStorage=persistent\nSystemMaxUse=50M\n"), "SyncIntervalSec"),
+    "a later drop-in relaxing the sync interval": (
+        lambda r, b: _write(r / "etc/systemd/journald.conf.d/99-slow-sync.conf",
+                            "[Journal]\nSyncIntervalSec=5min\n"), "SyncIntervalSec"),
 }
 
 
@@ -402,6 +560,53 @@ def test_sshd_config_with_multiple_conf_d_files_each_with_the_default_passes(tmp
     result = gate(root, boot)
     assert result.returncode == 0, result.stderr
     assert "image-gate: all checks passed" in result.stdout
+
+
+def test_storage_auto_with_the_journal_directory_present_passes(tmp_path):
+    # Storage=auto means "persistent if /var/log/journal exists", so it is as
+    # good as persistent here and must not be refused.
+    root, boot = clean_image(tmp_path)
+    (root / "etc/systemd/journald.conf.d/95-scoreboard-persistent-journal.conf").write_text(
+        "[Journal]\nStorage=auto\nSyncIntervalSec=30s\n")
+    result = gate(root, boot)
+    assert result.returncode == 0, result.stderr
+
+
+def test_a_vendor_drop_in_shadowed_by_an_etc_file_of_the_same_name_does_not_count(tmp_path):
+    # systemd reads only the highest-priority file of a given name -- it does
+    # not read both -- so an /etc file named 40-rpi-volatile-storage.conf
+    # replaces the vendor one outright. With the vendor's Storage=volatile
+    # gone, the default (auto) plus the directory is persistent, and the gate
+    # must not still be counting the file systemd never read.
+    root, boot = clean_image(tmp_path)
+    (root / "etc/systemd/journald.conf.d/95-scoreboard-persistent-journal.conf").unlink()
+    _write(root / "etc/systemd/journald.conf.d/40-rpi-volatile-storage.conf",
+           "[Journal]\nSyncIntervalSec=30s\n")
+    result = gate(root, boot)
+    assert result.returncode == 0, result.stderr
+
+
+def test_a_vendor_drop_in_disabled_by_a_dev_null_symlink_does_not_count(tmp_path):
+    # Symlinking a drop-in name to /dev/null is the documented way to disable a
+    # vendor drop-in: that name then contributes nothing at all, rather than
+    # falling through to the vendor file it shadows.
+    root, boot = clean_image(tmp_path)
+    (root / "etc/systemd/journald.conf.d/95-scoreboard-persistent-journal.conf").unlink()
+    (root / "etc/systemd/journald.conf.d/40-rpi-volatile-storage.conf").symlink_to("/dev/null")
+    _write(root / "etc/systemd/journald.conf.d/96-scoreboard-sync.conf",
+           "[Journal]\nSyncIntervalSec=30s\n")
+    result = gate(root, boot)
+    assert result.returncode == 0, result.stderr
+
+
+def test_a_relative_mask_symlink_is_still_a_mask(tmp_path):
+    # ../../../dev/null resolves to /dev/null and systemd treats it as a mask,
+    # so the gate must judge the resolved target, not the literal string.
+    root, boot = clean_image(tmp_path)
+    (root / "etc/systemd/system/userconfig.service").unlink()
+    (root / "etc/systemd/system/userconfig.service").symlink_to("../../../dev/null")
+    result = gate(root, boot)
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="running as root can read anything, so an unreadable fixture proves nothing")

@@ -11,7 +11,7 @@ Spec: `docs/superpowers/specs/2026-09-12-device-image-design.md`
 | H2 | polkit grant | The `scoreboard` account applies a connection | not yet run |
 | H3 | Real `nmcli` scan and apply | Networks list; joining one succeeds | not yet run |
 | H4 | Imager customisation on a custom image | The dialog is offered and the settings take effect | not yet run |
-| H5 | Image boots | Both boards boot and the panel lights up | not yet run |
+| H5 | Image boots | Both boards boot and the panel lights up | failed on v0.1.0, 2026-09-18 — first-boot wizard; fixed for v0.1.1 |
 | H6 | CMA on the Zero 2 W | 480×1920 renders without CMA exhaustion | not yet run |
 | H7 | Keyboard under kmsdrm | A USB keyboard drives the settings screen | not yet run |
 | H8 | A panel enrolls itself | Pairing, claim and restart all work end to end against real AWS | not yet run |
@@ -79,11 +79,68 @@ took effect). Pass: declining it boots to the "Not registered" screen. Any
 setting that does take effect, above all SSH or a password, is a finding for
 B1 and the gate, not a pass.
 
+**2026-09-18 — bench observation and a consequence of the H5 fix.** On a Pi 4
+bench flash, Imager offered no customisation dialog at all for the custom image
+and wrote nothing to the boot partition: no `firstrun.sh`, `user-data`,
+`network-config`, `meta-data`, `custom.toml`, `ssh` or `wpa_supplicant.conf`.
+Imager's version was not recorded, so this is one observation, not a general
+claim. Separately, masking `userconfig.service` for v0.1.1 also kills the
+boot-partition `userconf` / `userconf.txt` path by construction: `userconf-service`
+is that file's only reader, and the mask stops the unit running at all. So
+Imager's "set username and password" cannot take effect on this image whatever
+it writes. The `firstrun.sh` + `systemd.run=` route is untouched by the mask —
+that one is `raspberrypi-sys-mods`' initramfs `imager_fixup` script, and it is
+what the gate's boot-partition check covers.
+
 ## H5 — image boots
 
 Flash and boot on a Pi 4 and a Zero 2 W. Pass: both reach the "Not registered"
 screen. Note the time to first pixel on the Zero — it is the number that decides
 whether anything needs optimising.
+
+**2026-09-18 — failed on v0.1.0.** The image was flashed and booted on a real
+Pi and never reached the "Not registered" screen. The console showed Raspberry
+Pi OS's first-boot user-creation wizard instead: `userconf-pi`'s
+`userconfig.service`, a whiptail dialog on tty8 asking for a new username and a
+password. pi-gen arms it in `export-image/01-user-rename`, which runs
+`rename-user -f -s` against the mounted image after every stage has finished,
+because `DISABLE_FIRST_BOOT_USER_RENAME` is left at its default of 0 — and it
+is left there on purpose, since pi-gen refuses to build with it set unless
+`FIRST_USER_PASS` bakes a shared password into the image as well. An owner with
+no keyboard cannot answer the dialog, so the panel is stuck with the wizard on
+screen.
+
+Fixed in v0.1.1: `tools/pi-gen/stage-scoreboard/02-no-first-boot-wizard` masks
+`userconfig.service`, which makes that `systemctl enable` fail and create
+nothing, and `tools/image-gate.sh` now fails the build if the wizard is enabled
+in any unit tree or if any getty drop-in configures an autologin. The image
+boots with no login prompt on tty1 — `rename-user` disables `getty@tty1` after
+the stage runs and nothing there can put it back.
+
+**2026-09-18 — what that costs, corrected.** An earlier draft of this note said
+the missing prompt "costs nothing". That is wrong. It is decorative *for
+access* — every account is locked, so nobody could log in through it — but the
+console was also the only surface on which a startup failure could be read, and
+the panel now has none: the service owns tty1, a display failure exits 78 and
+`RestartPreventExitStatus=78` stops the service dead at a black screen, and any
+other crash restarts every 3 s in silence. What replaces it is the journal,
+which v0.1.1 makes persistent (`Storage=persistent`, capped at 50 MB, spec
+§9.2): pull the card, mount its **second** partition on another machine, and
+read `var/log/journal/`. `journalctl -D <mountpoint>/var/log/journal -b -1` is
+the useful invocation. An on-screen failure painter is a follow-up, recorded in
+spec §9.12.
+
+Re-run this check on v0.1.1, and while you are there **check the journal
+survives a power cut** — with a number to compare against. The drop-in sets
+`SyncIntervalSec=30s`, against journald's 5-minute default, because the
+scoreboard's failure lines are logged at ERR and journald syncs ERR and below
+only on that interval. So a line written more than ~30 s before the power is
+pulled must be on the card afterwards; one written in the last few seconds may
+not be. Test it: let the panel run, note the last line and its timestamp in
+`journalctl -f`, wait a minute, pull the power, then read the card — that line
+must be there. If lines from *minutes* earlier are missing, the drop-in did not
+take effect; on a panel that does boot, check
+`systemd-analyze cat-config systemd/journald.conf` and `journalctl --disk-usage`.
 
 ## H6 — CMA on the Zero 2 W
 

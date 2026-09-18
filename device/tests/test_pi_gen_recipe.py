@@ -4,6 +4,7 @@ These catch the quiet regressions: an unpinned pi-gen, a credential setting
 creeping into the config, or the image's package list drifting from the one
 pi-setup.sh --appliance installs. They do not build an image.
 """
+import os
 import re
 from pathlib import Path
 
@@ -116,6 +117,138 @@ def test_appliance_mode_installs_nothing_from_pypi():
         for flag in ("--no-index", "--no-cache-dir", "--disable-pip-version-check"):
             assert flag in line, f"{flag} missing from: {line.strip()}"
     assert "pip download" not in body
+
+
+WIZARD_RUN = PIGEN / "stage-scoreboard" / "02-no-first-boot-wizard" / "00-run.sh"
+
+
+def test_the_stage_disarms_the_first_boot_user_creation_wizard():
+    # v0.1.0 booted to userconf-pi's whiptail dialog asking for a new username
+    # and password, which nobody can answer on a keyboard-less panel
+    # (docs/hardware-checks.md, H5). pi-gen arms it AFTER every stage has run
+    # -- export-image/01-user-rename runs `rename-user -f -s` against the
+    # mounted image -- so deleting the enablement symlink here would be undone.
+    # Masking the unit is what survives: systemctl refuses to enable a masked
+    # unit and creates no symlink.
+    run = WIZARD_RUN.read_text()
+    assert "/etc/systemd/system/userconfig.service" in run
+    assert "/dev/null" in run
+    # pi-gen skips a sub-stage script that is not executable, silently.
+    assert os.access(WIZARD_RUN, os.X_OK), f"{WIZARD_RUN} must be executable or pi-gen skips it"
+
+
+def test_the_wizard_is_disarmed_in_the_stage_not_by_the_config_switch():
+    # DISABLE_FIRST_BOOT_USER_RENAME=1 is the switch that would skip
+    # rename-user, and pi-gen's build.sh refuses to build with it unless
+    # FIRST_USER_PASS is also set. A password baked into a public image is the
+    # one thing this image must not carry, so the switch stays unset.
+    assert "DISABLE_FIRST_BOOT_USER_RENAME" not in (PIGEN / "config").read_text()
+    assert "FIRST_USER_PASS" not in (PIGEN / "config").read_text()
+
+
+REMOTE_ACCESS_RUN = PIGEN / "stage-scoreboard" / "03-no-remote-access" / "00-run.sh"
+
+
+def test_the_stage_removes_the_remote_access_agent():
+    # pi-gen's stage2/01-sys-tweaks/00-packages installs rpi-connect-lite, a
+    # remote-access agent, from the same list that brings ssh, sudo and
+    # console-setup -- so the SKIP-the-sub-stage mechanism used for cloud-init
+    # is not available, and the package is purged in this stage instead. Purge,
+    # not remove: a removed-but-not-purged package keeps its stanza in
+    # /var/lib/dpkg/status, which is the signal the gate reads.
+    run = REMOTE_ACCESS_RUN.read_text()
+    assert "on_chroot" in run
+    assert "apt-get purge" in run
+    for package in ("rpi-connect", "rpi-connect-lite"):
+        assert package in run
+    assert "apt-get remove" not in run
+    # pi-gen skips a sub-stage script that is not executable, silently.
+    assert os.access(REMOTE_ACCESS_RUN, os.X_OK), f"{REMOTE_ACCESS_RUN} must be executable or pi-gen skips it"
+
+
+JOURNAL_RUN = PIGEN / "stage-scoreboard" / "04-persistent-journal" / "00-run.sh"
+VOLATILE_DROPIN = "40-rpi-volatile-storage.conf"
+
+
+def test_the_stage_keeps_the_journal_on_the_card():
+    # Once the panel owns tty1 there is no console to read, so a startup
+    # failure shows a black screen and nothing else. raspberrypi-sys-mods ships
+    # /usr/lib/systemd/journald.conf.d/40-rpi-volatile-storage.conf with
+    # Storage=volatile, which would leave nothing on the card either.
+    run = JOURNAL_RUN.read_text()
+    assert "Storage=persistent" in run
+    assert "SystemMaxUse=" in run
+    assert "/var/log/journal" in run
+    # pi-gen skips a sub-stage script that is not executable, silently.
+    assert os.access(JOURNAL_RUN, os.X_OK), f"{JOURNAL_RUN} must be executable or pi-gen skips it"
+
+
+def test_the_journal_drop_in_shortens_the_sync_interval():
+    # journald's default SyncIntervalSec is 5 minutes for ERR and below, and
+    # the scoreboard's startup failures are logged at ERR. Someone watching a
+    # black screen pulls the power long before five minutes are up, losing
+    # exactly the line this feature exists to capture.
+    assert "SyncIntervalSec=30s" in JOURNAL_RUN.read_text()
+
+
+GATE = REPO / "tools" / "image-gate.sh"
+WIZARD_STAGE = PIGEN / "stage-scoreboard" / "02-no-first-boot-wizard" / "00-run.sh"
+# The quoted find predicates both files use to name a getty-ish unit or its
+# drop-in directory: -name 'getty@*.service', -path '*/getty@*.service.d/*'.
+UNIT_GLOB = re.compile(
+    r"'(?:\*/)?((?:serial-getty|autovt|getty)@\*?\.service(?:\.d)?|console-getty\.service(?:\.d)?)(?:/\*)?'")
+
+
+def autologin_unit_globs(text: str) -> set[str]:
+    return {m.group(1) for m in UNIT_GLOB.finditer(text)}
+
+
+def test_the_stage_and_the_gate_refuse_the_same_autologin_shapes():
+    # The stage cleans what the gate refuses. If the two drift, a pi-gen bump
+    # shipping a newly covered shape fails a release build thirty-five minutes
+    # in rather than being cleaned by the stage that exists to clean it.
+    expected = {
+        "getty@*.service", "serial-getty@*.service", "autovt@*.service", "console-getty.service",
+        "getty@*.service.d", "serial-getty@*.service.d", "autovt@*.service.d", "console-getty.service.d",
+    }
+    gate_globs = autologin_unit_globs(GATE.read_text())
+    stage_globs = autologin_unit_globs(WIZARD_STAGE.read_text())
+    assert gate_globs == expected, f"the gate's unit set changed: {gate_globs ^ expected}"
+    assert stage_globs == gate_globs, f"the stage and the gate disagree: {stage_globs ^ gate_globs}"
+
+
+def test_the_stage_and_the_gate_match_the_same_autologin_spellings():
+    # --autologin is what raspi-config writes; the short form must be matched
+    # attached (-api) as well as detached (-a pi), so neither pattern may
+    # require a space after -a.
+    for path in (WIZARD_STAGE, GATE):
+        text = path.read_text()
+        assert "--autologin" in text
+        assert "agetty.*[[:space:]]-a" in text
+        assert "agetty.*[[:space:]]-a[[:space:]]" not in text, \
+            f"{path} still requires a space after -a, so the attached form (-api) slips through"
+
+
+def test_the_stage_reads_drop_ins_the_way_systemd_does():
+    # -xtype f so a drop-in symlinked to a real file is read, and -type l to
+    # find the symlinked drop-in directory that find -P will not descend into.
+    text = WIZARD_STAGE.read_text()
+    assert "-xtype f" in text
+    assert "-type l" in text
+
+
+def test_the_journal_drop_in_sorts_after_the_volatile_one():
+    # journald sorts drop-ins by filename across /etc, /run and /usr/lib at
+    # once, and the lexicographically last file to set an option wins -- so
+    # living under /etc is not enough on its own.
+    # Only the files the stage writes into the rootfs; the volatile drop-in is
+    # named in the comments too, and it is the thing being beaten, not a file
+    # this stage creates.
+    names = re.findall(r"\$\{ROOTFS_DIR\}/etc/systemd/journald\.conf\.d/([A-Za-z0-9._-]+\.conf)",
+                       JOURNAL_RUN.read_text())
+    assert names, "the stage no longer writes a journald drop-in"
+    for name in names:
+        assert name > VOLATILE_DROPIN, f"{name} does not sort after {VOLATILE_DROPIN}, so volatile would win"
 
 
 def test_the_stage_documents_its_tmpfs_assumption():
