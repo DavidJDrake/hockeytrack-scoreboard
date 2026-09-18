@@ -79,6 +79,19 @@ took effect). Pass: declining it boots to the "Not registered" screen. Any
 setting that does take effect, above all SSH or a password, is a finding for
 B1 and the gate, not a pass.
 
+**2026-09-18 — bench observation and a consequence of the H5 fix.** On a Pi 4
+bench flash, Imager offered no customisation dialog at all for the custom image
+and wrote nothing to the boot partition: no `firstrun.sh`, `user-data`,
+`network-config`, `meta-data`, `custom.toml`, `ssh` or `wpa_supplicant.conf`.
+Imager's version was not recorded, so this is one observation, not a general
+claim. Separately, masking `userconfig.service` for v0.1.1 also kills the
+boot-partition `userconf` / `userconf.txt` path by construction: `userconf-service`
+is that file's only reader, and the mask stops the unit running at all. So
+Imager's "set username and password" cannot take effect on this image whatever
+it writes. The `firstrun.sh` + `systemd.run=` route is untouched by the mask —
+that one is `raspberrypi-sys-mods`' initramfs `imager_fixup` script, and it is
+what the gate's boot-partition check covers.
+
 ## H5 — image boots
 
 Flash and boot on a Pi 4 and a Zero 2 W. Pass: both reach the "Not registered"
@@ -102,9 +115,21 @@ Fixed in v0.1.1: `tools/pi-gen/stage-scoreboard/02-no-first-boot-wizard` masks
 nothing, and `tools/image-gate.sh` now fails the build if the wizard is enabled
 in any unit tree or if any getty drop-in configures an autologin. The image
 boots with no login prompt on tty1 — `rename-user` disables `getty@tty1` after
-the stage runs and nothing there can put it back — which is acceptable: every
-account is locked, so the prompt would be decorative, and the console is left
-to the panel. Re-run this check on v0.1.1.
+the stage runs and nothing there can put it back.
+
+**2026-09-18 — what that costs, corrected.** An earlier draft of this note said
+the missing prompt "costs nothing". That is wrong. It is decorative *for
+access* — every account is locked, so nobody could log in through it — but the
+console was also the only surface on which a startup failure could be read, and
+the panel now has none: the service owns tty1, a display failure exits 78 and
+`RestartPreventExitStatus=78` stops the service dead at a black screen, and any
+other crash restarts every 3 s in silence. What replaces it is the journal,
+which v0.1.1 makes persistent (`Storage=persistent`, capped at 50 MB, spec
+§9.2): pull the card, mount its **second** partition on another machine, and
+read `var/log/journal/`. `journalctl -D <mountpoint>/var/log/journal -b -1` is
+the useful invocation. An on-screen failure painter is a follow-up, recorded in
+spec §9.12. Re-run this check on v0.1.1, and check the journal survives a power
+cut while you are there.
 
 ## H6 — CMA on the Zero 2 W
 
