@@ -4,6 +4,7 @@ These catch the quiet regressions: an unpinned pi-gen, a credential setting
 creeping into the config, or the image's package list drifting from the one
 pi-setup.sh --appliance installs. They do not build an image.
 """
+import os
 import re
 from pathlib import Path
 
@@ -116,6 +117,33 @@ def test_appliance_mode_installs_nothing_from_pypi():
         for flag in ("--no-index", "--no-cache-dir", "--disable-pip-version-check"):
             assert flag in line, f"{flag} missing from: {line.strip()}"
     assert "pip download" not in body
+
+
+WIZARD_RUN = PIGEN / "stage-scoreboard" / "02-no-first-boot-wizard" / "00-run.sh"
+
+
+def test_the_stage_disarms_the_first_boot_user_creation_wizard():
+    # v0.1.0 booted to userconf-pi's whiptail dialog asking for a new username
+    # and password, which nobody can answer on a keyboard-less panel
+    # (docs/hardware-checks.md, H5). pi-gen arms it AFTER every stage has run
+    # -- export-image/01-user-rename runs `rename-user -f -s` against the
+    # mounted image -- so deleting the enablement symlink here would be undone.
+    # Masking the unit is what survives: systemctl refuses to enable a masked
+    # unit and creates no symlink.
+    run = WIZARD_RUN.read_text()
+    assert "/etc/systemd/system/userconfig.service" in run
+    assert "/dev/null" in run
+    # pi-gen skips a sub-stage script that is not executable, silently.
+    assert os.access(WIZARD_RUN, os.X_OK), f"{WIZARD_RUN} must be executable or pi-gen skips it"
+
+
+def test_the_wizard_is_disarmed_in_the_stage_not_by_the_config_switch():
+    # DISABLE_FIRST_BOOT_USER_RENAME=1 is the switch that would skip
+    # rename-user, and pi-gen's build.sh refuses to build with it unless
+    # FIRST_USER_PASS is also set. A password baked into a public image is the
+    # one thing this image must not carry, so the switch stays unset.
+    assert "DISABLE_FIRST_BOOT_USER_RENAME" not in (PIGEN / "config").read_text()
+    assert "FIRST_USER_PASS" not in (PIGEN / "config").read_text()
 
 
 def test_the_stage_documents_its_tmpfs_assumption():
