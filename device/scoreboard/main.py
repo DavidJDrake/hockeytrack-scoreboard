@@ -662,7 +662,17 @@ def config_action(game_id: int | None, following: int | None, retain: bool = Fal
     # while the panel was away, arriving the only way it can. Stamps are
     # compared with each other and never with this panel's own clock, which
     # on a board with no RTC may be anything at all.
-    if chosen_at is not None and (last_chosen_at is None or chosen_at > last_chosen_at):
+    #
+    # UNSEEN, not NEWER (!=, not >). The retained store holds exactly one
+    # payload -- the latest publish -- so a stamp that differs from the one
+    # this panel last acted on can only mean a newer publish, and an
+    # identical one can only mean the same publish replayed. Comparing with
+    # > added a high-water mark that nothing on the wire guarantees: a server
+    # clock that steps backwards (a replaced Lambda, skew between execution
+    # environments, a region failover) made a genuine press look old in
+    # exactly the case the stamp exists for, and swallowed every press after
+    # it until one happened to exceed the mark.
+    if chosen_at is not None and chosen_at != last_chosen_at:
         return REARM
     return IGNORE
 
@@ -907,12 +917,18 @@ def main() -> None:
                     action = config_action(gid, following, retain=item[2],
                                            chosen_at=chosen_at,
                                            last_chosen_at=last_chosen_at)
-                    # Remembered whatever the action was, and in memory
-                    # only: after a reboot the retained replay is a SELECT
-                    # and the boot grace covers it anyway. Remembering it
-                    # even when ignored is what keeps the NEXT replay of the
-                    # same stamp from being read as news.
-                    if chosen_at is not None:
+                    # Remembered only for a message this panel UNDERSTOOD,
+                    # and in memory only: after a reboot the retained replay
+                    # is a SELECT and the boot grace covers it anyway.
+                    # Remembering it even when the action was IGNORE is what
+                    # keeps the next replay of the same stamp from being read
+                    # as news -- but remembering it for a message whose
+                    # gameId could not be read was total and permanent (N-4):
+                    # one malformed publish carrying a stamp disabled the
+                    # offline re-send until the panel was rebooted, because
+                    # every genuine press afterwards arrived carrying a stamp
+                    # the panel believed it had already acted on.
+                    if gid is not None and chosen_at is not None:
                         last_chosen_at = chosen_at
                     if action == IGNORE:
                         log.warning("ignoring unreadable config message")

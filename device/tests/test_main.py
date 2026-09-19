@@ -1026,6 +1026,27 @@ def test_a_press_that_arrived_while_the_panel_was_away_reaches_it_on_reconnect(t
         "the second reconnect re-armed on a stamp already acted on"
 
 
+def test_a_config_message_the_panel_could_not_read_leaves_the_stamp_alone(tmp_path, monkeypatch):
+    # N-4, and it is total until the panel is rebooted. The loop remembered
+    # chosenAt whatever config_action had decided, and parse_chosen_at
+    # accepts any int, so ONE malformed publish -- a gameId that is not a
+    # number, with a stamp attached -- was enough to poison the memory and
+    # swallow every genuine press that followed. A message this panel could
+    # not understand must leave no trace at all.
+    final = (FIX / "state_live.json").read_text().replace('"state":"LIVE"', '"state":"FINAL"')
+    stamp = 99999999999999
+    passes = a_loop_that_receives(monkeypatch, tmp_path, {
+        0: [("on_state", (2026020001, final.encode()))],
+        1: [("on_config", (b'{"gameId":"x","chosenAt":%d}' % stamp, True))],
+        3: [("on_config", (b'{"gameId": 2026020001, "chosenAt": %d}' % stamp, True))],
+    }, passes=6)
+
+    assert passes[2]["final_seen"] == passes[0]["final_seen"], \
+        "a config message it could not read re-armed the hold"
+    assert passes[4]["final_seen"] > passes[2]["final_seen"], \
+        "the press after a malformed publish was swallowed"
+
+
 def test_a_state_that_changes_restarts_the_grace_in_the_real_loop(tmp_path, monkeypatch):
     # The other half: changed_at, driven by real documents arriving rather
     # than by strings passed to it. A repeat of the same state must NOT
@@ -1240,11 +1261,19 @@ def test_a_live_press_needs_no_stamp():
     assert config_action(2026020001, following=2026020001, retain=False) == REARM
 
 
-def test_an_older_stamp_is_not_news():
-    # Out-of-order delivery, or a retained message the broker held from
-    # before the last press this panel acted on.
+def test_a_stamp_that_went_backwards_is_still_news():
+    # N-5. The comparison is "unseen", not "newer". The retained store holds
+    # exactly one payload -- the latest publish -- so a stamp that differs
+    # from the last one this panel acted on can only mean a newer publish,
+    # whatever the numbers do; and an identical one can only mean the same
+    # publish, which is correctly ignored. A clock that goes backwards on the
+    # server (a replaced Lambda, skew between execution environments, a
+    # region failover) is exactly the case the stamp exists for -- the owner
+    # pressed the button while the panel was away -- and "newer" threw that
+    # press away and every press after it until one happened to exceed the
+    # high-water mark.
     assert config_action(2026020001, following=2026020001, retain=True,
-                         chosen_at=1_600_000_000_000, last_chosen_at=1_700_000_000_000) == IGNORE
+                         chosen_at=1_600_000_000_000, last_chosen_at=1_700_000_000_000) == REARM
 
 
 def test_a_stamp_is_read_out_of_the_config_document():

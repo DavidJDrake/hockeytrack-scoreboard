@@ -138,7 +138,11 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 		// stamp, a replay carrying a chosenAt it has not acted on is news,
 		// and the press that happened during the outage is not lost. Panels
 		// compare these values only against each other, never against their
-		// own clocks, which on a board with no RTC may be anything at all.
+		// own clocks, which on a board with no RTC may be anything at all --
+		// and they compare them for DIFFERENCE, not for order, so this
+		// value need not be monotonic across deployments, execution
+		// environments or a region failover. It only has to change when
+		// the owner presses the button.
 		payload, err := json.Marshal(struct {
 			GameID   int64 `json:"gameId"`
 			ChosenAt int64 `json:"chosenAt"`
