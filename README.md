@@ -135,7 +135,9 @@ else. Leave it out and any invited user can claim the panel.
 `GB`. It is not optional on a panel that has never been set up: the image
 ships with the Wi-Fi radio switched off until it knows its regulatory domain,
 so without this line nothing can connect and the panel refuses the file,
-saying so in `journalctl -u scoreboard-netcfg`. A panel that already has a
+leaving it on the card as you wrote it. The refusal is written to the panel's
+log, not its screen; `docs/hardware-checks.md` ("Reading a failed panel") says
+how to read that log from the card. A panel that already has a
 domain set keeps working without it. Downloading the setup file from the site
 while signed in fills in the owner line, and prefills this one from your
 browser's locale — check it, since that is the language you read in rather
