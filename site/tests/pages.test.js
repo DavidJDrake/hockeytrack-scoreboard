@@ -43,3 +43,19 @@ test("the privacy page loads nothing from another origin", () => {
 test("setting up a panel starts by downloading the image", () => {
   assert.match(index, /<li><a href="\/download\/">Download the scoreboard image<\/a>/);
 });
+
+// The first boot now takes appreciably longer than it used to: setting the
+// regulatory domain, waiting for the radio and connecting can add up to about
+// 75 s before scoreboard.service is even started, and nothing paints during
+// it. Somebody watching a black panel with no warning pulls the power, which
+// is the one thing that can corrupt the card.
+const DARK_WINDOW = /minute and a half|90 seconds|a minute or so/i;
+
+test("the download page warns that the first boot can stay dark for a while", () => {
+  const download = page("download/index.html");
+  assert.match(download, DARK_WINDOW);
+});
+
+test("the setup steps warn that the first boot can stay dark for a while", () => {
+  assert.match(index, DARK_WINDOW);
+});

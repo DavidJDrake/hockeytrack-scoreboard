@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { MAX_OWNER_BYTES, SETUP_FILE_NAME, SetupFileError, regionFromLocale, setupFileFor } from "../assets/setupfile.js";
+import { MAX_OWNER_BYTES, SETUP_FILE_NAME, SetupFileError, countryNoteFor, regionFromLocale, setupFileFor } from "../assets/setupfile.js";
 
 const fixture = readFileSync(new URL("./fixtures/scoreboard-setup.txt", import.meta.url), "utf8");
 
@@ -131,5 +131,28 @@ test("every character the panel treats as a line break is refused", () => {
   for (const codePoint of boundaries) {
     const hex = codePoint.toString(16).toUpperCase().padStart(4, "0");
     assert.throws(() => setupFileFor(`a@example.com${String.fromCodePoint(codePoint)}ssid=evil`), SetupFileError, `U+${hex} was accepted`);
+  }
+});
+
+test("the page is told to say so when the country could not be guessed", () => {
+  // Otherwise the download looks complete and the blank country= line is a
+  // silent trap: the panel refuses the file and the owner has no idea why.
+  const said = countryNoteFor(null);
+  assert.ok(said, "no note for a locale with no region");
+  assert.match(said, /country/i);
+  assert.ok(said.length < 300, "too long to read above a button");
+});
+
+test("nothing is said when the country was guessed", () => {
+  assert.equal(countryNoteFor("US"), null);
+  assert.equal(countryNoteFor("gb"), null);
+});
+
+test("a region the file would refuse also gets the note", () => {
+  // The note has to agree with what setupFileFor actually wrote, not with
+  // what it was handed -- these all end up as a blank country= line.
+  for (const bad of ["USA", "U", "", "12", "US\nssid=evil"]) {
+    assert.ok(countryNoteFor(bad), `${JSON.stringify(bad)} was written blank but said nothing`);
+    assert.match(setupFileFor("friend@example.com", bad), /^country=$/m);
   }
 });

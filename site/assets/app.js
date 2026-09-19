@@ -8,7 +8,7 @@
 // api.js, setupfile.js or view.js; this file only wires them up.
 import { beginSignIn, completeSignIn, forgetSignIn, logoutUrl, mayReauth, wasSignedIn } from "./auth.js";
 import { ApiError, createApi } from "./api.js";
-import { SETUP_FILE_NAME, SetupFileError, regionFromLocale, setupFileFor } from "./setupfile.js";
+import { SETUP_FILE_NAME, SetupFileError, countryNoteFor, regionFromLocale, setupFileFor } from "./setupfile.js";
 import { emailVerified, gameChoices, messageFor, panelTitle } from "./view.js";
 
 const $ = (id) => document.getElementById(id);
@@ -236,6 +236,7 @@ function renderAdd(claims) {
   // The claim is refused for an unverified address, so a setup file for one
   // would make a panel nobody could claim.
   if (!emailVerified(claims)) return refuse("Verify your email address before setting up a panel.");
+  const region = regionFromLocale(navigator.language);
   let text;
   try {
     // The country line decides whether the panel's Wi-Fi radio comes on at
@@ -243,12 +244,21 @@ function renderAdd(claims) {
     // region. It is a starting point, not an answer -- the comment above the
     // line asks the reader to check it, because a browser's locale is the
     // language someone reads in, not necessarily where the panel will live.
-    text = setupFileFor(claims.email, regionFromLocale(navigator.language));
+    text = setupFileFor(claims.email, region);
   } catch (err) {
     if (!(err instanceof SetupFileError)) throw err;
     return refuse("Your email address cannot be written into a setup file.");
   }
-  note.hidden = true;
+  // When the locale named no region the file carries a blank country= line,
+  // which the panel will refuse. Say so here rather than let the download
+  // look complete: textContent, so nothing from the locale becomes markup.
+  const countryNote = countryNoteFor(region);
+  if (countryNote) {
+    note.textContent = countryNote;
+    note.hidden = false;
+  } else {
+    note.hidden = true;
+  }
   button.disabled = false;
   button.addEventListener("click", () => download(text));
 }

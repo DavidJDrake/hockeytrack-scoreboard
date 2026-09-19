@@ -30,9 +30,16 @@ The panel owns tty1 and there is no getty under it, so a failure shows a black
 screen and nothing else. H5 records the fallback — pull the card, mount its
 **second** (ext4) partition on a Linux machine, and run `journalctl -D
 <mountpoint>/var/log/journal -b -1`. That needs a Linux machine that can see
-the card, and on Windows it may not be available at all: `wsl --mount` refuses
-removable USB card readers, so the ext4 partition cannot be mounted from WSL
-even though WSL is a Linux machine.
+the card, which on Windows may not be available.
+
+What was observed here, on 2026-09-18 — an observation, not a general rule:
+`wsl --mount \\.\PHYSICALDRIVE2 --partition 2` against a USB SD card reader
+failed with `Wsl/Service/AttachDisk/MountDisk/0x8007000f` ("The system cannot
+find the drive specified"), and left the disk **Offline** in Windows disk
+management until the reader was unplugged and reconnected. Whether that is
+`wsl --mount` refusing removable devices as a rule, or something particular to
+this reader, was not established — but it cost a replug, so try the boot
+partition route below first.
 
 **The boot partition is enough on its own.** It is FAT, so Windows and macOS
 mount it automatically, and `cmdline.txt` on it is one line of kernel
@@ -107,6 +114,15 @@ start. None of it is a hardware result, and each is worth a minute of
 - **`ProtectKernelTunables`, `PrivateTmp` and `ProtectHome` look harmless on
   this path.** Mesa and libudev read `/sys` and `/run/udev` and write to
   neither; the service's home is not under `/home`; nothing here uses `/tmp`.
+- **Follow-up to close on this run: drop `libgl1-mesa-dri`.** It is in the
+  image's package list and is, as far as static analysis of the 26.2.2 debs
+  goes, not on the display path at all — `libEGL_mesa.so.0` and
+  `gbm/dri_gbm.so` reach the vc4 and v3d drivers through `DT_NEEDED
+  libgallium`, and every `dri/*_dri.so` belongs to Mesa's legacy-DRI-over-EGL
+  shim for the X server. It was kept for one release because being wrong cost
+  a 35-minute build and a reflash. Once this check renders a panel, remove the
+  package, rebuild, and confirm the panel still renders; then delete this
+  bullet and the note in spec §9.2.
 - The remaining uncertainty is where it always was: `DeviceAllow=char-drm rw`
   plus the `video` and `render` memberships against `/dev/dri/card*` and
   `/dev/dri/renderD128`, and whether the cursor-plane work behind
@@ -238,14 +254,29 @@ program's own lines were:
 The identity line is correct and expected — an unregistered panel says exactly
 that. The failure is the fourth line. **The EGL, GLES and DRI libraries were
 not in the image.** The release build installed `libdrm2`, `libdrm-common`,
-`libdrm-amdgpu1`, `libgbm1` and `mesa-libgallium` — every one of them a
-`Depends` of `libsdl2-2.0-0` — and none of `libegl1`, `libegl-mesa0`,
-`libgles2` or `libgl1-mesa-dri`, because SDL's kmsdrm backend dlopens those by
-soname at runtime and so nothing declares them. See spec §9.2 for the full
-package reasoning; the short version is that `libsdl2-2.0-0` 2.32.4 has no
-`Recommends` at all, so no apt setting would have brought them, and
-`mesa-libgallium` does not contain `vc4_dri.so` or `v3d_dri.so` — those are in
-`libgl1-mesa-dri`, which was also absent.
+`libdrm-amdgpu1`, `libgbm1` and `mesa-libgallium` — which arrive through one
+chain rather than five separate declarations: `libdrm2` and `libgbm1` are
+`libsdl2-2.0-0`'s own `Depends`, `libdrm-common` comes with `libdrm2`, and
+`libdrm-amdgpu1` and `mesa-libgallium` come with `libgbm1`. It installed none
+of `libegl1`, `libegl-mesa0` or `libgles2`, because SDL's kmsdrm backend
+dlopens those by soname at runtime and so nothing declares them.
+`libsdl2-2.0-0` 2.32.4 has no `Recommends` at all, so no apt setting would
+have brought them. See spec §9.2 for the full reasoning.
+
+**Corrected 2026-09-18, the same day.** The first version of this note also
+blamed a missing `libgl1-mesa-dri`, saying `mesa-libgallium` ships no
+`vc4_dri.so` or `v3d_dri.so` so the Pi had no driver at all. That was wrong
+about how Mesa loads its drivers, and inspecting the 26.2.2 arm64 debs says
+so: `gbm/dri_gbm.so` and `libEGL_mesa.so.0` import no `dlopen` at all and both
+carry `DT_NEEDED` on `libgallium-26.2.2-…so`, whose strings carry `VC4_DEBUG`
+and `V3D_DEBUG` — the vc4 and v3d drivers are compiled into libgallium, which
+v0.1.1 already had through `libgbm1`. Every `dri/*_dri.so` is a symlink to
+`libdril_dri.so`, a shim that dlopens `libEGL.so.1` itself and belongs to
+Mesa's legacy-DRI-over-EGL layer for the X server, downstream of this path.
+**The drivers were never missing. Three EGL/GLES libraries were**, and that is
+the whole of it. `libgl1-mesa-dri` is still installed, deliberately: see spec
+§9.2, and the follow-up under H1 to drop it once a boot has proven the path
+without it.
 
 `EGL not initialized` is the message SDL leaves behind, not the first thing
 that went wrong: `SDL_EGL_LoadLibrary` fails to `dlopen` the libraries, and the

@@ -44,6 +44,22 @@ export function regionFromLocale(locale) {
   return null;
 }
 
+// What to tell the reader when the country could not be guessed and the file
+// therefore carries a blank country= line. Without this the download looks
+// complete and the blank line is a silent trap: the panel refuses the file on
+// first boot and its owner has no idea why. Set with textContent, never as
+// markup.
+export const COUNTRY_NOT_GUESSED =
+  "We could not tell which country this panel will be used in, so the country= line in the file is blank. " +
+  "Fill it in before you save the file -- the panel's Wi-Fi stays switched off without it.";
+
+// The note the page should show for this region, or null when there is
+// nothing to say. Decided by the same normalizeRegion the file is written
+// with, so the note can never disagree with what was actually written.
+export function countryNoteFor(region) {
+  return normalizeRegion(region) ? null : COUNTRY_NOT_GUESSED;
+}
+
 export function setupFileFor(email, region) {
   const owner = typeof email === "string" ? email : "";
   if (!owner) throw new SetupFileError("there is no email address to write");
