@@ -94,6 +94,21 @@ export function setupFileFor(email, region) {
     "# filled in, so check it even if there is already something here.",
     `country=${normalizeRegion(region)}`,
     "",
+    // Optional, and shipped commented out so it changes nothing unless
+    // somebody asks for it. It exists because a panel that has not been
+    // registered yet has no other way to be told which way up it is mounted:
+    // rotation otherwise arrives only in device.json, after enrollment. A bar
+    // panel mounted the other way round shows its own pairing code upside
+    // down, which is the one screen an owner has to read to get any further.
+    //
+    // The wording assumes nothing. "Remove the #" is a thing anybody can do
+    // in Notepad; "uncomment" is not. 270 rather than 90 because 90 is what
+    // the panel already does on its own when nothing says otherwise, so the
+    // only reason to touch this line is to ask for the other one.
+    "# If the picture is upside down, remove the # from the next line, save",
+    "# the file, and start the panel again.",
+    "# rotate=270",
+    "",
     "# This line ties the panel to your account, so the code it shows can be",
     "# claimed by you and nobody else. Leave it exactly as it is.",
     `owner=${owner}`,

@@ -1,8 +1,10 @@
 """Fit the 1920x480 frame onto whatever display is actually attached.
 
-4:1 bar panels report themselves over HDMI as 480x1920 *portrait*. Under KMS
-neither the firmware's display_rotate nor SDL's kmsdrm backend will turn the
-picture for us, so it is turned here. The same arithmetic letterboxes the
+4:1 bar panels report themselves over HDMI as *portrait*, taller than they
+are wide -- the first one this ran on came up as 400x1280, not the 480x1920
+these were written against, so nothing here assumes a particular size. Under
+KMS neither the firmware's display_rotate nor SDL's kmsdrm backend will turn
+the picture for us, so it is turned here. The same arithmetic letterboxes the
 frame on an ordinary 16:9 TV, which is how the device gets bench-tested."""
 from __future__ import annotations
 

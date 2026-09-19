@@ -34,8 +34,62 @@ Environment=SDL_VIDEODRIVER=kmsdrm
 # scoreboard ever plays a sound; device/tests/test_pi_setup.py fails the
 # moment it starts to.
 Environment=SDL_AUDIODRIVER=dummy
+# Which 2D renderer SDL emulates the window surface with. Without this the
+# panel is SOLID BLACK while the program runs perfectly: v0.1.2 booted, drew
+# for fifteen minutes and logged every frame; the next boot changed nothing
+# but these two variables (passed on the kernel command line with
+# systemd.setenv=) and the panel painted. docs/hardware-checks.md, H1.
+#
+# SDL 2.32.4, read rather than recalled. pygame's non-OpenGL set_mode ends in
+# SDL_GetWindowSurface -> SDL_CreateWindowFramebuffer (SDL_video.c:2708), and
+# on kmsdrm ShouldAttemptTextureFramebuffer() is true, so the surface is
+# emulated with a 2D renderer by SDL_CreateWindowTexture (SDL_video.c:230).
+# With no hint that walks render_drivers[] in order (SDL_render.c:100), where
+# "opengl" is listed before "opengles2". This image ships no libGL.so.1 on
+# purpose, so the "opengl" attempt must fail -- and failing is not free: it
+# tears the kmsdrm window down and rebuilds it twice (SDL_render_gl.c:1726
+# and :1943), each destroy pointing the CRTC back at the original TTY buffer
+# and dropping DRM master (KMSDRM_DestroySurfaces, KMSDRM_GBMDeinit). Naming
+# the renderer skips that attempt entirely.
+#
+# Either variable alone satisfies SDL_CreateWindowTexture, which reads
+# SDL_FRAMEBUFFER_ACCELERATION first and falls back to SDL_RENDER_DRIVER.
+# Both are set because both together are what a real boot proved; checking
+# whether one would do costs a 35-minute build and somebody reflashing a card
+# at night, and buys nothing.
+#
+# The trade, also from the source: when a renderer IS named and cannot be
+# created, SDL_CreateWindowTexture returns -1 with no fallback, kmsdrm has no
+# CreateWindowFramebuffer of its own, and set_mode raises instead of handing
+# back a surface. That is the better failure -- a line in the journal rather
+# than a black screen with nothing to explain it.
+Environment=SDL_FRAMEBUFFER_ACCELERATION=opengles2
+Environment=SDL_RENDER_DRIVER=opengles2
 Environment=PYTHONUNBUFFERED=1
 Environment=SCOREBOARD_CONFIG_DIR=/var/lib/scoreboard
+# Where lgpio may create its notification FIFO. Without this the optional
+# GPIO buttons are silently dead under this unit, and v0.1.2's journal says
+# so four times on every start:
+#
+#   xCreatePipe: Can't set permissions (436) for /opt/scoreboard/.lgd-nfy0,
+#       No such file or directory
+#   PinFactoryFallback: Falling back from lgpio: [Errno 2] No such file or
+#       directory: '.lgd-nfy-3'
+#
+# lgpio builds that path as "%s/.lgd-nfy%d" from lguGetWorkDir() (lgNotify.c:
+# 131), and lguGetWorkDir() reads getenv("LG_WD") and otherwise falls back to
+# getcwd() (lgUtil.c:181, and lgpio.h:39 for the name). getcwd() here is
+# WorkingDirectory=/opt/scoreboard, which ProtectSystem=strict has made
+# read-only -- so the mkfifo fails, and 436 in the message is 0664, the mode
+# xCreatePipe asks for.
+#
+# /var/lib/scoreboard because it is already the one path in ReadWritePaths
+# below, so this cannot be right here and wrong in the sandbox. Note that
+# lguGetWorkDir() also chdir()s to it; nothing in device/scoreboard/ uses a
+# relative path (assets resolve from __file__, the config dir is absolute),
+# so that is harmless, and device/tests/test_pi_setup.py checks LG_WD stays
+# inside a writable path.
+Environment=LG_WD=/var/lib/scoreboard
 ExecStart=/opt/scoreboard/.venv/bin/python -m scoreboard.main
 Restart=always
 RestartSec=3
@@ -73,6 +127,30 @@ RestrictSUIDSGID=yes
 DeviceAllow=char-drm rw
 DeviceAllow=char-input r
 DeviceAllow=/dev/tty1 rw
+# The optional GPIO buttons. v0.1.2's journal ended the lgpio fallback chain
+# at "unable to open /dev/gpiomem or /dev/mem", which is gpiozero's LAST
+# factory; the first one, lgpio, opens /dev/gpiochip%d (lgGpio.c:724) and
+# gpiozero picks chip 0 on a Pi 4 (gpiozero/pins/lgpio.py:67). Nothing here
+# allowed it. The kernel registers that char-device class as "gpiochip"
+# (drivers/gpio/gpiolib.h, GPIOCHIP_NAME -- no line number: it is :21 in
+# upstream v6.12 and :23 in the rpi-6.18.y tree this panel runs), which is
+# the name systemd matches against
+# /proc/devices, so this is the class rather than a path -- and a path would
+# be wrong anyway, since which chip number a board presents is not fixed.
+#
+# Safe if it ever resolves to nothing: systemd logs "Device allow list
+# pattern ... did not match anything" at DEBUG and carries on
+# (src/core/bpf-devices.c). Unlike SupplementaryGroups=, an unresolvable name
+# here does not fail the unit.
+#
+# The group half was already in place: raspberrypi-sys-mods' 99-com.rules has
+# SUBSYSTEM=="gpio", GROUP="gpio", MODE="0660", and install_appliance adds the
+# service account to gpio when that group exists.
+#
+# UNPROVEN ON HARDWARE. This panel has no buttons fitted, so the next boot can
+# show the four PinFactoryFallback warnings are gone but cannot show a button
+# working. Recorded under H1 in docs/hardware-checks.md.
+DeviceAllow=char-gpiochip rw
 
 [Install]
 WantedBy=multi-user.target

@@ -35,6 +35,18 @@ python3-paho-mqtt
 # libgles2         libGLESv2.so.2, which SDL loads before EGL and retries as
 #                  GLES 2.0 when its desktop-GL attempt fails.
 #
+# libgl1 is deliberately absent, but NOT for the reason first written here.
+# That reason was "SDL's ES2 retry covers the missing libGL.so.1". Corrected
+# 2026-09-19: the retry covers WINDOW CREATION only (KMSDRM_CreateWindow,
+# SDL_kmsdrmvideo.c:1552). The window-framebuffer path is separate --
+# SDL_CreateWindowTexture (SDL_video.c:230) picks a 2D renderer by walking
+# render_drivers[] (SDL_render.c:100), where "opengl" precedes "opengles2",
+# and with no libGL.so.1 that attempt fails after destroying and recreating
+# the kmsdrm window twice. v0.1.2 showed a black panel for fifteen minutes
+# because of it. The fix is in the units (SDL_FRAMEBUFFER_ACCELERATION and
+# SDL_RENDER_DRIVER, both = opengles2), not a package. Do NOT add libgl1
+# here: spec 9.2 explains why naming the renderer is the smaller change.
+#
 # The drivers themselves were never missing. libEGL_mesa.so.0 and libgbm1's
 # backend gbm/dri_gbm.so both carry DT_NEEDED on libgallium-26.2.2-...so, and
 # the vc4 and v3d gallium drivers are compiled into libgallium (its strings

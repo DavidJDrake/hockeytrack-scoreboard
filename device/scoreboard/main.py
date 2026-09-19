@@ -18,7 +18,7 @@ from .config import Config, NotProvisioned, default_config_dir, parse_rotate
 from .display import display_failure, parse_size, placement, present
 from .link import Link
 from .model import GameState, parse_today, parse_config
-from .netcfg import NetworkError, NetworkManager, Status, owner_hint
+from .netcfg import NetworkError, NetworkManager, Status, owner_hint, rotate_hint
 from .render import H, W, draw
 from .reset import factory_reset
 from .settings import Settings
@@ -116,6 +116,42 @@ def enrollment_thread(config_dir, owner, events: queue.Queue,
     return t
 
 
+def chosen_rotation(device_json: int | None, setup_file, env: str | None) -> int | None:
+    """Which way up this panel is mounted, from the three places that can say.
+
+    The precedence, stated once here so nothing has to infer it:
+
+    1. ``SCOREBOARD_ROTATE`` in the environment. The desktop preview's
+       override, and the last word -- somebody typed it at a shell a second
+       ago, and it is the only one of the three whose author is standing
+       there. A value it cannot use raises, because they want to be told.
+    2. ``rotate`` in ``device.json``. The panel's own provisioned identity.
+       Note that ``parse_rotate`` turns ``"auto"`` into ``None``, so a
+       device.json that says "auto" is indistinguishable from one that says
+       nothing -- and in both cases the next source gets its turn, which is
+       what "auto" asks for anyway.
+    3. ``rotate=`` on the boot partition. The only one a fresh panel has:
+       device.json does not exist until a panel has enrolled, and the panel
+       cannot be enrolled until somebody reads the pairing code off a screen
+       that may be upside down.
+
+    None from all three means "decide from the shape of the display", which
+    is ``display.placement``'s own default: a quarter turn for a landscape
+    frame on a portrait panel.
+
+    ``setup_file`` is a zero-argument callable, not a value, so the card is
+    only read when it is going to be used. Reading it is a file open on the
+    boot partition, and the two sources above it win outright -- evaluating it
+    first would have meant every desktop preview with SCOREBOARD_ROTATE set
+    going and looking at /boot/firmware for an answer it then discarded.
+    """
+    if env is not None:
+        return parse_rotate(env)
+    if device_json is not None:
+        return device_json
+    return setup_file()
+
+
 def should_blank(now: float, last_update: float, state: GameState | None, blank_after_s: float) -> bool:
     """Decide whether the panel should go dark.
 
@@ -156,9 +192,12 @@ def main() -> None:
                     on_today=lambda b: events.put(("today", b)),
                     on_link=lambda ok: events.put(("link", ok)),
                     on_config=lambda b: events.put(("config", b)))
-    rotate = cfg.rotate if cfg else None
-    if "SCOREBOARD_ROTATE" in os.environ:  # desktop preview: simulate a mounting
-        rotate = parse_rotate(os.environ["SCOREBOARD_ROTATE"])
+    # Read before the display is opened, because placement() needs it and the
+    # pairing code an unregistered panel draws is the one screen its owner
+    # must be able to read. rotate_hint() opens the boot-partition file and
+    # leaves it exactly as it was, the same way owner_hint() below does.
+    rotate = chosen_rotation(cfg.rotate if cfg else None, rotate_hint,
+                             os.environ.get("SCOREBOARD_ROTATE"))
     pygame.init()
     # Open the display before anything else touches it. pygame.init() swallows
     # a display failure, and a call such as mouse.set_visible would then fail

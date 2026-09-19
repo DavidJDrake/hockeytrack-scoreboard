@@ -117,21 +117,37 @@ def test_systemd_seconds_reads_the_spans_this_file_accepts():
 
 def test_the_network_unit_states_its_own_start_budget():
     # It is Before=scoreboard.service, so everything it does is time the panel
-    # spends showing nothing. Its worst case is raspi-config (10 s), the settle
-    # wait for the radio (20 s) and one connect (45 s) = 75 s -- close enough
-    # to systemd's 90 s default that inheriting it silently would mean the
-    # first slow connect gets killed part-way through, leaving the setup file
-    # looking as though it had been ignored.
+    # spends showing nothing.
     #
-    # The bound is the reasoning, not a round number: it must exceed the 75 s
-    # worst case with room to spare, and stay small enough that a panel which
-    # cannot connect still reaches the screen in reasonable time.
-    fields = unit(NETCFG_UNIT.read_text())
+    # netcfg.BOOT_BUDGET_S is the whole of it now: one monotonic deadline that
+    # raspi-config and every nmcli call draw from, each given timeout=min(its
+    # own cap, time remaining). That replaced a column of intentions added up
+    # to "87 s" which was not a bound -- it left out radio_on() and the
+    # rescans, and counted the device wait as six two-second sleeps when each
+    # of those six iterations first ran a query that could itself take
+    # QUERY_TIMEOUT_S. The honest ceiling of that version was about 195 s,
+    # which is past this very timeout, so systemd would have killed the unit
+    # rather than the budget stopping it.
+    #
+    # Read from netcfg's own constant rather than repeated here, so the unit
+    # and the code cannot drift.
+    from scoreboard import netcfg
+
+    text = NETCFG_UNIT.read_text()
+    fields = unit(text)
     assert "TimeoutStartSec" in fields, "the unit inherits DefaultTimeoutStartSec without saying so"
     budget = systemd_seconds(fields["TimeoutStartSec"])
-    worst_case = 10 + 20 + 45
-    assert budget > worst_case, f"TimeoutStartSec={budget}s cannot cover the {worst_case}s worst case"
+    worst_case = netcfg.BOOT_BUDGET_S
+    assert budget > worst_case, f"TimeoutStartSec={budget}s cannot cover the {worst_case}s budget"
     assert budget <= 300, f"TimeoutStartSec={budget}s leaves the panel dark too long when Wi-Fi fails"
+    # Room for systemd's own overhead above a budget the code enforces, rather
+    # than a figure that merely happens to clear it by a second.
+    assert budget - worst_case >= 30, \
+        f"only {budget - worst_case}s between the enforced budget and the unit's timeout"
+    # And the number the unit's own comment states, so the comment is a
+    # tripwire rather than a decoration.
+    assert f"{worst_case} s" in text, \
+        f"the unit's comment no longer states the {worst_case}s budget it is sized against"
 
 
 def test_appliance_unit_runs_as_its_own_account(checkout):
@@ -173,6 +189,53 @@ def test_both_units_ask_sdl_for_the_dummy_audio_driver(checkout):
         assert "Environment=SDL_AUDIODRIVER=dummy" in done.stdout, f"missing from {args}"
 
 
+def test_both_units_name_the_render_driver_for_the_window_surface(checkout):
+    # v0.1.2 booted, ran stably for fifteen minutes, logged every frame it
+    # drew -- and showed solid black. The second boot changed nothing but
+    # these two variables, passed on the kernel command line with
+    # systemd.setenv=, and the panel painted.
+    #
+    # Why, from SDL 2.32.4's source. pygame's non-OpenGL set_mode() ends in
+    # SDL_GetWindowSurface, which calls SDL_CreateWindowFramebuffer
+    # (SDL_video.c:2708). On kmsdrm ShouldAttemptTextureFramebuffer() is true
+    # -- the driver is not the dummy one and none of the x11/windows/
+    # emscripten special cases apply -- so the window surface is emulated with
+    # a 2D renderer by SDL_CreateWindowTexture (SDL_video.c:230). With no hint
+    # set that function walks render_drivers[] in order (SDL_render.c:100) and
+    # takes the first accelerated non-"software" one. GL_RenderDriver
+    # ("opengl") is listed before GLES2_RenderDriver ("opengles2"), so
+    # "opengl" is always tried first.
+    #
+    # It cannot succeed on this image, and failing is not free. The image
+    # ships no libGL.so.1 on purpose, so SDL_EGL_LoadLibraryInternal
+    # (SDL_egl.c:370) cannot load DEFAULT_OGL and KMSDRM_CreateWindow retries
+    # as GLES 2.0 (SDL_kmsdrmvideo.c:1552), leaving gl_config.profile_mask at
+    # SDL_GL_CONTEXT_PROFILE_ES. GL_CreateRenderer tests exactly that
+    # (SDL_render_gl.c:1717) and calls SDL_RecreateWindow to ask for a desktop
+    # context -- which destroys the kmsdrm window: KMSDRM_DestroySurfaces
+    # points the CRTC back at the original TTY buffer and KMSDRM_GBMDeinit
+    # drops DRM master. It fails anyway, and its error path recreates the
+    # window a second time (SDL_render_gl.c:1938). Only then does the loop
+    # reach "opengles2".
+    #
+    # Naming the driver skips the whole attempt: SDL_CreateWindowTexture reads
+    # SDL_FRAMEBUFFER_ACCELERATION first and falls back to SDL_RENDER_DRIVER,
+    # so either one alone would satisfy that code. Both are set because both
+    # together are what was observed to work, and checking an untested subset
+    # costs a 35-minute build and a reflash.
+    #
+    # Both units, because both run the same program against the same SDL on
+    # the same hardware: the appliance unit on an image, the checkout template
+    # on a developer's Pi, which is where H1, H3 and H7 are run.
+    for args in (("--print-unit",), ("--appliance", "--print-unit")):
+        done = run(checkout, *args)
+        assert done.returncode == 0, done.stderr
+        assert "Environment=SDL_FRAMEBUFFER_ACCELERATION=opengles2" in done.stdout, \
+            f"missing from {args}"
+        assert "Environment=SDL_RENDER_DRIVER=opengles2" in done.stdout, \
+            f"missing from {args}"
+
+
 def test_appliance_unit_keeps_the_tty_grab(checkout):
     # Without a controlling TTY, kmsdrm cannot become DRM master and the panel
     # stays black even though the service is "running".
@@ -184,6 +247,64 @@ def test_appliance_unit_can_write_its_identity_directory(checkout):
     out = run(checkout, "--appliance", "--print-unit").stdout
     assert "ProtectSystem=strict" in out
     assert "ReadWritePaths=/var/lib/scoreboard" in out
+
+
+def test_the_appliance_unit_lets_the_gpio_buttons_reach_the_gpio(checkout):
+    # Seen in v0.1.2's journal on every start, four times:
+    #
+    #   xCreatePipe: Can't set permissions (436) for /opt/scoreboard/.lgd-nfy0,
+    #       No such file or directory
+    #   PinFactoryFallback: Falling back from lgpio: [Errno 2] No such file or
+    #       directory: '.lgd-nfy-3'
+    #   ... rpigpio ... pigpio ... native: unable to open /dev/gpiomem or /dev/mem
+    #
+    # Nothing visible broke, because this panel has no buttons. But the
+    # hardened unit had silently switched them off, and the journal is now the
+    # panel's only diagnosis surface, so four warnings a start is a real cost
+    # even when the hardware is absent.
+    #
+    # Two causes, both read from source rather than guessed at.
+    #
+    # 1. lgpio makes a notification FIFO in its working directory:
+    #    lgNotify.c:131 builds "%s/.lgd-nfy%d" from lguGetWorkDir(), which
+    #    (lgUtil.c:181) returns getenv(LG_WD) and otherwise falls back to
+    #    getcwd(). LG_WD is the literal "LG_WD" (lgpio.h:39). With nothing
+    #    set, getcwd() here is WorkingDirectory=/opt/scoreboard, which
+    #    ProtectSystem=strict makes read-only -- hence the exact permission
+    #    in the message, 436 == 0664, which is the mode xCreatePipe passes.
+    #
+    # 2. Even with somewhere to write, the process could not open the chip:
+    #    lgpio opens /dev/gpiochip%d (lgGpio.c:724) and gpiozero's factory
+    #    picks chip 0 on a Pi 4 (gpiozero/pins/lgpio.py:67). The unit's
+    #    DeviceAllow list named char-drm, char-input and /dev/tty1 and
+    #    nothing else. The kernel registers that char device class as
+    #    "gpiochip" (drivers/gpio/gpiolib.h, GPIOCHIP_NAME -- no line
+    #    number, it moves between trees), which is the name systemd
+    #    matches against /proc/devices, so char-gpiochip is the class.
+    #
+    # The group half was already right: raspberrypi-sys-mods' 99-com.rules
+    # has SUBSYSTEM=="gpio", GROUP="gpio", MODE="0660", and pi-setup.sh's
+    # install_appliance adds the service account to gpio when it exists.
+    out = run(checkout, "--appliance", "--print-unit").stdout
+    fields = unit(out)
+    assert "DeviceAllow=char-gpiochip rw" in out, \
+        "lgpio cannot open /dev/gpiochip0 under this unit"
+    assert "Environment=LG_WD=" in out, \
+        "lgpio will fall back to getcwd(), which ProtectSystem=strict has made read-only"
+    # And wherever it is pointed has to be somewhere the service can write,
+    # or the setting moves the failure rather than fixing it.
+    lg_wd = next(line.split("=", 2)[2] for line in out.splitlines()
+                 if line.startswith("Environment=LG_WD="))
+    writable = [line.split("=", 1)[1] for line in out.splitlines()
+                if line.startswith("ReadWritePaths=")]
+    assert any(lg_wd == p or lg_wd.startswith(p.rstrip("/") + "/") for p in writable), \
+        f"LG_WD={lg_wd} is not under any ReadWritePaths= ({writable}); the FIFO still cannot be made"
+    # And it must not be pointed back at the working directory, which is the
+    # default lgpio would have used by itself and the one place we know is
+    # read-only under ProtectSystem=strict. Setting LG_WD to that would look
+    # like a fix and change nothing.
+    assert lg_wd != fields["WorkingDirectory"], \
+        f"LG_WD={lg_wd} is the working directory, which is exactly where this failed"
 
 
 def test_appliance_unit_does_not_declare_supplementary_groups(checkout):
