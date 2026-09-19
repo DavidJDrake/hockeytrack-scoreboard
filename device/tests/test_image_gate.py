@@ -103,7 +103,43 @@ def clean_image(tmp_path: Path) -> tuple[Path, Path]:
     (root / "usr" / "share" / "doc" / "openssh-server").mkdir(parents=True)
     (root / "usr" / "share" / "doc" / "openssh-server" / "authorized_keys.example").write_text(
         "ssh-ed25519 AAAAexample this is documentation, not a real key\n")
+    _display_path(root)
     return root, boot
+
+
+ARCH_LIB = "usr/lib/aarch64-linux-gnu"
+
+
+def _display_path(root: Path) -> None:
+    """The graphics files the panel needs to open its display at all.
+
+    SDL's kmsdrm backend dlopens libEGL.so.1 and libGLESv2.so.2 by soname,
+    the glvnd dispatcher reads 50_mesa.json to find libEGL_mesa.so.0, and
+    Mesa's GBM backend (gbm/dri_gbm.so) dlopens dri/vc4_dri.so for the Pi 4's
+    KMS display and dri/v3d_dri.so for its render node.
+
+    Every one of these is the tail of a versioned symlink chain in the real
+    debs, so the fixture is built the same way: a gate that only tested the
+    link itself would pass an image whose target was never unpacked.
+    """
+    arch = root / ARCH_LIB
+    (arch / "gbm").mkdir(parents=True)
+    (arch / "dri").mkdir()
+    for real, link in (("libEGL.so.1.1.0", "libEGL.so.1"),
+                       ("libEGL_mesa.so.0.0.0", "libEGL_mesa.so.0"),
+                       ("libGLESv2.so.2.1.0", "libGLESv2.so.2"),
+                       ("libgbm.so.1.0.0", "libgbm.so.1")):
+        (arch / real).write_bytes(b"\x7fELF not really")
+        (arch / link).symlink_to(real)
+    (arch / "gbm" / "dri_gbm.so").write_bytes(b"\x7fELF not really")
+    # Mesa 25/26 ships one shared implementation with a symlink per driver.
+    (arch / "dri" / "libdril_dri.so").write_bytes(b"\x7fELF not really")
+    for driver in ("vc4_dri.so", "v3d_dri.so"):
+        (arch / "dri" / driver).symlink_to("libdril_dri.so")
+    vendor = root / "usr" / "share" / "glvnd" / "egl_vendor.d"
+    vendor.mkdir(parents=True)
+    (vendor / "50_mesa.json").write_text(
+        '{"file_format_version":"1.0.0","ICD":{"library_path":"libEGL_mesa.so.0"}}\n')
 
 
 def gate(root: Path, boot: Path):
@@ -468,6 +504,42 @@ BREAKS = {
     "a later drop-in relaxing the sync interval": (
         lambda r, b: _write(r / "etc/systemd/journald.conf.d/99-slow-sync.conf",
                             "[Journal]\nSyncIntervalSec=5min\n"), "SyncIntervalSec"),
+    # The display path. v0.1.1 passed every rule above and still showed a
+    # black screen, because none of these files was in the image
+    # (docs/hardware-checks.md, H5). One break per missing piece: a partial
+    # set produces exactly the same black screen as an empty one.
+    "the EGL dispatcher missing": (
+        lambda r, b: ((r / ARCH_LIB / "libEGL.so.1").unlink(),
+                      (r / ARCH_LIB / "libEGL.so.1.1.0").unlink()), "libEGL.so.1"),
+    "the EGL dispatcher left as a symlink to nothing": (
+        lambda r, b: (r / ARCH_LIB / "libEGL.so.1.1.0").unlink(), "libEGL.so.1"),
+    "a display library symlinked to a host path that is not in the image": (
+        # /bin/sh exists on the build machine but not in this rootfs. Only a
+        # check that resolves the link INSIDE the image root catches it; one
+        # that lets the host resolve it reads the image as fine.
+        lambda r, b: ((r / ARCH_LIB / "libEGL.so.1").unlink(),
+                      (r / ARCH_LIB / "libEGL.so.1").symlink_to("/bin/sh")), "libEGL.so.1"),
+    "Mesa's EGL vendor library missing": (
+        lambda r, b: ((r / ARCH_LIB / "libEGL_mesa.so.0").unlink(),
+                      (r / ARCH_LIB / "libEGL_mesa.so.0.0.0").unlink()), "libEGL_mesa.so.0"),
+    "the glvnd EGL vendor file missing": (
+        lambda r, b: (r / "usr/share/glvnd/egl_vendor.d/50_mesa.json").unlink(), "50_mesa.json"),
+    "the GLES2 library missing": (
+        lambda r, b: ((r / ARCH_LIB / "libGLESv2.so.2").unlink(),
+                      (r / ARCH_LIB / "libGLESv2.so.2.1.0").unlink()), "libGLESv2.so.2"),
+    "libgbm missing": (
+        lambda r, b: ((r / ARCH_LIB / "libgbm.so.1").unlink(),
+                      (r / ARCH_LIB / "libgbm.so.1.0.0").unlink()), "libgbm.so.1"),
+    "the GBM backend missing": (
+        lambda r, b: (r / ARCH_LIB / "gbm/dri_gbm.so").unlink(), "dri_gbm.so"),
+    "the vc4 DRI driver missing": (
+        lambda r, b: (r / ARCH_LIB / "dri/vc4_dri.so").unlink(), "vc4_dri.so"),
+    "the v3d DRI driver missing": (
+        lambda r, b: (r / ARCH_LIB / "dri/v3d_dri.so").unlink(), "v3d_dri.so"),
+    "every DRI driver left dangling by a missing libdril_dri.so": (
+        # mesa-libgallium alone produces exactly this: the dri/ directory
+        # exists and the per-driver symlinks do not, or point at nothing.
+        lambda r, b: (r / ARCH_LIB / "dri/libdril_dri.so").unlink(), "vc4_dri.so"),
 }
 
 
@@ -607,6 +679,42 @@ def test_a_relative_mask_symlink_is_still_a_mask(tmp_path):
     (root / "etc/systemd/system/userconfig.service").symlink_to("../../../dev/null")
     result = gate(root, boot)
     assert result.returncode == 0, result.stderr
+
+
+def test_a_display_library_reached_by_an_absolute_symlink_inside_the_image_passes(tmp_path):
+    # The converse of the break fixture above: an absolute link target is
+    # legitimate as long as it resolves inside the image. The gate must
+    # re-root it rather than hand it to the host, which on a build machine
+    # with no aarch64 multiarch directory would fail a perfectly good image.
+    root, boot = clean_image(tmp_path)
+    (root / ARCH_LIB / "libEGL.so.1").unlink()
+    (root / ARCH_LIB / "libEGL.so.1").symlink_to(f"/{ARCH_LIB}/libEGL.so.1.1.0")
+    result = gate(root, boot)
+    assert result.returncode == 0, result.stderr
+    assert "image-gate: all checks passed" in result.stdout
+
+
+def test_a_display_library_reached_through_two_symlink_hops_passes(tmp_path):
+    # Nothing in the debs chains twice today, but following links one hop
+    # only would be an accident waiting for the first package that does.
+    root, boot = clean_image(tmp_path)
+    arch = root / ARCH_LIB
+    (arch / "libEGL.so.1").unlink()
+    (arch / "libEGL.so.1.moved").symlink_to("libEGL.so.1.1.0")
+    (arch / "libEGL.so.1").symlink_to("libEGL.so.1.moved")
+    result = gate(root, boot)
+    assert result.returncode == 0, result.stderr
+
+
+def test_a_display_library_symlink_loop_fails_rather_than_hanging(tmp_path):
+    root, boot = clean_image(tmp_path)
+    arch = root / ARCH_LIB
+    (arch / "libEGL.so.1").unlink()
+    (arch / "libEGL.so.1").symlink_to("libEGL.so.1.loop")
+    (arch / "libEGL.so.1.loop").symlink_to("libEGL.so.1")
+    result = gate(root, boot)
+    assert result.returncode == 1, result.stdout
+    assert "libEGL.so.1" in result.stderr
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="running as root can read anything, so an unreadable fixture proves nothing")

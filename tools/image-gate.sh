@@ -10,6 +10,15 @@
 # inspects the filesystem; it does not boot the image. Booting is proven on
 # real hardware (docs/hardware-checks.md).
 #
+# Since 2026-09-18 it checks a second thing: that the image can do its one
+# job. v0.1.1 passed every no-secrets rule here, shipped, booted unattended --
+# and showed a black screen, because SDL's kmsdrm backend dlopens its EGL,
+# GLES and DRI libraries at runtime and none of them was in the image (H5).
+# A secret-free image that cannot light the panel is still a bad release, and
+# a release costs thirty-five minutes of build plus a human with a card
+# reader. Anything the display path needs at runtime but nothing in the image
+# depends on belongs here, asserted by path.
+#
 # A gate that can be bypassed guards nothing, so every check here fails
 # closed: an error probing the image (a find or grep that could not read
 # something) is treated the same as finding a secret, never as "clean".
@@ -39,6 +48,34 @@ sanitize_for_log() {
 # with this first.
 reject_symlink() {
   [ ! -L "$1" ] || fail "$2 is a symlink; it must be a real directory so the gate can see inside it"
+}
+
+# Does an image-absolute path resolve to something that really exists, inside
+# the image? Returns 0/1; it never fails the gate itself, so the caller can
+# say what was missing and why it matters.
+#
+# The symlink chain is walked by hand rather than left to `[ -e ]` or
+# `readlink -e`, because every library this gate looks for is the head of a
+# versioned chain (libEGL.so.1 -> libEGL.so.1.1.0, dri/vc4_dri.so ->
+# libdril_dri.so) and the host must never be consulted about any of it: an
+# ABSOLUTE link target inside a rootfs means "/usr/... in that rootfs", but
+# the kernel resolving it here would read the build machine's /usr instead.
+# That cuts both ways -- it can pass an image missing the file because the
+# host happens to have one, and fail a good image because an x86 host has no
+# aarch64 multiarch directory. A relative target is resolved beside the link,
+# as it would be on the panel. The hop limit stops a symlink loop spinning.
+image_resolves() {
+  local cur="$ROOT/$1" target hops=0
+  while [ -L "$cur" ]; do
+    hops=$((hops + 1))
+    [ "$hops" -le 16 ] || return 1
+    target="$(readlink -- "$cur")" || return 1
+    case "$target" in
+      /*) cur="$ROOT$target" ;;
+      *) cur="$(dirname -- "$cur")/$target" ;;
+    esac
+  done
+  [ -e "$cur" ]
 }
 
 # Run find, capturing its output in $FOUND. A nonzero exit -- a permission or
@@ -521,6 +558,35 @@ run_find "$ROOT/opt/scoreboard/.venv" -type d -name pygame -print -quit
 [ -z "$FOUND" ] || fail "the virtualenv carries its own pygame (${FOUND#"$ROOT"}), which has no kmsdrm driver"
 [ -d "$ROOT/usr/lib/python3/dist-packages/pygame" ] || fail "the distribution's pygame is not installed"
 ok "the virtualenv uses the distribution's pygame"
+
+# The right pygame is not enough: it dlopens the rest of the display path at
+# runtime. SDL_egl.c opens "libEGL.so.1" and "libGLESv2.so.2" by those exact
+# sonames, the glvnd dispatcher reads a vendor file to find Mesa's
+# libEGL_mesa.so.0, and Mesa's GBM backend loads the DRI driver matching the
+# kernel's -- vc4 for the Pi 4's KMS display, v3d for its render node. None of
+# those is a dependency of anything in the image, so apt never installs them
+# unasked; tools/pi-gen/stage-scoreboard/00-packages/00-packages and
+# pi-setup.sh's install_appliance name them explicitly, and this is the check
+# that they arrived. A PARTIAL set is not a partial failure: any one of these
+# missing produces the same black screen, so all of them are asserted.
+#
+# The paths are what the trixie arm64 debs actually ship, read with dpkg-deb -c
+# on 2026-09-18 -- not recalled. Each is the head of a versioned symlink chain,
+# which image_resolves() follows inside the image root.
+ARCH_LIB="usr/lib/aarch64-linux-gnu"
+need_display_file() {
+  image_resolves "$1" || fail \
+    "the display path is incomplete: /$1 is missing or unresolvable (shipped by $2). SDL loads it at runtime, so nothing in the image depends on it and apt will not install it on its own -- the panel would come up black"
+}
+need_display_file "$ARCH_LIB/libEGL.so.1" "libegl1"
+need_display_file "$ARCH_LIB/libEGL_mesa.so.0" "libegl-mesa0"
+need_display_file "usr/share/glvnd/egl_vendor.d/50_mesa.json" "libegl-mesa0"
+need_display_file "$ARCH_LIB/libGLESv2.so.2" "libgles2"
+need_display_file "$ARCH_LIB/libgbm.so.1" "libgbm1"
+need_display_file "$ARCH_LIB/gbm/dri_gbm.so" "libgbm1"
+need_display_file "$ARCH_LIB/dri/vc4_dri.so" "libgl1-mesa-dri"
+need_display_file "$ARCH_LIB/dri/v3d_dri.so" "libgl1-mesa-dri"
+ok "the display path is complete: EGL dispatcher and Mesa vendor, GLES2, GBM and its backend, and the vc4 and v3d DRI drivers"
 
 # The service that holds each panel's IoT private key imports paho-mqtt, so it
 # comes from Debian's signed archive (python3-paho-mqtt), not an unpinned PyPI
