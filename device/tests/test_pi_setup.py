@@ -88,6 +88,35 @@ def test_appliance_unit_runs_as_its_own_account(checkout):
         "SCOREBOARD_CONFIG_DIR=/var/lib/scoreboard" in done.stdout
 
 
+def test_the_program_uses_no_sound_at_all(checkout):
+    # The tripwire for the setting below. If the scoreboard ever does play a
+    # sound, SDL_AUDIODRIVER=dummy would silence it on every panel and the
+    # only symptom would be silence -- so the setting is only defensible
+    # while this holds. Read from the real package, not the throwaway copy.
+    source = "\n".join(p.read_text() for p in sorted((REPO / "device" / "scoreboard").glob("*.py")))
+    for api in ("mixer", "Sound(", "sndarray", "pygame.music"):
+        assert api not in source, \
+            f"device/scoreboard/ now uses {api!r}; remove SDL_AUDIODRIVER=dummy from the units first"
+
+
+def test_both_units_ask_sdl_for_the_dummy_audio_driver(checkout):
+    # The panel has no sound hardware and the program plays nothing (the test
+    # above), but pygame.init() initializes the mixer regardless, and ALSA
+    # then prints about fifteen "cannot find card '0'" lines on every single
+    # start. That noise goes into a journal which is now persistent and is
+    # the only diagnosis surface a panel has once it owns tty1 -- and the
+    # service restarts every 3 s while it is failing, so the one line worth
+    # reading is buried under hundreds of lines that are not.
+    #
+    # Both units, because both run the same soundless program: the appliance
+    # unit on an image, and the checkout template on a developer's Pi, where
+    # the same fifteen lines bury the same failures.
+    for args in (("--print-unit",), ("--appliance", "--print-unit")):
+        done = run(checkout, *args)
+        assert done.returncode == 0, done.stderr
+        assert "Environment=SDL_AUDIODRIVER=dummy" in done.stdout, f"missing from {args}"
+
+
 def test_appliance_unit_keeps_the_tty_grab(checkout):
     # Without a controlling TTY, kmsdrm cannot become DRM master and the panel
     # stays black even though the service is "running".
