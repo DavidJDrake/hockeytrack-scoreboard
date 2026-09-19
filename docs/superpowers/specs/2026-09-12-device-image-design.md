@@ -580,6 +580,25 @@ The scoreboard Terraform was applied from a saved plan: 26 added, 7 changed, 0 d
 
 **Known, unfixed:** the monitor's log carries `SDK WARN Skipped validation of multipart checksum` — S3 stores a composite checksum for a multipart upload, which the SDK will not validate whole. It weakens nothing here, because the monitor hashes the bytes itself and compares against GitHub's published checksum, but the warning should be silenced so the log stays readable.
 
+### 9.9d Proven on hardware, 2026-09-19: four images to a working panel
+
+The first release verified (§9.9c) and did not work. It took four published images before a stranger's path — download, verify, flash, add a setup file, power on — produced a working panel. Each failure was something no test could have shown, and each is recorded in `docs/hardware-checks.md` with how it was found. In order:
+
+| Image | What a real Pi 4 did | What was wrong |
+|---|---|---|
+| `v0.1.0` | Stopped at Raspberry Pi OS's "enter a new username" wizard | pi-gen arms the wizard in its export step, *after* our stage. The appliance has no keyboard. Fixed by masking the unit, since removing the enablement would have been undone. |
+| `v0.1.1` | Booted unattended, then a black screen | `EGL not initialized`: SDL loads `libEGL`, Mesa's EGL vendor library and `libGLESv2` at runtime, nothing depends on them, and a minimal image does not have them. Separately, the radio ships off until a Wi-Fi country is set, and the site's setup file had no `country=` line. |
+| `v0.1.2` | Drew, but only with two SDL settings added to the card by hand; upside down; "No network" | SDL tried a desktop-OpenGL renderer first. The panel picks a rotation it cannot know before enrollment. The Wi-Fi join ran once, 0.7 s after start, before any scan, and never retried. |
+| `v0.1.3` | **Worked from the stock image** | — |
+
+On `v0.1.3`, with nothing edited on the card by hand: the panel booted unattended, drew the right way up from `rotate=270` in the setup file, joined Wi-Fi, showed a pairing code with the owner's address, was claimed on the site on the first try, was issued exactly one active certificate carrying only the `scoreboard-device` policy, restarted into the scoreboard, and displayed and counted down a game chosen on the site. H1, H5 and the core path of H8 pass on a Pi 4. What has **not** been run is listed under H8 and in the results table, not left to be inferred.
+
+Three things this section exists to say plainly:
+
+- **The gate's first job was secrets, and that was not enough.** `v0.1.1` passed every rule and showed a black screen. The gate now also fails an image that cannot open its display (§9.3). It still cannot tell that an image will *join a network*; only a boot can.
+- **Two of the fixes were first justified by explanations that were false,** and review, not hardware, caught both: that a package upgrade would delete the wizard's mask (Debian's helper refuses to remove a mask it did not create), and that the GPU drivers were missing (on Mesa 26 they are compiled into a library that was already installed). The fixes held; the reasons written next to them were corrected everywhere they appeared.
+- **Diagnosis had to be built before it could be used.** With no login, no SSH and no console prompt, a failed panel said nothing. The persistent journal (§9.2) and `systemd.journald.forward_to_console=1` on the boot partition's `cmdline.txt` are what made `v0.1.1`'s and `v0.1.2`'s failures readable at all.
+
 ### 9.10 Order of work and proof
 
 1. **Code:** the gate and its fixtures, the pi-gen recipe, the workflow, `images.tf`, the monitor, and the download page, each test-first where it can be.
