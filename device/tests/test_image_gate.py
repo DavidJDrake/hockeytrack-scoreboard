@@ -113,18 +113,19 @@ ARCH_LIB = "usr/lib/aarch64-linux-gnu"
 def _display_path(root: Path) -> None:
     """The graphics files the panel needs to open its display at all.
 
-    SDL's kmsdrm backend dlopens libEGL.so.1 and libGLESv2.so.2 by soname,
-    the glvnd dispatcher reads 50_mesa.json to find libEGL_mesa.so.0, and
-    Mesa's GBM backend (gbm/dri_gbm.so) dlopens dri/vc4_dri.so for the Pi 4's
-    KMS display and dri/v3d_dri.so for its render node.
+    SDL's kmsdrm backend dlopens libEGL.so.1 and libGLESv2.so.2 by soname;
+    the glvnd dispatcher reads 50_mesa.json to find libEGL_mesa.so.0; and
+    libgbm dlopens its backend, gbm/dri_gbm.so. That is the whole chain --
+    libEGL_mesa.so.0 and dri_gbm.so both hard-link (DT_NEEDED) against
+    libgallium, which is where the vc4 and v3d drivers are compiled in, so
+    nothing here loads a dri/*_dri.so at all (see tools/image-gate.sh).
 
-    Every one of these is the tail of a versioned symlink chain in the real
+    Several of these are the head of a versioned symlink chain in the real
     debs, so the fixture is built the same way: a gate that only tested the
     link itself would pass an image whose target was never unpacked.
     """
     arch = root / ARCH_LIB
     (arch / "gbm").mkdir(parents=True)
-    (arch / "dri").mkdir()
     for real, link in (("libEGL.so.1.1.0", "libEGL.so.1"),
                        ("libEGL_mesa.so.0.0.0", "libEGL_mesa.so.0"),
                        ("libGLESv2.so.2.1.0", "libGLESv2.so.2"),
@@ -132,10 +133,6 @@ def _display_path(root: Path) -> None:
         (arch / real).write_bytes(b"\x7fELF not really")
         (arch / link).symlink_to(real)
     (arch / "gbm" / "dri_gbm.so").write_bytes(b"\x7fELF not really")
-    # Mesa 25/26 ships one shared implementation with a symlink per driver.
-    (arch / "dri" / "libdril_dri.so").write_bytes(b"\x7fELF not really")
-    for driver in ("vc4_dri.so", "v3d_dri.so"):
-        (arch / "dri" / driver).symlink_to("libdril_dri.so")
     vendor = root / "usr" / "share" / "glvnd" / "egl_vendor.d"
     vendor.mkdir(parents=True)
     (vendor / "50_mesa.json").write_text(
@@ -506,8 +503,10 @@ BREAKS = {
                             "[Journal]\nSyncIntervalSec=5min\n"), "SyncIntervalSec"),
     # The display path. v0.1.1 passed every rule above and still showed a
     # black screen, because none of these files was in the image
-    # (docs/hardware-checks.md, H5). One break per missing piece: a partial
-    # set produces exactly the same black screen as an empty one.
+    # (docs/hardware-checks.md, H5). One break per file, because each is a
+    # separate link in one chain: SDL cannot reach the vendor library without
+    # the dispatcher, the dispatcher cannot find the vendor library without
+    # the JSON, and libgbm cannot reach libgallium without its backend.
     "the EGL dispatcher missing": (
         lambda r, b: ((r / ARCH_LIB / "libEGL.so.1").unlink(),
                       (r / ARCH_LIB / "libEGL.so.1.1.0").unlink()), "libEGL.so.1"),
@@ -532,14 +531,6 @@ BREAKS = {
                       (r / ARCH_LIB / "libgbm.so.1.0.0").unlink()), "libgbm.so.1"),
     "the GBM backend missing": (
         lambda r, b: (r / ARCH_LIB / "gbm/dri_gbm.so").unlink(), "dri_gbm.so"),
-    "the vc4 DRI driver missing": (
-        lambda r, b: (r / ARCH_LIB / "dri/vc4_dri.so").unlink(), "vc4_dri.so"),
-    "the v3d DRI driver missing": (
-        lambda r, b: (r / ARCH_LIB / "dri/v3d_dri.so").unlink(), "v3d_dri.so"),
-    "every DRI driver left dangling by a missing libdril_dri.so": (
-        # mesa-libgallium alone produces exactly this: the dri/ directory
-        # exists and the per-driver symlinks do not, or point at nothing.
-        lambda r, b: (r / ARCH_LIB / "dri/libdril_dri.so").unlink(), "vc4_dri.so"),
 }
 
 

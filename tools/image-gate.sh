@@ -561,18 +561,29 @@ ok "the virtualenv uses the distribution's pygame"
 
 # The right pygame is not enough: it dlopens the rest of the display path at
 # runtime. SDL_egl.c opens "libEGL.so.1" and "libGLESv2.so.2" by those exact
-# sonames, the glvnd dispatcher reads a vendor file to find Mesa's
-# libEGL_mesa.so.0, and Mesa's GBM backend loads the DRI driver matching the
-# kernel's -- vc4 for the Pi 4's KMS display, v3d for its render node. None of
-# those is a dependency of anything in the image, so apt never installs them
-# unasked; tools/pi-gen/stage-scoreboard/00-packages/00-packages and
-# pi-setup.sh's install_appliance name them explicitly, and this is the check
-# that they arrived. A PARTIAL set is not a partial failure: any one of these
-# missing produces the same black screen, so all of them are asserted.
+# sonames; the glvnd dispatcher reads a vendor JSON to find Mesa's
+# libEGL_mesa.so.0; and libgbm dlopens its backend, gbm/dri_gbm.so. None of
+# those is a dependency of anything else in the image, so apt never installs
+# them unasked; the two package lists name them explicitly, and this is the
+# check that they arrived.
+#
+# That is the WHOLE chain. An earlier version of this block also asserted
+# dri/vc4_dri.so and dri/v3d_dri.so, on the belief that Mesa's GBM backend
+# loads a per-driver DRI module. It does not, and inspecting the 26.2.2 arm64
+# debs says so plainly: gbm/dri_gbm.so and libEGL_mesa.so.0 import no dlopen
+# at all and both carry DT_NEEDED on libgallium-26.2.2-...so; no "%s_dri.so"
+# template exists in libgallium, libEGL_mesa, dri_gbm.so or libgbm; and
+# libgallium's strings carry VC4_DEBUG and V3D_DEBUG, because the vc4 and v3d
+# gallium drivers are compiled into it. Every dri/*_dri.so is in fact a
+# symlink to libdril_dri.so, a small shim that dlopens libEGL.so.1 itself --
+# Mesa's legacy-DRI-over-EGL layer for the X server, which sits downstream of
+# this path rather than under it. Those two rules were asserting files that do
+# not carry the display, and "dril" is new enough upstream that a rename would
+# have failed a perfectly good build, so they are gone.
 #
 # The paths are what the trixie arm64 debs actually ship, read with dpkg-deb -c
-# on 2026-09-18 -- not recalled. Each is the head of a versioned symlink chain,
-# which image_resolves() follows inside the image root.
+# on 2026-09-18 -- not recalled. Several are the head of a versioned symlink
+# chain, which image_resolves() follows inside the image root.
 ARCH_LIB="usr/lib/aarch64-linux-gnu"
 need_display_file() {
   image_resolves "$1" || fail \
@@ -584,9 +595,7 @@ need_display_file "usr/share/glvnd/egl_vendor.d/50_mesa.json" "libegl-mesa0"
 need_display_file "$ARCH_LIB/libGLESv2.so.2" "libgles2"
 need_display_file "$ARCH_LIB/libgbm.so.1" "libgbm1"
 need_display_file "$ARCH_LIB/gbm/dri_gbm.so" "libgbm1"
-need_display_file "$ARCH_LIB/dri/vc4_dri.so" "libgl1-mesa-dri"
-need_display_file "$ARCH_LIB/dri/v3d_dri.so" "libgl1-mesa-dri"
-ok "the display path is complete: EGL dispatcher and Mesa vendor, GLES2, GBM and its backend, and the vc4 and v3d DRI drivers"
+ok "the display path is complete: EGL dispatcher, Mesa EGL vendor and its glvnd JSON, GLES2, and GBM with its backend"
 
 # The service that holds each panel's IoT private key imports paho-mqtt, so it
 # comes from Debian's signed archive (python3-paho-mqtt), not an unpinned PyPI

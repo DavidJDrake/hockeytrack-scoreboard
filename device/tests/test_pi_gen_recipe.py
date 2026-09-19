@@ -93,10 +93,41 @@ def test_the_display_libraries_are_in_both_package_lists():
 def test_the_display_libraries_are_explained_where_they_are_listed():
     # A package nothing depends on, with no comment saying why it is there, is
     # the first thing a future cleanup deletes -- and this set is invisible to
-    # every dependency the image has.
+    # every dependency the image has. So the explanation has to be AT the
+    # package names, not merely somewhere in the same file: a reader deleting
+    # the line has to be looking at the reason.
+    # Anchored on libegl1 itself, not on "apt-get install -y": pi-setup.sh has
+    # two apt lines and only the appliance one carries these packages.
     for name, text in (("the image list", PACKAGES_FILE.read_text()),
                        ("pi-setup.sh", (REPO / "tools" / "pi-setup.sh").read_text())):
-        assert "at runtime" in text, f"{name} does not say why these packages are here"
+        lines = text.splitlines()
+        where = next(i for i, l in enumerate(lines)
+                     if "libegl1" in l and not l.lstrip().startswith("#"))
+        # The comment block immediately above the packages, with no blank line
+        # or unrelated code between it and them.
+        block, i = [], where - 1
+        while i >= 0 and (lines[i].lstrip().startswith("#") or not lines[i].strip()):
+            block.append(lines[i])
+            i -= 1
+        block = "\n".join(block)
+        assert "runtime" in block, f"{name}: no runtime-loading explanation above the packages"
+        for soname in ("libEGL.so.1", "libGLESv2.so.2"):
+            assert soname in block, f"{name}: the block above the packages does not name {soname}"
+
+
+def test_the_display_rationale_does_not_claim_the_dri_drivers_were_missing():
+    # Round-1 correction. The original rationale said mesa-libgallium ships no
+    # *_dri.so so the Pi had "no DRI driver at all". Inspecting the 26.2.2
+    # debs disproved it: libEGL_mesa.so.0 and gbm/dri_gbm.so import no dlopen
+    # and both DT_NEEDED libgallium, which has vc4 and v3d compiled in. The
+    # drivers were always present. Keep the corrected story from regrowing the
+    # old one.
+    for name, path in (("the image list", PACKAGES_FILE),
+                       ("pi-setup.sh", REPO / "tools" / "pi-setup.sh")):
+        text = path.read_text()
+        for claim in ("no DRI driver", "every *_dri.so entry point lives here",
+                      "has no DRI driver whatsoever"):
+            assert claim not in text, f"{name} still claims: {claim}"
 
 
 def test_only_the_scoreboard_stage_exports_an_image():
