@@ -368,16 +368,23 @@ RASPI_TIMEOUT_S = 10
 # good. Refusing to ask because the clock ran out would reintroduce exactly
 # the bug the check exists to prevent.
 #
-# Bounded rather than open-ended. status() makes three queries, so one check
-# costs at most 3 x VERIFY_TIMEOUT_S = 6 s -- and at most ONE check can happen
-# with the budget already spent, because join()'s next iteration breaks on
-# budget.expired() before reaching another connect. So the absolute ceiling is
-# BOOT_BUDGET_S + 6 s = 88 s, still inside the "minute and a half" the site
-# promises and 32 s inside the unit's TimeoutStartSec. Two seconds is ample:
-# a panel that IS connected answers this instantly, and the timeout is only
-# there for a wedged nmcli.
+# Bounded rather than open-ended, and bounded by construction rather than by
+# this comment. status() makes three queries at VERIFY_TIMEOUT_S, so one check
+# costs at most 3 x 2 = 6 s -- but that arithmetic holds only while status()
+# makes exactly three queries, and nothing used to say so. joined() therefore
+# opens a Budget(VERIFY_OVERRUN_S) of its own and hands it to status(), which
+# spends the three queries from it: a fourth query would get what is left of
+# the six seconds rather than six more. VERIFY_OVERRUN_S is the enforced
+# number, not a note about one.
+#
+# At most ONE such check can happen with the boot budget already spent,
+# because join()'s next iteration breaks on budget.expired() before reaching
+# another connect. So the ABSOLUTE ceiling is BOOT_BUDGET_S + VERIFY_OVERRUN_S.
+# Two seconds a query is ample: a panel that IS connected answers instantly,
+# and the timeout is only there for a wedged nmcli.
 VERIFY_TIMEOUT_S = 2
-VERIFY_OVERRUN_S = 3 * VERIFY_TIMEOUT_S
+STATUS_QUERIES = 3
+VERIFY_OVERRUN_S = STATUS_QUERIES * VERIFY_TIMEOUT_S
 
 # --- The budget -----------------------------------------------------------
 #
@@ -438,6 +445,16 @@ VERIFY_OVERRUN_S = 3 * VERIFY_TIMEOUT_S
 # setup steps promise an owner watching a dark panel, and leaves 38 s of
 # headroom under the unit's TimeoutStartSec=120 for systemd's own overhead.
 BOOT_BUDGET_S = 82
+
+# The number to compare TimeoutStartSec against, and the one the site's
+# promise has to cover. BOOT_BUDGET_S is the soft budget -- what every step
+# draws from -- and joined() is allowed VERIFY_OVERRUN_S past it, once (see
+# VERIFY_TIMEOUT_S above). Named rather than written out in each of the four
+# places that quote it, because the two numbers were drifting apart already:
+# the spec's "38 s of headroom" was measured from the soft budget and the
+# unit's "32 s" from this one, and read side by side they looked like a
+# contradiction rather than two true statements about different numbers.
+ABSOLUTE_CEILING_S = BOOT_BUDGET_S + VERIFY_OVERRUN_S
 
 # How long to let a Wi-Fi interface settle after the radio is switched on,
 # before trying to connect through it.
@@ -934,6 +951,22 @@ class NetworkManager:
         six tries two seconds apart was really up to about seventy seconds.
         The deadline is re-checked after every query returns.
 
+        **An empty device list is waited out, not given up on.** This used to
+        return False the moment nmcli listed no `wifi`-type row, commented "no
+        Wi-Fi device at all; waiting cannot help". That is right for an
+        Ethernet-only panel and wrong for the boot this method exists for: the
+        unit is `After=NetworkManager.service`, which means NetworkManager has
+        been *started*, not that it has finished enumerating its devices --
+        and until it has, `nmcli -t -f DEVICE,TYPE,STATE device` lists no
+        wlan0 at all rather than listing it as "unavailable". Treating the two
+        cases differently meant the one boot where the radio came up a moment
+        ago could fall straight through to a connect that fails, which is the
+        whole failure this method was added to prevent. The two states are
+        indistinguishable from here, so they get the same treatment: poll
+        until the deadline. The Ethernet-only panel pays the WIFI_READY_S wait
+        it used to skip, on a boot where its setup file was going to fail
+        anyway.
+
         Never raises. A false return is not fatal; the caller goes on and lets
         the connect's own error be the one that gets reported.
         """
@@ -946,8 +979,8 @@ class NetworkManager:
                 return False
             states = [f[2] for f in (split_terse(l) for l in out.splitlines())
                       if len(f) >= 3 and f[1] == "wifi"]
-            if not states:
-                return False  # no Wi-Fi device at all; waiting cannot help
+            # No row yet is "not enumerated yet" as often as it is "no adapter",
+            # and nothing here can tell them apart -- so keep looking.
             if any(s not in ("unavailable", "unmanaged") for s in states):
                 return True
             # After the call, not before it: the query is where the time went.
@@ -989,8 +1022,14 @@ class NetworkManager:
                 best[found.ssid] = found
         return sorted(best.values(), key=lambda n: n.signal, reverse=True)
 
-    def rescan(self, budget: "Budget | None" = None, clock=None) -> bool:
+    def rescan(self, budget: "Budget | None" = None) -> bool:
         """Ask NetworkManager for a fresh scan. True if it accepted.
+
+        It took a ``clock=`` it never read. One call, no loop and no nap, so
+        there is nothing here for a clock to move -- the caller's budget is
+        already carrying one. A parameter that is only ever passed and never
+        used reads as "this is on the fake clock" to the next person, which
+        is exactly the kind of thing that makes a timing test look sound.
 
         Not fatal when refused, but the reasoning first written here was
         wrong and is worth correcting rather than deleting. It said a refusal
@@ -1087,7 +1126,7 @@ class NetworkManager:
         while True:
             if asked_at is None or own.elapsed() - asked_at >= SCAN_REISSUE_S:
                 asked_at = own.elapsed()
-                if self.rescan(budget=own, clock=clock):
+                if self.rescan(budget=own):
                     speak.say("rescan requested")
             try:
                 polls += 1
@@ -1124,7 +1163,7 @@ class NetworkManager:
             args += ["hidden", "yes"]
         self._run(args, timeout=timeout)
 
-    def joined(self, ssid: str) -> bool:
+    def joined(self, ssid: str, clock=None) -> bool:
         """Is this panel actually on that network right now?
 
         Asked after a connect that timed out, because a timeout is not a
@@ -1137,13 +1176,23 @@ class NetworkManager:
         Any failure here is False rather than an exception: this is a second
         opinion, and one that cannot be obtained is not a success.
 
-        It uses VERIFY_TIMEOUT_S outright rather than drawing from the budget,
-        because a spent budget is precisely when this matters most and a
-        timeout of zero would answer "no" without asking. See VERIFY_OVERRUN_S
-        for why that is bounded and what it costs.
+        It uses VERIFY_TIMEOUT_S outright rather than drawing from the BOOT
+        budget, because a spent budget is precisely when this matters most and
+        a timeout of zero would answer "no" without asking. What bounds it
+        instead is a budget of its own, VERIFY_OVERRUN_S wide, started here.
+
+        That deadline is the whole of the difference between BOOT_BUDGET_S and
+        the absolute ceiling, and it is now enforced rather than argued. It
+        used to be arithmetic in a comment -- "status() makes three queries at
+        VERIFY_TIMEOUT_S, so the overrun is 3 x 2 = 6 s" -- which is true only
+        for as long as status() makes exactly three queries, and nothing
+        anywhere said so. Adding a fourth would have moved the ceiling with
+        nothing to notice. With the budget, a fourth query gets whatever is
+        left of the six seconds and the ceiling does not move.
         """
+        check = Budget(VERIFY_OVERRUN_S, clock=clock)
         try:
-            now = self.status(timeout=VERIFY_TIMEOUT_S)
+            now = self.status(timeout=VERIFY_TIMEOUT_S, budget=check)
         except NetworkError as e:
             log.debug("could not check whether the join worked: %s", e)
             return False
@@ -1249,7 +1298,7 @@ class NetworkManager:
                     # The client was killed; the daemon was not. Ask.
                     budget.say("attempt %d ran out of time; asking NetworkManager "
                                "what actually happened", attempt)
-                    if self.joined(settings.ssid):
+                    if self.joined(settings.ssid, clock=clock):
                         budget.say("NetworkManager finished the job anyway: "
                                    "connected to %r", settings.ssid)
                         return
@@ -1291,7 +1340,8 @@ class NetworkManager:
                 # By UUID: a connection name can contain anything at all.
                 self._run(["connection", "delete", "uuid", fields[0]])
 
-    def status(self, timeout: float = QUERY_TIMEOUT_S) -> Status:
+    def status(self, timeout: float = QUERY_TIMEOUT_S,
+               budget: "Budget | None" = None) -> Status:
         """What this panel is connected to, if anything.
 
         ``timeout`` bounds EACH of the three queries below. The default is
@@ -1307,19 +1357,25 @@ class NetworkManager:
 
         The boot path passes a smaller number (see joined()); the render loop
         gets 10 s per query by default.
+
+        ``budget`` bounds the three queries TOGETHER, which is a different
+        question from bounding each one. joined() passes a VERIFY_OVERRUN_S
+        budget so that the one check allowed to run past the boot deadline
+        cannot exceed that number however many queries this method grows.
         """
+        each = (lambda: budget.allow(timeout)) if budget is not None else (lambda: timeout)
         online = self._run(["-t", "-f", "STATE", "general"],
-                           timeout=timeout).strip() == "connected"
+                           timeout=each()).strip() == "connected"
         ssid = None
         for line in self._run(["-t", "-f", "ACTIVE,SSID", "device", "wifi"],
-                              timeout=timeout).splitlines():
+                              timeout=each()).splitlines():
             fields = split_terse(line)
             if len(fields) >= 2 and fields[0] == "yes":
                 ssid = fields[1]
                 break
         ip = None
         for line in self._run(["-t", "-f", "IP4.ADDRESS", "device", "show"],
-                              timeout=timeout).splitlines():
+                              timeout=each()).splitlines():
             fields = split_terse(line)
             value = fields[-1] if fields else ""
             if value:

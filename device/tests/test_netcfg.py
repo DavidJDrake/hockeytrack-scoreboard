@@ -512,6 +512,52 @@ def test_the_boot_paths_verification_still_gets_its_own_shorter_timeout():
         f"joined() granted {fake.timeouts}, not {netcfg.VERIFY_TIMEOUT_S}s a query"
 
 
+def test_the_overrun_past_the_deadline_is_enforced_not_just_asserted():
+    # VERIFY_OVERRUN_S is the whole of the gap between BOOT_BUDGET_S and
+    # ABSOLUTE_CEILING_S, and it used to be arithmetic in a comment: "status()
+    # makes three queries at VERIFY_TIMEOUT_S, so 3 x 2 = 6". True only while
+    # status() makes exactly three queries, with nothing anywhere saying so.
+    # joined() now opens a budget of its own and hands it down, so the queries
+    # SHARE the six seconds rather than each being granted two of them.
+    assert netcfg.ABSOLUTE_CEILING_S == netcfg.BOOT_BUDGET_S + netcfg.VERIFY_OVERRUN_S
+
+    ticking = FakeClock()
+    fake = status_fake()
+
+    class Slow(FakeNmcli):
+        def __call__(self, args, timeout=None):
+            out = super().__call__(args, timeout=timeout)
+            ticking.sleep(timeout)   # every query runs to its kill
+            return out
+
+    slow = Slow(fake.outputs)
+    started = ticking()
+    NetworkManager(run=slow).joined("HomeNet", clock=ticking)
+    assert ticking() - started <= netcfg.VERIFY_OVERRUN_S, \
+        f"the check ran {ticking() - started}s past the deadline, over {netcfg.VERIFY_OVERRUN_S}s"
+
+
+def test_a_fourth_status_query_could_not_widen_the_overrun():
+    # The property the budget buys, stated as a test rather than as a hope:
+    # a status() that grew another query would draw it from the same six
+    # seconds instead of adding two more to the absolute ceiling.
+    ticking = FakeClock()
+
+    class FourQueries(FakeNmcli):
+        def __call__(self, args, timeout=None):
+            super().__call__(args, timeout=timeout)
+            ticking.sleep(timeout)
+            return "connected\n" if "general" in args else ""
+
+    nm = NetworkManager(run=FourQueries())
+    check = netcfg.Budget(netcfg.VERIFY_OVERRUN_S, clock=ticking)
+    started = ticking()
+    for _ in range(4):
+        nm.status(timeout=netcfg.VERIFY_TIMEOUT_S, budget=check)
+    assert ticking() - started <= netcfg.VERIFY_OVERRUN_S, \
+        f"{ticking() - started}s spent against a {netcfg.VERIFY_OVERRUN_S}s budget"
+
+
 def test_a_runner_handed_no_timeout_still_bounds_the_call(monkeypatch):
     # The other half of the same defect. A default only defends the callers
     # that omit the argument; _run_nmcli also has to defend the ones that
@@ -807,15 +853,49 @@ def test_waiting_for_the_radio_gives_up_rather_than_hanging_the_boot(monkeypatch
     assert nm.wait_for_wifi() is False
 
 
-def test_waiting_for_the_radio_does_not_wait_when_there_is_no_wifi_device(monkeypatch):
-    # An Ethernet-only panel, or one whose adapter is unplugged. There is
-    # nothing here that waiting can change, and waiting would only delay a
-    # connect that is going to fail with a message worth reading.
-    slept = []
-    monkeypatch.setattr(netcfg.time, "sleep", slept.append)
+def test_an_empty_device_list_is_waited_out_rather_than_given_up_on(monkeypatch, clock):
+    # The corrected case. This used to return False the instant nmcli listed
+    # no `wifi`-type row, commented "no Wi-Fi device at all; waiting cannot
+    # help". That is true of an Ethernet-only panel and false of the boot this
+    # method exists for: the unit is After=NetworkManager.service, which means
+    # NetworkManager has been STARTED, not that it has enumerated its devices,
+    # and until it has, wlan0 is absent from the list rather than listed as
+    # "unavailable". The two look identical from here, so the one that can be
+    # fixed by waiting decides the behavior for both.
     nm = NetworkManager(run=lambda args, timeout=None: "eth0:ethernet:connected\n")
-    assert nm.wait_for_wifi() is False
-    assert slept == [], "waited for a Wi-Fi device that does not exist"
+    started = clock()
+    assert nm.wait_for_wifi(clock=clock) is False
+    spent = clock() - started
+    assert spent > 0, "an empty device list was still given up on at once"
+    assert spent <= netcfg.WIFI_READY_S, \
+        f"waited {spent}s for a device to appear, past the {netcfg.WIFI_READY_S}s budget"
+
+
+def test_a_device_that_appears_late_is_still_found(monkeypatch, clock):
+    # And the reason the wait is worth paying: NetworkManager listing nothing
+    # on the first poll is a state the next poll can leave.
+    polls = {"n": 0}
+
+    def late(args, timeout=None):
+        polls["n"] += 1
+        clock.sleep(0.05)
+        if polls["n"] < 3:
+            return "eth0:ethernet:connected\n"
+        return "eth0:ethernet:connected\nwlan0:wifi:disconnected\n"
+
+    assert NetworkManager(run=late).wait_for_wifi(clock=clock) is True
+    assert polls["n"] >= 3, "the device was found without ever re-polling"
+
+
+def test_waiting_for_a_device_that_never_appears_still_respects_the_parent(clock):
+    # The Ethernet-only panel now pays WIFI_READY_S it used to skip. That has
+    # to stay inside the boot budget like everything else, or the correction
+    # above would have bought a race fix with a budget overrun.
+    budget = netcfg.Budget(4, clock=clock)
+    nm = NetworkManager(run=lambda args, timeout=None: "eth0:ethernet:connected\n")
+    started = clock()
+    assert nm.wait_for_wifi(budget=budget, clock=clock) is False
+    assert clock() - started <= 4, "the device wait stepped past its parent's deadline"
 
 
 def test_waiting_for_the_radio_survives_nmcli_failing(monkeypatch):
@@ -1541,7 +1621,7 @@ def test_a_refused_rescan_means_the_device_is_not_ready_and_says_so(clock, caplo
     air = Air(visible=["ExampleNet"], clock=clock)
     air.rescan_error = SCAN_REFUSED
     with caplog.at_level(logging.INFO, logger="scoreboard.netcfg"):
-        assert NetworkManager(run=air).rescan(clock=clock) is False
+        assert NetworkManager(run=air).rescan() is False
     assert any(r.levelno == logging.INFO and "rescan refused" in r.getMessage()
                for r in caplog.records), "a refused rescan left nothing at INFO"
     assert "not ready" in caplog.text.lower()
@@ -1710,7 +1790,7 @@ def test_the_instant_calls_are_not_given_the_slow_default(clock):
     budget = netcfg.Budget(netcfg.BOOT_BUDGET_S, clock=clock)
     nm = NetworkManager(run=air)
     nm.radio_on(budget=budget)
-    nm.rescan(budget=budget, clock=clock)
+    nm.rescan(budget=budget)
     assert air.timeouts, "no calls were made"
     assert all(t <= netcfg.FAST_TIMEOUT_S for t in air.timeouts), air.timeouts
     assert netcfg.FAST_TIMEOUT_S < netcfg.QUERY_TIMEOUT_S
