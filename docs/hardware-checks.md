@@ -1,6 +1,6 @@
 # Hardware checks
 
-Eight things the test suite cannot prove. Each is run on real hardware and its
+Nine things the test suite cannot prove. Each is run on real hardware and its
 result recorded here — including failures, which are the useful ones.
 
 Spec: `docs/superpowers/specs/2026-09-12-device-image-design.md`
@@ -11,13 +11,18 @@ Spec: `docs/superpowers/specs/2026-09-12-device-image-design.md`
 | H2 | polkit grant | The `scoreboard` account applies a connection | not yet run |
 | H3 | Real `nmcli` scan and apply | Networks list; joining one succeeds | not yet run |
 | H4 | Imager customisation on a custom image | The dialog is offered and the settings take effect | observed 2026-09-18 — no dialog offered, nothing written to the boot partition |
-| H5 | Image boots | Both boards boot and the panel lights up | **PASS on a Pi 4, 2026-09-19 (v0.1.3, stock image)** — boots unattended, the panel lights up the right way up, and it joins Wi-Fi from the site's own setup file. Failed on v0.1.0 and v0.1.1; v0.1.2 drew only with hand edits and never joined. The Zero 2 W is still unrun |
-| H6 | CMA on the Zero 2 W | A bar panel renders without CMA exhaustion | not yet run |
+| H5 | Image boots | The Pi 4B boots and the panel lights up | **PASS on a Pi 4, 2026-09-19 (v0.1.3, stock image)** — boots unattended, the panel lights up the right way up, and it joins Wi-Fi from the site's own setup file. Failed on v0.1.0 and v0.1.1; v0.1.2 drew only with hand edits and never joined. The Zero 2 W half is **SHELVED, 2026-09-19** (see H6) |
+| H6 | CMA on the Zero 2 W | A bar panel renders without CMA exhaustion | **SHELVED, 2026-09-19** — the owner cannot find their Zero 2 W and the board is not affordably available. The project targets the Pi 4B only for now. Not a failure and not pending: nothing is waiting on it, and no claim anywhere should depend on it |
 | H7 | Keyboard under kmsdrm | A USB keyboard drives the settings screen | not yet run |
 | H8 | A panel enrolls itself | Pairing, claim and restart all work end to end against real AWS | **PASS on the core path, 2026-09-19 (v0.1.3, Pi 4)** — steps 0, 1, 2, 5 and 7. Steps 3, 4, 6 and 8 are not yet run |
+| H9 | The hardened image answers nothing | It still boots, joins Wi-Fi and enrolls on a Pi 4B; the serial console appeared and the serial getty did not; and from another machine on the same LAN every mDNS query goes unanswered and no TCP port is open, each check backed by a positive control | **not yet run** — added 2026-09-19 with the network-surface pass (spec §9.13), against a v0.1.3 baseline measured the same day. Must run on the first image built after it |
 
 H4, H5 and H6 need an image, so they belong to B2. H1, H2, H3 and H7 can be run
-as soon as this plan is installed on a Pi. H8 needs the enrollment path this
+as soon as this plan is installed on a Pi. **H6 is shelved as of 2026-09-19**
+and the Zero 2 W half of H5 with it: the board is not to hand and not
+affordably available, so the project targets the Pi 4B only for now. Shelved,
+not failed — the Zero 2 W work is correct as far as it was taken, and nothing
+else in this document may lean on it having been verified. H8 needs the enrollment path this
 plan builds, plus two invited Google accounts: the owner's, and a second one
 for step 4. H8's core path passed on 2026-09-19, once v0.1.3 fixed the Wi-Fi
 join that had blocked it; four of its steps are still open, and its section
@@ -412,8 +417,9 @@ whether anything needs optimising.
 
 **2026-09-19 — PASS on a Pi 4, v0.1.2.** The image booted unattended, with no
 keyboard and nothing on screen asking for anything, and `scoreboard.service`
-started once and ran. The Zero 2 W has still not been run, so this is half of
-H5, not all of it.
+started once and ran. The Zero 2 W half of H5 was never run and is now
+**SHELVED (2026-09-19)** — see H6 — so H5 is a Pi 4B check and complete as
+one, rather than half of a two-board check that is still waiting.
 
 Three defects came out of that boot. None of them stopped it; all three are
 fixed on branch `first-light`, and each is written up below because the
@@ -1090,6 +1096,364 @@ alarm needs twenty in five minutes, which a three-panel fleet will never
 reach. If the claim 404s with everything else correct, suspect that line first.
 
 **2026-09-19.** It did not 404: the first real claim succeeded on the first try.
+
+## H9 — The hardened image answers nothing
+
+**Added 2026-09-19**, with the network-surface pass (spec §9.13). Before it,
+the image ran `avahi-daemon` — announcing `scoreboard.local` and a
+`_workstation._tcp` record on every network a panel joined — kept the
+Bluetooth radio deliberately un-blocked, and carried an `sshd` that only had
+to be enabled, or named on the kernel command line, to listen on a port.
+The pass purges `avahi-daemon`, `libnss-mdns`, `bluez`, `bluez-firmware`,
+`rpi-usb-gadget`, `ssh-import-id`, `rpi-update` and the whole of OpenSSH, masks
+what it cannot purge, and disables the Bluetooth adapter in the device tree.
+
+It also **adds** one thing: `dtoverlay=disable-bt` makes the PL011 the primary
+UART, so `enable_uart` defaults to 1 and GPIO 14/15 becomes a live serial
+console. That is kept on purpose — it is the diagnosis path a panel with no
+login and a black screen has never had — and the login prompt systemd would
+put on it is masked. Part 1 checks both halves of that.
+
+`tools/image-gate.sh` proves the removals about a *filesystem*. It cannot see
+a port, and it cannot see a radio. This check is the other half. Run the parts
+in order: if the panel does not come up, the rest has nothing to scan.
+
+### Part 1 — the regression, and what the serial console cost (H5 and H8 again)
+
+The two costs this change could impose are a panel that does not boot and a
+panel that cannot join a network, so re-run the checks that cover them on the
+first image built after the pass. **Pi 4B only** — the Zero 2 W is shelved
+(H6).
+
+1. Flash the new image, put the site's `scoreboard-setup.txt` on the boot
+   partition with `ssid=`, `psk=` and `country=` filled in, and power on with
+   nothing else attached. **Expect H5's pass:** it boots unattended and the
+   panel lights up the right way up.
+2. **Time first paint** — power-on to the first thing on the screen — and
+   compare it with v0.1.3. This is the number the serial console might have
+   cost: `dtoverlay=disable-bt` makes the PL011 the primary UART, so
+   `enable_uart` now defaults to 1 and every kernel line is written
+   synchronously out a 115200 UART whether or not a cable is attached (spec
+   §9.13). A second or two is the price of a diagnosis path the project has
+   never had. Much more than that on a panel already dark for up to 85 s is a
+   reason to take option B — one line, recorded in §9.13.
+3. **Expect H8's steps 0, 1, 2, 5 and 7:** a pairing code with the owner's
+   address, a claim on the site, a restart into the scoreboard, and a game
+   chosen on the site appearing on the panel.
+4. Afterwards, power down, pull the card and check what the console decision
+   actually did:
+
+   ```sh
+   J=/path/to/card/var/log/journal
+   journalctl -D "$J" --no-pager | grep -E 'ttyAMA|ttyS0|8250|legacy console'
+   #   expect a PL011 registering as ttyAMA0 and "legacy console [ttyAMA0] enabled".
+   #   On v0.1.2 this showed "ttyAMA1 ... is a PL011 rev3", 8250.nr_uarts=0 on the
+   #   kernel command line, and only "legacy console [tty1] enabled".
+   journalctl -D "$J" --no-pager | grep -i 'serial-getty'
+   #   expect NOTHING. The template is masked, so systemd-getty-generator's
+   #   instance cannot start. A line here means the mask did not take.
+   ```
+
+5. **Read the packaged kernel's SysRq default off the card**, since that —
+   not the defconfig — is what actually runs:
+
+   ```sh
+   grep MAGIC_SYSRQ_DEFAULT_ENABLE /path/to/card-root/boot/config-*
+   #   expect CONFIG_MAGIC_SYSRQ_DEFAULT_ENABLE=0x1f6, which spec §9.13
+   #   decodes: everything except 0x8 (the task/memory dumps). Nothing in the
+   #   image sets kernel.sysrq, so the compiled-in value is the live one.
+   #   A different value is not a failure -- it is a number to re-decode and
+   #   write into §9.13.
+   ```
+
+   (`/boot` is on the card's **root** partition, not the boot partition;
+   `linux-image-*-rpi-v8` ships the file.)
+
+6. Optional, and the whole point of keeping the console: attach a **3.3 V**
+   USB-serial adapter to header pins 8 (GPIO 14, TX) and 10 (GPIO 15, RX)
+   plus a ground pin, open it at **115200 8N1**, and power the panel on. Do
+   not attach 5 V.
+
+   **Expect kernel messages up to sysinit and then near-silence** —
+   `raspberrypi-sys-mods` sets `kernel.printk = 3 4 1 3`, so once
+   `systemd-sysctl` has run only EMERG/ALERT/CRIT reach the console and
+   `KERN_ERR` does not. That is the honest shape of this console, and it is
+   why the next step exists.
+
+7. Optional, and this is the step that makes the console useful for the
+   failures this project actually has: add
+   `systemd.journald.forward_to_console=1` to `/boot/firmware/cmdline.txt` on
+   the card and boot again. Userspace — `scoreboard.service`,
+   `scoreboard-netcfg` — then reaches the UART live. Note what that puts on
+   the wire: the kernel command line (including the Ethernet MAC as
+   `smsc95xx.macaddr=`) and, in `netcfg`'s error lines, **the Wi-Fi SSID in
+   plaintext**. Not the PSK — `netcfg.py` guards it deliberately. Take the
+   flag back off before handing the panel to anyone.
+
+### Part 2 — find the panel's address, from a Windows + WSL2 machine
+
+This is written for the setup the work is actually done on, because the
+obvious commands silently lie there. **WSL2 runs in NAT mode by default**, so
+`nmap -sn`, `arp -an`, `arp-scan --localnet`, `avahi-browse`, `avahi-resolve`
+and `getent hosts scoreboard.local` all interrogate WSL's own `172.x` network,
+not the LAN. Every one of them returns "nothing found" whether or not the
+panel is answering, which is a check that cannot fail. `bluetoothctl` is not
+in WSL at all.
+
+What works, and what was actually run on 2026-09-19 to measure the v0.1.3
+baseline below:
+
+1. **A ping sweep from the Windows side**, then read Windows' own ARP table.
+   Windows' neighbour cache holds roughly 256 entries, so sweep a `/22` in
+   chunks rather than all at once. In PowerShell:
+
+   ```powershell
+   $p = New-Object System.Net.NetworkInformation.Ping
+   foreach ($third in 64..67) {
+     $tasks = 1..254 | ForEach-Object { $p.SendPingAsync("192.168.$third.$_", 500) }
+     [Threading.Tasks.Task]::WaitAll($tasks)
+     arp.exe -a | Select-String -Pattern 'd8-3a-dd|dc-a6-32|b8-27-eb|e4-5f-01|2c-cf-67'
+   }
+   ```
+
+   Those are Raspberry Pi OUIs. On 2026-09-19 this found the panel at
+   **192.168.68.67**, MAC **D8:3A:DD:29:33:6D**.
+
+2. **Confirm it is the panel by name, from Windows** (Windows has a built-in
+   mDNS resolver, so this reaches the real LAN):
+
+   ```powershell
+   Resolve-DnsName scoreboard.local
+   ```
+
+   On v0.1.3 this answered with the panel's address. On the hardened image it
+   must not resolve.
+
+3. **The WLAN MAC is now known**, observed 2026-09-19: **D8:3A:DD:29:33:6D**,
+   one higher than the Ethernet MAC **D8:3A:DD:29:33:6B** that the firmware
+   passes on the kernel command line as `smsc95xx.macaddr=`. Useful for
+   finding the panel, but do not treat the +2 offset as a rule — it was
+   observed on one board, once. The MAC is **not** in the journal:
+   NetworkManager does not log an interface's hardware address at its default
+   level.
+
+4. **Or, after the fact, from the card** — this is how you confirm you scanned
+   the right host:
+
+   ```sh
+   journalctl -D /path/to/card/var/log/journal --no-pager \
+     | grep -E 'dhcp4|state changed new lease|address='
+   ```
+
+### Part 3 — nothing answers
+
+Run from WSL unless a step says PowerShell. Replace `PANEL` with the address
+from part 2.
+
+**Every check needs a positive control, in the same run.** "No answer on 5353"
+means nothing unless the prober can demonstrably reach the panel at that
+moment — otherwise a wrong subnet, a sleeping radio or a NAT boundary reads as
+a pass. The control is ICMP and the TCP scan: the panel answers ping and
+actively **refuses** TCP connections, so both prove reachability while proving
+nothing is listening.
+
+```sh
+PANEL=192.168.68.67
+ping -c 3 "$PANEL"          # POSITIVE CONTROL: must answer. If not, stop.
+```
+
+**No mDNS.** The useful trick is that a *legacy unicast* mDNS query is an
+ordinary DNS packet sent to the panel's port 5353 from an ephemeral port — so
+it is plain unicast UDP and passes straight through WSL2's NAT, unlike the
+multicast the `avahi-*` tools use. Save this as `mdnsq.py`; it needs nothing
+but the standard library:
+
+```python
+#!/usr/bin/env python3
+"""Legacy-unicast mDNS probe.
+
+The socket is CONNECTED, not used with sendto/recvfrom. That is what makes a
+closed port distinguishable from a filtered one: on a connected UDP socket the
+kernel surfaces the ICMP port-unreachable as ConnectionRefusedError in
+milliseconds, instead of the caller waiting out the timeout with no way to
+tell "closed" from "dropped".
+
+  ANSWERED  a responder replied           -> FAILURE on a hardened panel
+  REFUSED   ICMP port unreachable, closed -> the pass we want
+  TIMEOUT   nothing came back at all      -> INCONCLUSIVE, not a pass
+Exit 0 only when every probe was REFUSED; 1 if anything answered; 2 if any
+probe was inconclusive.
+"""
+import socket, struct, sys
+
+ANSWERED, REFUSED, TIMEOUT = "ANSWERED", "REFUSED", "TIMEOUT"
+
+def encode(name):
+    out = b""
+    for label in name.rstrip(".").split("."):
+        out += bytes([len(label)]) + label.encode()
+    return out + b"\x00"
+
+def query(ip, name, qtype, port=5353, timeout=3.0):
+    pkt = (struct.pack(">HHHHHH", 0x4242, 0, 1, 0, 0, 0)
+           + encode(name) + struct.pack(">HH", qtype, 1))
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.settimeout(timeout)
+    try:
+        s.connect((ip, port))       # so a closed port raises instead of hanging
+        s.send(pkt)
+        data = s.recv(4096)
+    except ConnectionRefusedError:
+        return REFUSED, 0
+    except (socket.timeout, OSError):
+        return TIMEOUT, 0
+    finally:
+        s.close()
+    return ANSWERED, struct.unpack(">H", data[6:8])[0]
+
+PROBES = [("scoreboard.local", 1, "A"),
+          ("scoreboard.local", 28, "AAAA"),
+          ("_services._dns-sd._udp.local", 12, "PTR"),
+          ("_workstation._tcp.local", 12, "PTR")]
+
+ip = sys.argv[1]
+port = int(sys.argv[2]) if len(sys.argv) > 2 else 5353
+counts = {ANSWERED: 0, REFUSED: 0, TIMEOUT: 0}
+for name, qtype, label in PROBES:
+    verdict, n = query(ip, name, qtype, port)
+    extra = f", {n} record(s)" if verdict == ANSWERED else ""
+    print(f"  {label:4} {name:32} {verdict}{extra}")
+    counts[verdict] += 1
+print(f"{counts[ANSWERED]} answered, {counts[REFUSED]} refused (closed), "
+      f"{counts[TIMEOUT]} inconclusive  [udp/{port}]")
+sys.exit(1 if counts[ANSWERED] else (2 if counts[TIMEOUT] else 0))
+```
+
+```sh
+python3 mdnsq.py "$PANEL"          # expect: "0 answered, 4 refused (closed)"
+python3 mdnsq.py "$PANEL" 5354     # sanity: a port that was closed before too
+```
+
+**Read the exit status, not just the text.** `0` is the pass — the panel
+actively refused on 5353, which is what the baseline table's "UDP 5353 →
+closed" row promises. `1` means something answered and the image is not
+hardened. **`2` is not a pass**: nothing came back at all, which means
+filtered, rate-limited or unreachable, and the run must be repeated more
+slowly. On v0.1.3 this printed `4 answered, 0 refused (closed), 0
+inconclusive` and exited 1; against udp/5354 on the same panel it printed `0
+answered, 4 refused (closed), 0 inconclusive` and exited 0, which is exactly
+the shape the hardened image must produce on 5353.
+
+
+```sh
+python3 mdnsq.py "$PANEL"   # expect: "0 of 3 answered"
+```
+
+Also run `Resolve-DnsName scoreboard.local` from PowerShell (part 2, step 2);
+expect it to fail to resolve.
+
+**No open TCP port.** A full connect scan, which needs no privileges:
+
+```sh
+nmap -sT -p- "$PANEL"       # expect: 0 open; all 65535 refused
+```
+
+If `nmap` is not installed, a small asyncio connect scan over all 65535 ports
+does the same job in about the same time. Either way the expected result is
+**0 open and 65535 actively refused** — refusals are the positive control, and
+"filtered"/unanswered ports would mean something between you and the panel is
+dropping traffic and the whole run is void.
+
+**UDP, slowly.** Linux rate-limits ICMP port-unreachable, so a fast UDP pass
+reports closed ports as "silent" and is easy to misread as "something is
+listening". Probe **one port every ~2 s**:
+
+```sh
+for port in 53 67 123 137 161 1900 5353 5355; do
+  nmap -sU -p "$port" "$PANEL"; sleep 2
+done
+```
+
+Expect every one **closed** (ICMP port unreachable), including 5353 — which on
+v0.1.3 was open and answering.
+
+**Bluetooth cannot be measured from the LAN, and a phone scan proves nothing.**
+BlueZ is not discoverable by default, so a phone or a `bluetoothctl scan`
+shows no `scoreboard` whether the radio is on or off — a clean scan is not
+evidence and must not be recorded as if it were. The evidence is on the card:
+
+```sh
+J=/path/to/card/var/log/journal
+journalctl -D "$J" --no-pager | grep -c 'Bluetooth: hci0'
+#   expect 0. On v0.1.2 this printed several lines, including
+#   "Bluetooth: hci0: BCM4345C0" and "Bluetooth: hci0: BCM43455 37.4MHz".
+journalctl -D "$J" --no-pager | grep -iE 'avahi|bluetoothd'
+#   expect nothing. On v0.1.2: "Starting SDP server" and
+#   "Server startup complete. Host name is scoreboard.local".
+journalctl -D "$J" --no-pager | grep 'Listening on'
+#   expect only UNIX sockets, a FIFO, netlink and /dev/rfkill
+#   (systemd-rfkill.socket is ListenSpecial=/dev/rfkill) -- and in particular
+#   NO "sshd-unix-local.socket", which v0.1.2 had on both boots.
+```
+
+If the card is mounted, `ls /sys/class/bluetooth` on the running panel would
+be the direct check, but there is no login; the absence of `hci0` from the
+journal is the readable equivalent.
+
+### The v0.1.3 baseline these are measured against
+
+Measured 2026-09-19 from another host on the same LAN (192.168.68.0/22), panel
+at 192.168.68.67. **Without this "before", every "expect: no answer" below is
+unfalsifiable.**
+
+| Check | v0.1.3 (before) | Hardened image (expected) |
+|---|---|---|
+| ICMP echo | answers | answers — this is the positive control |
+| TCP, all 65535 ports | 0 open, 65535 refused, 0 unanswered (8 s) | unchanged |
+| mDNS `scoreboard.local` A | **answers**, → 192.168.68.67 | no answer (refused) |
+| mDNS `scoreboard.local` AAAA | **answers**, → `fe80::4eae:f1c9:9bd4:d588` — the panel publishes its link-local address too | no answer (refused) |
+| mDNS `_services._dns-sd._udp.local` PTR | **answers**, advertises `_workstation._tcp` | no answer (refused) |
+| mDNS `_workstation._tcp.local` PTR | **answers**, 5 records, instance `scoreboard [d8:3a:dd:29:33:6d]` — hostname *and* MAC published | no answer (refused) |
+| mDNS `_ssh._tcp` / `_sftp-ssh._tcp` | no answer | no answer |
+| UDP 53, 67, 123, 137, 161, 1900, 5355 | closed (ICMP port unreachable) | unchanged |
+| UDP 5353 | open, answering | **closed** |
+| Bluetooth | not measurable from the LAN | not measurable from the LAN |
+
+The first fast UDP pass on v0.1.3 reported 5355 as "silent"; that was the
+kernel's ICMP rate limit and not a listener, which is why the procedure above
+probes one port every ~2 s.
+
+### What a failure here means
+
+- **An mDNS name still answers** — `avahi-daemon` came back, most likely
+  through a `Recommends` that `export-image/02-set-sources`' `dist-upgrade`
+  followed. The gate should have caught it; if the gate passed and this
+  failed, the gate's package list is wrong, not the image.
+- **A TCP port is open** — find out what is behind it before anything else.
+  The gate's socket-unit rule only covers socket-activated units; a daemon
+  that binds its own port is invisible to it, which is exactly why this check
+  exists (spec §9.13).
+- **`Bluetooth: hci0` is in the journal** — the overlay did not take. Check
+  that `dtoverlay=disable-bt` is in `/boot/firmware/config.txt` on the flashed
+  card, uncommented, and under an `[all]` section rather than a board-specific
+  one. (A phone seeing nothing is *not* the check; see part 3.)
+- **A `serial-getty` line is in the journal** — the template mask did not
+  take. The image should carry `/etc/systemd/system/serial-getty@.service` as
+  a symlink to `/dev/null`; the gate asserts it, so a failure here with a
+  passing gate means the mask is being removed after the gate runs.
+- **`ttyAMA0` never appears and there is no serial console** — harmless for
+  the panel, but it means the diagnosis path spec §9.13 claims does not exist.
+  Check `enable_uart` was not set to 0 somewhere in `config.txt`, and that
+  `console=serial0,115200` is still in `cmdline.txt`.
+- **First paint got much slower than v0.1.3** — synchronous `printk` to the
+  new 115200 console. Take option B: drop `console=serial0,115200` from
+  `cmdline.txt` in `05-no-listeners` (spec §9.13 records why that is one line
+  and what it gives up).
+- **The panel does not boot or does not join** — the most likely culprit is a
+  purge that took something load-bearing. `firmware-brcm80211`,
+  `libbluetooth3`, `raspberrypi-sys-mods` and `network-manager` are the four
+  that must survive; `dpkg -l` against the mounted card's
+  `/var/lib/dpkg/status` will say whether they did.
 
 ## Display behavior
 
