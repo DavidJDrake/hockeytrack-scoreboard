@@ -10,7 +10,7 @@ import { beginSignIn, completeSignIn, forgetSignIn, logoutUrl, mayReauth, wasSig
 import { ApiError, createApi } from "./api.js";
 import { reformat } from "./claimcode.js";
 import { SETUP_FILE_NAME, SetupFileError, countryNoteFor, regionFromLocale, setupFileFor } from "./setupfile.js";
-import { emailVerified, gameChoices, messageFor, panelTitle } from "./view.js";
+import { canResend, emailVerified, gameChoices, messageFor, panelTitle } from "./view.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -192,6 +192,29 @@ function panelItem(device, games, gamesFailed) {
       "Game set. The panel switches within a few seconds.");
   });
 
+  // Re-send: the same call with the same gameId, which the API happily
+  // republishes (it has no "unchanged" short-circuit). The panel tells a
+  // live publish from the broker's replay on reconnect and treats only the
+  // live one as the owner asking for the game back, so this button is the
+  // only way that path is ever taken.
+  //
+  // Disabled from the device's own state, not from `busy`: act() re-renders
+  // the list while busy is still true, so a disabled attribute set from it
+  // would stick until the next render. The busy guard below is how every
+  // other control here handles it.
+  const resend = el("button", {
+    class: "btn quiet",
+    type: "button",
+    disabled: !canResend(device),
+    "aria-label": `Show the current game on ${title}`,
+    onclick: () => {
+      if (busy || !canResend(device)) return;
+      act("resend", () => api.setGame(device.thingName, device.gameId),
+        "Sent. The panel shows that game again within a few seconds.");
+    },
+  }, "Show on panel");
+  resend.dataset.focusKey = `${device.thingName}:resend`;
+
   const nameInput = el("input", { type: "text", value: device.name ?? "", maxLength: 40, "aria-label": `Name for ${title}` });
   nameInput.dataset.focusKey = `${device.thingName}:name`;
   const renameButton = el("button", { class: "btn", type: "submit", "aria-label": `Rename ${title}` }, "Rename");
@@ -221,7 +244,7 @@ function panelItem(device, games, gamesFailed) {
   return el("li", { class: "panel" },
     el("h2", {}, title),
     el("span", { class: "thing" }, device.thingName),
-    el("div", { class: "row" }, el("label", { for: selectId }, "Game"), select),
+    el("div", { class: "row" }, el("label", { for: selectId }, "Game"), select, resend),
     renameForm,
     el("div", { class: "row" }, remove));
 }

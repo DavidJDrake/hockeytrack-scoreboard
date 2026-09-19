@@ -1131,26 +1131,34 @@ anybody touching the panel:
 
 | Off because | Comes back when |
 |---|---|
-| The game is further away than the countdown lead | the window opens, or the owner chooses another game |
-| The game never started — more than 2 h past its scheduled start with no LIVE document | any state update arrives (LIVE or otherwise), or the owner chooses a game |
-| The final hold has run out | the owner chooses a game, or a new state arrives |
-| No game is selected, past the grace period | the owner chooses a game, or a state arrives |
-| A state this build does not recognize has been up for 2 h | any state update arrives, or the owner chooses a game |
+| The game is further away than the countdown lead | the window opens (a time passing, nothing else), or the owner chooses another game |
+| The game never started — more than 2 h past its scheduled start with no LIVE document | the game's **state changes** (LIVE, FINAL, anything), a document arrives carrying a **new `start`** that puts it back inside the window (a rescheduled game re-lights itself), or the owner presses **Show on panel** |
+| The final hold has run out | the owner presses **Show on panel**, or the game's state changes |
+| No game is selected, past the grace period | the owner chooses a game |
+| A state this build does not recognize has been up for 2 h | the state changes, or the owner presses **Show on panel** |
+| The clock has never been set and 2 h have passed | NTP sets the clock, the state changes, or the owner presses **Show on panel** |
 | Inside the owner's sleep hours | the window ends, or a live game starts |
+
+**What is not on that list, deliberately: "any update".** The panel notices a
+change when the state's *name* changes (PRE → LIVE → FINAL), not on every
+document. A reducer republishing the same stale PRE once a minute therefore
+does **not** re-light a panel that has bounded it — if it did, the bound could
+never bite. This is also why **Show on panel** exists on the site: it is the
+one lever that says "I want that back" without anything else having changed.
 
 Three timings the owner will be able to set, with the defaults a panel runs
 on until it is told otherwise:
 
 | Setting | Default | What it does |
 |---|---|---|
-| Countdown lead | 2 hours | How long before puck drop the countdown appears. Before that, a selected future game shows nothing. Once it appears it never blanks and never dims on its own. |
+| Countdown lead | **12 hours** | How long before puck drop the countdown appears. Before that, a selected future game shows nothing. Once it appears it never blanks and never dims on its own. The owner chose 12 h on 2026-09-19, over the 2 h this was first built with: a game picked in the morning then spends the day on the wall. |
 | Final hold | 3 hours | How long a final score stays up, measured from the moment **this panel first saw the game go final** — the state document carries no end timestamp, and the Pi's own wall clock cannot be trusted to compare against `asOf`. Then off. |
 | Sleep hours | unset | A daily local-time window (may cross midnight) in an explicitly chosen IANA zone. A **live game overrides it**; a countdown and a final hold do not, and resume by themselves when the window ends if they are still due. |
 
-Three further rules that are the panel's own, not settings:
+Four further rules that are the panel's own, not settings:
 
 - **Grace period, 5 minutes.** After anything the owner caused or needs to
-  see — boot, a game chosen or cleared, a game going final — the relevant
+  see — boot, a game chosen or re-sent, a game going live or final — the relevant
   screen stays up for five minutes whatever the hour, then the rules above
   apply. It exists so that somebody who has just clicked something on the
   site, or just powered the panel on, sees that it was heard.
@@ -1171,21 +1179,58 @@ Three further rules that are the panel's own, not settings:
   owner's own complaint pointing the other way. Two hours because games
   start a few minutes late routinely and an ice or weather delay can run an
   hour or more; a shorter bound would switch the panel off on a game that is
-  merely late. It is measured on the wall clock against the document's own
-  `start` (not from when the panel noticed), so a panel powered on the
-  morning after a postponed game shows it for the boot grace and is then
-  off, rather than earning a fresh two hours for having only just booted.
-  **A state this build does not recognize** falls under the same bound, from
-  when it arrived: shown — a panel that hides what it does not understand
-  cannot be diagnosed by anybody looking at it — and then off. Unknown
-  states fail lit-then-off, never lit for ever. (The reducer only ever emits
-  PRE, LIVE and FINAL, so this is a document that did not come through it,
-  or this build talking to a newer cloud.)
+  merely late. **Which clock measures which bound matters here**: this one
+  is *wall-clock*, compared against the document's own `start` rather than
+  from the moment the panel noticed, so a panel powered on the morning after
+  a postponed game shows it for the boot grace and is then off instead of
+  earning a fresh two hours for having only just booted. The *other* two
+  uses of the same two-hour number — an unrecognized state, and a pre-game
+  state while the clock is unset — are *monotonic*, measured from when the
+  panel last had something new to say, because in neither case is there a
+  trustworthy `start` to measure from.
+  **A state this build does not recognize** falls under that monotonic
+  bound: shown — a panel that hides what it does not understand cannot be
+  diagnosed by anybody looking at it — and then off. Unknown states fail
+  lit-then-off, never lit for ever. (The reducer only ever emits PRE, LIVE
+  and FINAL, so this is a document that did not come through it, or this
+  build talking to a newer cloud.)
+- **An unset clock is bounded too.** The Pi has no RTC, so until
+  systemd-timesyncd has been the panel does not know what time it is. Sleep
+  hours are not in effect (logged once), the countdown window cannot be
+  judged — and the countdown's digits would be a lie, so the panel draws the
+  matchup and `PUCK DROP` with **`--:--:--`** where the digits go. It stays
+  lit like that for at most two hours and is then off, because "NTP never
+  answered" is a permanent condition on a network that blocks it while MQTT
+  still works, and a frozen countdown that never goes away is the fault all
+  of this exists to prevent. A start the panel cannot *read* is treated the
+  same way: dashes, never `00:00:00`, which would read as "any second now".
 - **The screens that ask for help are never off**, in or out of sleep hours:
-  not registered, the pairing code, enrollment failing, no network. A panel
-  that cannot say "I have no network" cannot be fixed by the person standing
-  in front of it. These also sit on screen the longest — a pairing code for
-  up to a day — so they get the burn-in shift described below.
+  not registered, the pairing code, enrollment failing, no network, and —
+  new — **cannot reach the service**. A registered panel on a working
+  network whose MQTT link has been down for more than two minutes says so,
+  and keeps saying so until the link comes back, at which point it returns
+  to normal by itself. Before this, that panel went black after the grace
+  with nothing due, which is the owner's original complaint arriving by a
+  new route, for the one fault they most need to be able to see. Precedence:
+  **below "No network"**, which is the more specific fault and the one the
+  person standing there can act on; **above the scoreboard**, including
+  above a game already on screen — after two minutes that clock is wrong and
+  still ticking, and a scoreboard that is wrong is worse than one that
+  admits it, while the existing "no link" dot is eight pixels and settles
+  nothing across a room. Brief drops never reach it; that is what the
+  two-minute threshold is for.
+  A panel that cannot say "I have no network" cannot be fixed by the person
+  standing in front of it. These screens also sit up the longest — a pairing
+  code for up to a day — so they get the burn-in shift described below.
+- **Nothing the network sends can stop the render loop.** A `start` the
+  panel could not parse used to raise `ValueError` three frames below a loop
+  with no handler: the service exited, systemd restarted it, and the panel
+  crash-looped on black — indistinguishable from dead hardware, and
+  reachable by anything that could publish to its topics. The parsers now
+  refuse bad documents and leave the panel showing what it was showing, and
+  a guard around the per-frame paint logs once per distinct failure and
+  draws a **Display problem** screen instead of dying. That screen should
+  never be seen; if it ever is, the journal has the reason.
 
 Burn-in is now handled by moving what is drawn rather than by switching it
 off: a whole-frame offset of at most 4 px that steps round a fixed
@@ -1210,8 +1255,11 @@ step the clock hours forward after boot.
    before puck drop, with nobody touching anything. This is the one that
    proves "comes back by itself" on real hardware rather than in a test.
 3. **A final falls back after its time.** Watch a game end; the score should
-   still be there three hours later and gone shortly after. Re-choosing that
-   same game on the site should bring it back for another three hours.
+   still be there a few minutes *short* of three hours, and gone by three
+   hours exactly (the hold ends at the boundary, not after it). Pressing
+   **Show on panel** for that same game should bring it back for another
+   three hours — and note that simply re-picking it in the dropdown will not,
+   because re-selecting the option already selected fires nothing.
 4. **The shift is invisible from a few meters.** Watch the panel across a
    room for a quarter of an hour: nothing should be seen to move. Then
    photograph the same screen seven minutes apart from a fixed position and
@@ -1224,9 +1272,38 @@ step the clock hours forward after boot.
    booted onto last night's stale pre-game document should show it only for
    the five-minute grace.
 6. **The pairing code and "No network" never switch off**, including
-   overnight if sleep hours are set once they can be delivered.
-7. **Nothing is dark that should not be.** Anything the panel does that
+   overnight if sleep hours are set once they can be delivered. Same for the
+   new **Cannot reach the service** screen: pull the internet (leaving Wi-Fi
+   up) and confirm it appears about two minutes later, survives the night,
+   and clears by itself when the link returns.
+7. **How long `/run/systemd/timesync/synchronized` takes to appear** on a
+   cold boot. Everything time-of-day waits on that file, and a panel that
+   takes minutes to get it will show `PUCK DROP --:--:--` for that whole
+   window. `systemd-analyze blame | grep -i timesync` and a `stat` on the
+   flag give the number.
+8. **How often the MQTT link actually reconnects over a day.**
+   `journalctl -u scoreboard | grep -c "connected:"` after 24 hours. Two
+   things ride on this: the two-minute help-screen threshold should not be
+   firing during normal operation, and the retained-config fix (C-2) is what
+   keeps each reconnect from re-arming the hold — a count in the hundreds
+   would say the backoff needs looking at regardless.
+9. **Whether a black frame reads as "off" or as "broken"** on this IPS
+   panel, in a lit room and in a dark one. The whole model assumes "off"
+   looks deliberate. If a black frame instead looks like a fault — a grey
+   glow, a visible backlight — then either the display-power follow-up below
+   becomes urgent, or "off" needs to become something else.
+10. **Nothing is dark that should not be.** Anything the panel does that
    looks dead is a finding, whether or not it matches the table above.
+
+**Finding, not fixed: the second penalty row is drawn 2 px off the bottom.**
+With two penalties a side, the second row's progress bar is drawn at
+y = 474..482 on a 480 px surface, so its last two rows of pixels are clipped
+by the surface itself. It predates all of this and is not being touched here
+(changing the layout under a burn-in change would make both harder to
+judge), but it is why the pixel shift never moves the frame *downward*: the
+game screen's real bottom margin is zero, not the 20-odd px the layout
+implies. Worth a look on hardware — on a panel with any overscan the whole
+row may be closer to the edge than it appears in a screenshot.
 
 **Follow-up: can the display itself be put to sleep?** "Off" today is a
 black frame — the HDMI output stays up, the panel's own backlight stays lit,

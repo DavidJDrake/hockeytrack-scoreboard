@@ -28,6 +28,22 @@ export function gameChoices(device, games, options = {}) {
   return choices;
 }
 
+// Can this panel be told to show its current game again?
+//
+// Only if it has one: the API refuses a gameId of 0, and a panel following
+// nothing has nothing to re-send. Integers only, because a gameId that
+// arrived as a string would be sent back as NaN.
+//
+// This exists because the game picker cannot ask for it. Re-selecting the
+// option that is already selected fires no `change` event, and on a day with
+// one game listed — already followed — there is no other option to pick. The
+// panel at the other end treats a live publish of the game it already follows
+// as "the owner wants that back on screen", and re-arms its hold for it.
+// Without a button, nobody can pull that lever.
+export function canResend(device) {
+  return Number.isInteger(device?.gameId) && device.gameId > 0;
+}
+
 // The ID token carries a real boolean; API Gateway's authorizer flattens it to
 // a string. Accept both, and nothing else.
 export function emailVerified(claims) {
@@ -43,6 +59,7 @@ const MESSAGES = {
     "bad-request": "Type the code shown on your panel's screen.",
   },
   setGame: { "not-found": "That panel is no longer on your account." },
+  resend: { "not-found": "That panel is no longer on your account." },
   rename: {
     "not-found": "That panel is no longer on your account.",
     "bad-request": "A panel needs a name.",
