@@ -1,6 +1,6 @@
 # Hardware checks
 
-Eight things the test suite cannot prove. Each is run on real hardware and its
+Nine things the test suite cannot prove. Each is run on real hardware and its
 result recorded here — including failures, which are the useful ones.
 
 Spec: `docs/superpowers/specs/2026-09-12-device-image-design.md`
@@ -15,6 +15,7 @@ Spec: `docs/superpowers/specs/2026-09-12-device-image-design.md`
 | H6 | CMA on the Zero 2 W | A bar panel renders without CMA exhaustion | not yet run |
 | H7 | Keyboard under kmsdrm | A USB keyboard drives the settings screen | not yet run |
 | H8 | A panel enrolls itself | Pairing, claim and restart all work end to end against real AWS | **PASS on the core path, 2026-09-19 (v0.1.3, Pi 4)** — steps 0, 1, 2, 5 and 7. Steps 3, 4, 6 and 8 are not yet run |
+| H9 | The hardened image answers nothing | It still boots, joins Wi-Fi and enrolls; and from another machine on the same LAN it has no mDNS name, no open TCP port and no Bluetooth advertisement | **not yet run** — added 2026-09-19 with the network-surface pass (spec §9.13). Must run on the first image built after it |
 
 H4, H5 and H6 need an image, so they belong to B2. H1, H2, H3 and H7 can be run
 as soon as this plan is installed on a Pi. H8 needs the enrollment path this
@@ -1085,3 +1086,163 @@ alarm needs twenty in five minutes, which a three-panel fleet will never
 reach. If the claim 404s with everything else correct, suspect that line first.
 
 **2026-09-19.** It did not 404: the first real claim succeeded on the first try.
+
+## H9 — The hardened image answers nothing
+
+**Added 2026-09-19**, with the network-surface pass (spec §9.13). Before it,
+the image ran `avahi-daemon` — announcing `scoreboard.local` and a
+`_workstation._tcp` record on every network a panel joined — kept the
+Bluetooth radio deliberately un-blocked, and carried an `sshd` that only had
+to be enabled, or named on the kernel command line, to listen on a port.
+The pass purges `avahi-daemon`, `libnss-mdns`, `bluez`, `bluez-firmware`,
+`rpi-usb-gadget`, `ssh-import-id`, `rpi-update` and the whole of OpenSSH, masks
+what it cannot purge, and disables the Bluetooth adapter in the device tree.
+
+`tools/image-gate.sh` proves all of that about a *filesystem*. It cannot see a
+port, and it cannot see a radio. This check is the other half, and it has two
+parts: **nothing broke**, then **nothing answers**. Run them in that order —
+if the panel does not come up, the second half has nothing to scan.
+
+### Part 1 — the regression (H5 and H8 again)
+
+The two costs this change could impose are a panel that does not boot and a
+panel that cannot join a network, so re-run the checks that cover them, on the
+first image built after the pass:
+
+1. Flash the new image, put the site's `scoreboard-setup.txt` on the boot
+   partition with `ssid=`, `psk=` and `country=` filled in, and power on with
+   nothing else attached. **Expect H5's pass:** it boots unattended and the
+   panel lights up the right way up, within about two minutes.
+2. **Expect H8's steps 0, 1, 2, 5 and 7:** a pairing code with the owner's
+   address, a claim on the site, a restart into the scoreboard, and a game
+   chosen on the site appearing on the panel.
+3. If either fails, pull the card and read the journal (see *Reading a failed
+   panel* above). The lines that would indict this change are a missing
+   `brcmfmac` firmware load, a `wlan0` that never appears, or
+   `scoreboard-netcfg` failing at `raspi-config`.
+
+### Part 2 — find the panel's address, without a login
+
+There is no login, no SSH and no console prompt, so the address has to come
+from somewhere else. In order of how well they work:
+
+1. **The router's DHCP lease table.** NetworkManager's internal DHCP client
+   sends the system hostname, and `tools/pi-gen/config` sets
+   `TARGET_HOSTNAME=scoreboard` — so look for a lease whose client name is
+   `scoreboard`. This is the only method that does not need a scan.
+2. **Sweep the LAN for a Raspberry Pi MAC.** From another machine on the same
+   network:
+
+   ```sh
+   sudo nmap -sn 192.168.1.0/24            # adjust to your subnet
+   arp -an | grep -iE 'd8:3a:dd|dc:a6:32|b8:27:eb|e4:5f:01|2c:cf:67'
+   # or, in one step:
+   sudo arp-scan --localnet
+   ```
+
+   Those are Raspberry Pi OUIs. This Pi 4's **Ethernet** MAC is
+   `D8:3A:DD:29:33:6B` — the firmware passes it on the kernel command line as
+   `smsc95xx.macaddr=`, which is why it is readable from the journal — and its
+   Wi-Fi interface shares that OUI.
+
+   **A correction, so nobody wastes an evening on it:** the WLAN MAC itself is
+   **not** in the journals captured on 2026-09-18. NetworkManager does not log
+   an interface's hardware address at its default level, and in both of those
+   boots `wlan0` never associated, so nothing else printed it either. Do not
+   plan around finding it there.
+3. **After the fact, from the card.** Once the panel has run, power it down,
+   pull the card and read the address it was given — this is how you confirm
+   you scanned the right host:
+
+   ```sh
+   journalctl -D /path/to/card/var/log/journal --no-pager \
+     | grep -E 'dhcp4|state changed new lease|address='
+   ```
+
+### Part 3 — nothing answers
+
+From **another machine on the same LAN** as the panel, with the panel up and
+showing a game. Replace `<ip>` with the address found above.
+
+**No mDNS name, no service records.** On Linux (`avahi-utils`):
+
+```sh
+avahi-browse -art | grep -i scoreboard     # expect: no output
+avahi-resolve -n scoreboard.local          # expect: "Failed to resolve host name"
+getent hosts scoreboard.local              # expect: no output, exit status 2
+```
+
+On macOS:
+
+```sh
+dns-sd -B _workstation._tcp local.         # expect: no "scoreboard" row; ctrl-C after ~15 s
+dns-sd -G v4 scoreboard.local              # expect: no answer; ctrl-C after ~15 s
+```
+
+Before this pass, the first command in either list printed `scoreboard` within
+a second or two. That is the difference to look for.
+
+**No open TCP port.** ICMP is not a listener, so the panel answering a ping is
+fine and expected:
+
+```sh
+sudo nmap -sT -p- <ip>                     # expect: "All 65535 scanned ports ... closed"
+sudo nmap -sU -p 53,67,68,123,161,5353 <ip> # expect: no "open" (open|filtered is fine for UDP)
+```
+
+`-sT` rather than `-sS` so it works without raw-socket privileges on a WSL or
+container host. Anything reported **open** is a finding: write down the port
+and the service `nmap` guesses, and do not publish the image.
+
+**No Bluetooth advertisement.** On Linux with a Bluetooth adapter:
+
+```sh
+bluetoothctl
+[bluetooth]# scan on                       # leave for 60 s
+[bluetooth]# devices                       # expect: no device named "scoreboard"
+[bluetooth]# scan off
+# and, for low energy specifically:
+sudo btmgmt find                           # expect: no "scoreboard"
+```
+
+A phone's Bluetooth settings screen, left open for a minute near the panel,
+does the same job.
+
+**Read this result honestly.** `bluetoothd` does not make an adapter
+discoverable by default, so a clean scan is necessary but **not sufficient** —
+the old image would probably have looked clean here too. What actually settles
+it is the kernel: with `dtoverlay=disable-bt` the adapter is never attached at
+all, and that leaves a mark you can read. Power the panel down, pull the card,
+and check:
+
+```sh
+journalctl -D /path/to/card/var/log/journal --no-pager | grep -c 'Bluetooth: hci0'
+#   expect 0.  On v0.1.2 this printed several lines, including
+#   "Bluetooth: hci0: BCM4345C0" and "Bluetooth: hci0: BCM43455 37.4MHz"
+journalctl -D /path/to/card/var/log/journal --no-pager | grep -iE 'avahi|bluetoothd'
+#   expect nothing.  On v0.1.2: "Starting SDP server" and
+#   "Server startup complete. Host name is scoreboard.local"
+journalctl -D /path/to/card/var/log/journal --no-pager | grep 'Listening on'
+#   expect only UNIX, FIFO and netlink sockets -- and in particular NO
+#   "sshd-unix-local.socket", which v0.1.2 had on both boots
+```
+
+### What a failure here means
+
+- **An mDNS name still answers** — `avahi-daemon` came back, most likely
+  through a `Recommends` that `export-image/02-set-sources`' `dist-upgrade`
+  followed. The gate should have caught it; if the gate passed and this
+  failed, the gate's package list is wrong, not the image.
+- **A TCP port is open** — find out what is behind it before anything else.
+  The gate's socket-unit rule only covers socket-activated units; a daemon
+  that binds its own port is invisible to it, which is exactly why this check
+  exists (spec §9.13).
+- **Bluetooth is visible, or `Bluetooth: hci0` is in the journal** — the
+  overlay did not take. Check that `dtoverlay=disable-bt` is in
+  `/boot/firmware/config.txt` on the flashed card, uncommented, and under a
+  `[all]` section rather than a board-specific one.
+- **The panel does not boot or does not join** — the most likely culprit is a
+  purge that took something load-bearing. `firmware-brcm80211`,
+  `libbluetooth3`, `raspberrypi-sys-mods` and `network-manager` are the four
+  that must survive; `dpkg -l` against the mounted card's
+  `/var/lib/dpkg/status` will say whether they did.
