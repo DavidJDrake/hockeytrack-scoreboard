@@ -55,9 +55,10 @@ reject_symlink() {
 # say what was missing and why it matters.
 #
 # The symlink chain is walked by hand rather than left to `[ -e ]` or
-# `readlink -e`, because every library this gate looks for is the head of a
-# versioned chain (libEGL.so.1 -> libEGL.so.1.1.0, dri/vc4_dri.so ->
-# libdril_dri.so) and the host must never be consulted about any of it: an
+# `readlink -e`, because several of the files this gate looks for are the head
+# of a versioned symlink chain (libEGL.so.1 -> libEGL.so.1.1.0) while others,
+# gbm/dri_gbm.so and 50_mesa.json among them, are plain files -- and the host
+# must never be consulted about any of it: an
 # ABSOLUTE link target inside a rootfs means "/usr/... in that rootfs", but
 # the kernel resolving it here would read the build machine's /usr instead.
 # That cuts both ways -- it can pass an image missing the file because the
