@@ -10,6 +10,15 @@
 # inspects the filesystem; it does not boot the image. Booting is proven on
 # real hardware (docs/hardware-checks.md).
 #
+# Since 2026-09-18 it checks a second thing: that the image can do its one
+# job. v0.1.1 passed every no-secrets rule here, shipped, booted unattended --
+# and showed a black screen, because SDL's kmsdrm backend dlopens its EGL,
+# GLES and DRI libraries at runtime and none of them was in the image (H5).
+# A secret-free image that cannot light the panel is still a bad release, and
+# a release costs thirty-five minutes of build plus a human with a card
+# reader. Anything the display path needs at runtime but nothing in the image
+# depends on belongs here, asserted by path.
+#
 # A gate that can be bypassed guards nothing, so every check here fails
 # closed: an error probing the image (a find or grep that could not read
 # something) is treated the same as finding a secret, never as "clean".
@@ -39,6 +48,35 @@ sanitize_for_log() {
 # with this first.
 reject_symlink() {
   [ ! -L "$1" ] || fail "$2 is a symlink; it must be a real directory so the gate can see inside it"
+}
+
+# Does an image-absolute path resolve to something that really exists, inside
+# the image? Returns 0/1; it never fails the gate itself, so the caller can
+# say what was missing and why it matters.
+#
+# The symlink chain is walked by hand rather than left to `[ -e ]` or
+# `readlink -e`, because several of the files this gate looks for are the head
+# of a versioned symlink chain (libEGL.so.1 -> libEGL.so.1.1.0) while others,
+# gbm/dri_gbm.so and 50_mesa.json among them, are plain files -- and the host
+# must never be consulted about any of it: an
+# ABSOLUTE link target inside a rootfs means "/usr/... in that rootfs", but
+# the kernel resolving it here would read the build machine's /usr instead.
+# That cuts both ways -- it can pass an image missing the file because the
+# host happens to have one, and fail a good image because an x86 host has no
+# aarch64 multiarch directory. A relative target is resolved beside the link,
+# as it would be on the panel. The hop limit stops a symlink loop spinning.
+image_resolves() {
+  local cur="$ROOT/$1" target hops=0
+  while [ -L "$cur" ]; do
+    hops=$((hops + 1))
+    [ "$hops" -le 16 ] || return 1
+    target="$(readlink -- "$cur")" || return 1
+    case "$target" in
+      /*) cur="$ROOT$target" ;;
+      *) cur="$(dirname -- "$cur")/$target" ;;
+    esac
+  done
+  [ -e "$cur" ]
 }
 
 # Run find, capturing its output in $FOUND. A nonzero exit -- a permission or
@@ -521,6 +559,44 @@ run_find "$ROOT/opt/scoreboard/.venv" -type d -name pygame -print -quit
 [ -z "$FOUND" ] || fail "the virtualenv carries its own pygame (${FOUND#"$ROOT"}), which has no kmsdrm driver"
 [ -d "$ROOT/usr/lib/python3/dist-packages/pygame" ] || fail "the distribution's pygame is not installed"
 ok "the virtualenv uses the distribution's pygame"
+
+# The right pygame is not enough: it dlopens the rest of the display path at
+# runtime. SDL_egl.c opens "libEGL.so.1" and "libGLESv2.so.2" by those exact
+# sonames; the glvnd dispatcher reads a vendor JSON to find Mesa's
+# libEGL_mesa.so.0; and libgbm dlopens its backend, gbm/dri_gbm.so. None of
+# those is a dependency of anything else in the image, so apt never installs
+# them unasked; the two package lists name them explicitly, and this is the
+# check that they arrived.
+#
+# That is the WHOLE chain. An earlier version of this block also asserted
+# dri/vc4_dri.so and dri/v3d_dri.so, on the belief that Mesa's GBM backend
+# loads a per-driver DRI module. It does not, and inspecting the 26.2.2 arm64
+# debs says so plainly: gbm/dri_gbm.so and libEGL_mesa.so.0 import no dlopen
+# at all and both carry DT_NEEDED on libgallium-26.2.2-...so; no "%s_dri.so"
+# template exists in libgallium, libEGL_mesa, dri_gbm.so or libgbm; and
+# libgallium's strings carry VC4_DEBUG and V3D_DEBUG, because the vc4 and v3d
+# gallium drivers are compiled into it. Every dri/*_dri.so is in fact a
+# symlink to libdril_dri.so, a small shim that dlopens libEGL.so.1 itself --
+# Mesa's legacy-DRI-over-EGL layer for the X server, which sits downstream of
+# this path rather than under it. Those two rules were asserting files that do
+# not carry the display, and "dril" is new enough upstream that a rename would
+# have failed a perfectly good build, so they are gone.
+#
+# The paths are what the trixie arm64 debs actually ship, read with dpkg-deb -c
+# on 2026-09-18 -- not recalled. Several are the head of a versioned symlink
+# chain, which image_resolves() follows inside the image root.
+ARCH_LIB="usr/lib/aarch64-linux-gnu"
+need_display_file() {
+  image_resolves "$1" || fail \
+    "the display path is incomplete: /$1 is missing or unresolvable (shipped by $2). SDL loads it at runtime, so nothing in the image depends on it and apt will not install it on its own -- the panel would come up black"
+}
+need_display_file "$ARCH_LIB/libEGL.so.1" "libegl1"
+need_display_file "$ARCH_LIB/libEGL_mesa.so.0" "libegl-mesa0"
+need_display_file "usr/share/glvnd/egl_vendor.d/50_mesa.json" "libegl-mesa0"
+need_display_file "$ARCH_LIB/libGLESv2.so.2" "libgles2"
+need_display_file "$ARCH_LIB/libgbm.so.1" "libgbm1"
+need_display_file "$ARCH_LIB/gbm/dri_gbm.so" "libgbm1"
+ok "the display path is complete: EGL dispatcher, Mesa EGL vendor and its glvnd JSON, GLES2, and GBM with its backend"
 
 # The service that holds each panel's IoT private key imports paho-mqtt, so it
 # comes from Debian's signed archive (python3-paho-mqtt), not an unpinned PyPI

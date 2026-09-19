@@ -15,7 +15,52 @@ export const MAX_OWNER_BYTES = 256;
 
 export class SetupFileError extends Error {}
 
-export function setupFileFor(email) {
+// A two-letter country code, or blank. Two ASCII letters is the whole of what
+// the panel accepts -- netcfg.parse_wifi_file upper-cases the value and then
+// checks len == 2 and isalpha -- so anything else is written as blank rather
+// than guessed at. Blank is always the safe answer: the panel then refuses
+// the file and says exactly what to add, which beats writing a value it
+// cannot use. It is also what keeps a line break out of the file, since two
+// letters cannot be one.
+function normalizeRegion(region) {
+  return typeof region === "string" && /^[A-Za-z]{2}$/.test(region)
+    ? region.toUpperCase()
+    : "";
+}
+
+// The region out of a browser locale tag: "en-US" -> "US", "zh-Hans-CN" ->
+// "CN", "en" -> null. Parsed by hand rather than with Intl.Locale so the
+// result is identical in every browser and can be tested exhaustively, and
+// because the rule wanted here is narrow: the first subtag is the language
+// and is never a region ("en" must not become country=EN), and only a
+// two-ASCII-letter subtag counts -- "es-419" names Latin America, which is a
+// real region but not a code the panel can use.
+export function regionFromLocale(locale) {
+  if (typeof locale !== "string") return null;
+  for (const subtag of locale.split(/[-_]/).slice(1)) {
+    const region = normalizeRegion(subtag);
+    if (region) return region;
+  }
+  return null;
+}
+
+// What to tell the reader when the country could not be guessed and the file
+// therefore carries a blank country= line. Without this the download looks
+// complete and the blank line is a silent trap: the panel refuses the file on
+// first boot and its owner has no idea why. Set with textContent, never as
+// markup.
+export const COUNTRY_NOT_GUESSED =
+  "We could not tell which country this panel will be used in, so the country= line in the file is blank. " +
+  "Fill it in before you save the file -- the panel's Wi-Fi stays switched off without it.";
+
+// The note the page should show for this region, or null when there is
+// nothing to say. Decided by the same normalizeRegion the file is written
+// with, so the note can never disagree with what was actually written.
+export function countryNoteFor(region) {
+  return normalizeRegion(region) ? null : COUNTRY_NOT_GUESSED;
+}
+
+export function setupFileFor(email, region) {
   const owner = typeof email === "string" ? email : "";
   if (!owner) throw new SetupFileError("there is no email address to write");
   // Anything the panel might read as a line break would let the address add
@@ -43,6 +88,11 @@ export function setupFileFor(email) {
     "# from this file.",
     "ssid=",
     "psk=",
+    "",
+    "# The two-letter code for the country the panel will be used in -- US,",
+    "# CA, GB and so on. The panel's Wi-Fi stays switched off until this is",
+    "# filled in, so check it even if there is already something here.",
+    `country=${normalizeRegion(region)}`,
     "",
     "# This line ties the panel to your account, so the code it shows can be",
     "# claimed by you and nobody else. Leave it exactly as it is.",

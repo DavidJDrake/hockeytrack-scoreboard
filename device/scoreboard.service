@@ -12,6 +12,12 @@ Type=simple
 User=@USER@
 WorkingDirectory=@DEVICE_DIR@
 Environment=SDL_VIDEODRIVER=kmsdrm
+# Same reason as the appliance unit: this runs the same program, which plays
+# no sound, and pygame.init() initializes the mixer anyway -- so ALSA prints
+# about fifteen "cannot find card '0'" lines into the journal on every start.
+# A developer's Pi has no sound hardware either, and the same 3-second
+# restart loop buries the same failures under the same noise.
+Environment=SDL_AUDIODRIVER=dummy
 Environment=PYTHONUNBUFFERED=1
 ExecStart=@DEVICE_DIR@/.venv/bin/python -m scoreboard.main
 Restart=always

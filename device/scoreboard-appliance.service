@@ -25,6 +25,15 @@ Group=scoreboard
 # not adding a group that isn't there.
 WorkingDirectory=/opt/scoreboard
 Environment=SDL_VIDEODRIVER=kmsdrm
+# The panel has no sound hardware and the program plays nothing, but
+# pygame.init() initializes the mixer anyway, and ALSA then prints about
+# fifteen "cannot find card '0'" lines on every start. The journal is
+# persistent now and is the only place a startup failure can be read once
+# this service owns tty1 -- and while it is failing it restarts every 3 s, so
+# that noise buries the one line worth reading. Remove this only if the
+# scoreboard ever plays a sound; device/tests/test_pi_setup.py fails the
+# moment it starts to.
+Environment=SDL_AUDIODRIVER=dummy
 Environment=PYTHONUNBUFFERED=1
 Environment=SCOREBOARD_CONFIG_DIR=/var/lib/scoreboard
 ExecStart=/opt/scoreboard/.venv/bin/python -m scoreboard.main

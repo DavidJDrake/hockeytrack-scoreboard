@@ -102,7 +102,27 @@ install_appliance() {
   # Every Python dependency comes from the distribution's signed archive:
   # pygame for its kmsdrm driver, cryptography for enrollment, and paho-mqtt
   # because the service that imports it holds the panel's IoT private key.
-  apt-get install -y python3-pygame python3-gpiozero python3-venv network-manager polkitd python3-cryptography python3-paho-mqtt ca-certificates
+  #
+  # The four graphics packages at the end are the display path. SDL's kmsdrm
+  # backend dlopens them at runtime rather than linking them, so nothing in
+  # the image depends on libegl1 (libEGL.so.1, the glvnd dispatcher),
+  # libegl-mesa0 (libEGL_mesa.so.0 plus glvnd's 50_mesa.json) or libgles2
+  # (libGLESv2.so.2) -- and apt installs none of them on its own, since
+  # libsdl2-2.0-0 Recommends nothing at all. A desktop image hides the gap; a
+  # Lite appliance image does not. v0.1.1 shipped without them and crash-looped
+  # on "EGL not initialized" (docs/hardware-checks.md, H5).
+  #
+  # The DRIVERS were never missing: libEGL_mesa.so.0 and libgbm1's backend
+  # gbm/dri_gbm.so both carry DT_NEEDED on libgallium, and vc4 and v3d are
+  # compiled into libgallium, which v0.1.1 already had through libgbm1.
+  # libgl1-mesa-dri is therefore NOT on the load path as far as static
+  # analysis shows; it is kept for this release only because being wrong
+  # about it costs a build and a reflash, and is to be removed once a real
+  # boot has rendered without it. Keep this list identical to
+  # tools/pi-gen/stage-scoreboard/00-packages/00-packages, which
+  # device/tests/test_pi_gen_recipe.py enforces, and which carries the full
+  # reasoning.
+  apt-get install -y python3-pygame python3-gpiozero python3-venv network-manager polkitd python3-cryptography python3-paho-mqtt ca-certificates libegl1 libegl-mesa0 libgles2 libgl1-mesa-dri
 
   echo "==> service account"
   getent passwd "$SERVICE_USER" >/dev/null || \

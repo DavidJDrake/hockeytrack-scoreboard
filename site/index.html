@@ -53,8 +53,8 @@
       <ol>
         <li><a href="/download/">Download the scoreboard image</a>, verify it, and write it to an SD card with Raspberry Pi Imager.</li>
         <li>Download the setup file and save it onto the card's boot partition. It must be named exactly <code>scoreboard-setup.txt</code>. If you have downloaded it before, your browser may have added a number to the name; remove it.</li>
-        <li>Open it there, and type your Wi-Fi name and password.</li>
-        <li>Put the card in the panel and power it on. Before claiming the code it shows, check the panel says "Waiting for" your own address -- if it says "Waiting to be claimed" instead, the setup file wasn't read.</li>
+        <li>Open it there, and type your Wi-Fi name and password. Check the <code>country=</code> line too -- the panel's Wi-Fi stays switched off until it knows which country it is in.</li>
+        <li>Put the card in the panel and power it on. On the first start the screen can stay dark for up to a minute and a half while the panel joins your Wi-Fi — that is normal, leave it powered on. Before claiming the code it shows, check the panel says "Waiting for" your own address -- if it says "Waiting to be claimed" instead, the setup file wasn't read.</li>
       </ol>
       <p id="add-note" hidden></p>
       <button id="download" class="btn" type="button">Download setup file</button>

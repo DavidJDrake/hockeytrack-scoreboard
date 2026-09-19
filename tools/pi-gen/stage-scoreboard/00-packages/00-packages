@@ -1,3 +1,9 @@
+# Exactly what tools/pi-setup.sh --appliance installs. pi-gen strips these
+# comments (scripts/remove-comments.sed) before apt sees the list, and
+# device/tests/test_pi_gen_recipe.py fails the build if the two lists drift.
+#
+# This file is NOT named 00-packages-nr, so pi-gen installs it WITH
+# Recommends -- but that is not what supplies the graphics libraries below.
 python3-pygame
 python3-gpiozero
 python3-venv
@@ -6,3 +12,52 @@ polkitd
 python3-cryptography
 ca-certificates
 python3-paho-mqtt
+
+# --- The display path (added 2026-09-18, after v0.1.1) ---
+#
+# SDL's kmsdrm backend dlopens these by soname at runtime rather than linking
+# them, so NOTHING in the image depends on them and apt installs none of them
+# on its own. Recommends would not have helped either: libsdl2-2.0-0
+# (2.32.4+dfsg-1) Depends on libdrm2 and libgbm1 among others, Suggests only
+# xdg-utils, and Recommends nothing at all. A desktop image hides the gap
+# because its desktop pulls the whole stack in for its own reasons; a Lite
+# appliance image does not. v0.1.1 shipped without them and crash-looped on
+# "EGL not initialized" (docs/hardware-checks.md, H5).
+#
+# libegl1          libEGL.so.1, the glvnd dispatcher SDL_egl.c opens by that
+#                  exact soname. Pulls libglvnd0 and libegl-mesa0.
+# libegl-mesa0     libEGL_mesa.so.0, the Mesa EGL vendor library the
+#                  dispatcher loads, plus /usr/share/glvnd/egl_vendor.d/
+#                  50_mesa.json, the vendor file without which the dispatcher
+#                  finds no driver. Named explicitly rather than left to
+#                  libegl1's Depends, so the vendor half cannot go missing
+#                  silently.
+# libgles2         libGLESv2.so.2, which SDL loads before EGL and retries as
+#                  GLES 2.0 when its desktop-GL attempt fails.
+#
+# The drivers themselves were never missing. libEGL_mesa.so.0 and libgbm1's
+# backend gbm/dri_gbm.so both carry DT_NEEDED on libgallium-26.2.2-...so, and
+# the vc4 and v3d gallium drivers are compiled into libgallium (its strings
+# carry VC4_DEBUG and V3D_DEBUG) -- so mesa-libgallium, which v0.1.1 already
+# had through libgbm1, was always enough. Neither library imports dlopen at
+# all, and no "%s_dri.so" template exists anywhere on this path.
+#
+# libgl1-mesa-dri  NOT on the load path, as far as static analysis of the
+#                  26.2.2 debs can show: every dri/*_dri.so in it is a symlink
+#                  to libdril_dri.so, a shim that dlopens libEGL.so.1 itself
+#                  -- Mesa's legacy-DRI-over-EGL layer for the X server, which
+#                  sits downstream of this path rather than under it. Kept for
+#                  this release anyway: it is ~50 kB, and being wrong about it
+#                  costs a 35-minute build plus a person with a card reader,
+#                  which is a worse trade than carrying it. REMOVE IT once a
+#                  real boot has rendered without it (docs/hardware-checks.md,
+#                  H1) -- tracked there as a follow-up, not left to rot here.
+#
+# libgbm1, mesa-libgallium and libdrm2 are not repeated here: libgbm1 and
+# libdrm2 are libsdl2-2.0-0's own Depends, and mesa-libgallium arrives through
+# libgbm1. tools/image-gate.sh asserts the six files that actually carry the
+# display, by path, so a future apt change cannot quietly drop one.
+libegl1
+libegl-mesa0
+libgles2
+libgl1-mesa-dri
