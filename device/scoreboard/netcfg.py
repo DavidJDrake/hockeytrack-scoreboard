@@ -279,12 +279,30 @@ WIFI_READY_WAIT_S = 2
 # nmcli translates device and connection STATE even under -t, and
 # network-manager-l10n is installed on the image -- so the strings this module
 # compares against ("connected", "unavailable", "unmanaged") are English only
-# by accident of whatever locale the panel happens to run in. Forcing C on the
-# child process turns that accident into a guarantee. LANGUAGE is cleared as
-# well as LC_ALL set, because gettext lets LANGUAGE override LC_ALL for message
-# translation. Nothing here shows nmcli's output to a person, so a machine
-# locale costs nothing. Applies to `iw` too, which this module also parses.
-C_LOCALE_ENV = {**os.environ, "LC_ALL": "C", "LANG": "C", "LANGUAGE": ""}
+# by accident of whatever locale the panel happens to run in. Forcing a locale
+# on the child process turns that accident into a guarantee. LANGUAGE is
+# cleared as well as LC_ALL set, because gettext lets LANGUAGE override LC_ALL
+# for message translation. Applies to `iw` too, which this module also parses.
+#
+# The locale is C.UTF-8 and NOT plain C, which is what this was first written
+# as. nmcli's output IS shown to a person and round-tripped: screens.py draws
+# the SSIDs this module scans, and settings.py hands the selected one straight
+# back to `nmcli device wifi connect`. nmcli prints through GLib's g_print(),
+# which converts to the locale's charset on the way out, so under C
+# (ANSI_X3.4-1968) every non-ASCII SSID would come back mangled -- displayed
+# wrong, then handed to connect wrong, so the join fails. C.UTF-8 keeps the
+# charset UTF-8 while carrying no message catalogs of its own, so the output
+# stays untranslated English either way. It is compiled into glibc since 2.35
+# and needs no locale generation; trixie ships 2.41.
+UTF8_LOCALE_ENV = {**os.environ, "LC_ALL": "C.UTF-8", "LANG": "C.UTF-8", "LANGUAGE": ""}
+
+# text=True decodes with the PARENT process's locale, not the child's env, so
+# it would rest on CPython's PEP 538 C-locale coercion -- which is off wherever
+# PYTHONCOERCECLOCALE=0 is set. Naming the encoding here makes the decoding
+# side match the charset forced above no matter what systemd hands this unit.
+# errors="replace" because an undecodable byte from the air must not raise out
+# of a boot path or a render loop.
+DECODE = {"encoding": "utf-8", "errors": "replace"}
 
 
 def _run_nmcli(args: list[str], timeout: float = QUERY_TIMEOUT_S) -> str:
@@ -292,7 +310,8 @@ def _run_nmcli(args: list[str], timeout: float = QUERY_TIMEOUT_S) -> str:
     # text from the air, and a password is whatever the user typed.
     timed_out = False
     try:
-        result = subprocess.run(["nmcli", *args], capture_output=True, text=True, timeout=timeout, env=C_LOCALE_ENV)
+        result = subprocess.run(["nmcli", *args], capture_output=True, timeout=timeout,
+                                env=UTF8_LOCALE_ENV, **DECODE)
     except subprocess.TimeoutExpired:
         # TimeoutExpired's str() embeds the whole argv, and apply()'s argv holds
         # the Wi-Fi password, so this must never reach a caller that logs it.
@@ -314,7 +333,8 @@ def _run_raspi_config(args: list[str], timeout: float = QUERY_TIMEOUT_S) -> str:
     # exception is left on __context__.
     timed_out = False
     try:
-        result = subprocess.run(["raspi-config", *args], capture_output=True, text=True, timeout=timeout, env=C_LOCALE_ENV)
+        result = subprocess.run(["raspi-config", *args], capture_output=True, timeout=timeout,
+                                env=UTF8_LOCALE_ENV, **DECODE)
     except subprocess.TimeoutExpired:
         timed_out = True
     if timed_out:
@@ -325,13 +345,15 @@ def _run_raspi_config(args: list[str], timeout: float = QUERY_TIMEOUT_S) -> str:
 
 
 def _run_iw_reg_get(timeout: float = QUERY_TIMEOUT_S) -> str:
-    # Same shape as the runners above, and the same C locale: this output is
-    # parsed, not shown. OSError is caught alongside the timeout, because iw
-    # is a package this image happens to have rather than one it depends on.
+    # Same shape as the runners above, and the same locale: this output is
+    # parsed rather than shown, but it goes through the same forcing so there
+    # is one rule here and not two. OSError is caught alongside the timeout,
+    # because iw is a package this image happens to have rather than one it
+    # depends on.
     failed = False
     try:
         result = subprocess.run(["iw", "reg", "get"], capture_output=True,
-                                text=True, timeout=timeout, env=C_LOCALE_ENV)
+                                timeout=timeout, env=UTF8_LOCALE_ENV, **DECODE)
     except (subprocess.TimeoutExpired, OSError):
         failed = True
     if failed:
@@ -354,11 +376,23 @@ def regulatory_domain(run_iw=None) -> str | None:
       so a domain set earlier in THIS boot is live before it has ever
       appeared on the kernel command line.
 
-    "00" is the world regulatory domain -- the conservative default the kernel
-    falls back to when nobody has said where it is -- so it reads as None. So
-    does anything unreadable: unknown has to mean "not configured", or a panel
-    with no domain would be waved through into a radio that is switched off,
-    which is exactly where v0.1.1 was.
+    Any pair that is not two letters reads as None -- that is the whole rule,
+    and it is what is load-bearing here. "00" is the world regulatory domain,
+    the conservative default the kernel falls back to when nobody has said
+    where it is; "99" is what brcmfmac, the Pi's own driver, reports for its
+    built-in regdom. Neither is a country, and neither is special-cased: they
+    fall out of the same "two alphabetic characters" test, which is what keeps
+    a new driver's own spelling of "unset" from reading as configured. So does
+    anything unreadable: unknown has to mean "not configured", or a panel with
+    no domain would be waved through into a radio that is switched off, which
+    is exactly where v0.1.1 was.
+
+    Only the ``global`` block of ``iw reg get`` is read. Anything from the
+    first ``phy#`` line on belongs to a self-managed device, which carries its
+    own domain whether or not this panel has ever been configured -- a USB
+    dongle with a real alpha2 would otherwise make a fresh panel look set, so
+    set_country() would be skipped and the domain never written into
+    cmdline.txt, dropping a legally meaningful step in silence.
     """
     try:
         for token in PROC_CMDLINE.read_text().split():
@@ -374,7 +408,10 @@ def regulatory_domain(run_iw=None) -> str | None:
     except NetworkError:
         return None
     for line in out.splitlines():
-        fields = line.strip().split()
+        stripped = line.strip()
+        if stripped.startswith("phy#"):
+            break  # everything below here is a self-managed device's own domain
+        fields = stripped.split()
         if len(fields) >= 2 and fields[0] == "country":
             code = fields[1].rstrip(":").upper()
             if len(code) == 2 and code.isalpha():

@@ -456,6 +456,41 @@ def test_regulatory_domain_treats_the_world_domain_as_unset(tmp_path, monkeypatc
     assert netcfg.regulatory_domain(run_iw=lambda: "global\ncountry 00: DFS-UNSET\n") is None
 
 
+def test_regulatory_domain_ignores_a_self_managed_phy_block(tmp_path, monkeypatch):
+    # `iw reg get` prints the global domain first, then one block per phy that
+    # manages its own. A phy block's country says nothing about whether THIS
+    # panel has been configured -- a USB dongle carries a real alpha2 out of
+    # the box -- so reading it would let a fresh panel report as already set,
+    # skip set_country, and never write the domain into cmdline.txt.
+    cmdline = tmp_path / "cmdline"
+    cmdline.write_text("console=serial0,115200 rootwait\n")
+    monkeypatch.setattr(netcfg, "PROC_CMDLINE", cmdline)
+    out = ("global\ncountry 00: DFS-UNSET\n"
+           "\nphy#0 (self-managed)\ncountry US: DFS-FCC\n")
+    assert netcfg.regulatory_domain(run_iw=lambda: out) is None
+
+
+def test_regulatory_domain_reads_the_global_block_whatever_follows_it(tmp_path, monkeypatch):
+    # The other side of the same rule: a real global domain is still read, and
+    # a phy block underneath it neither adds to nor overrides it.
+    cmdline = tmp_path / "cmdline"
+    cmdline.write_text("console=serial0,115200 rootwait\n")
+    monkeypatch.setattr(netcfg, "PROC_CMDLINE", cmdline)
+    out = ("global\ncountry US: DFS-FCC\n"
+           "\nphy#0 (self-managed)\ncountry DE: DFS-ETSI\n")
+    assert netcfg.regulatory_domain(run_iw=lambda: out) == "US"
+
+
+def test_regulatory_domain_treats_the_drivers_own_default_as_unset(tmp_path, monkeypatch):
+    # brcmfmac, the Pi's own Wi-Fi driver, reports its built-in regdom as
+    # alpha2 "99" rather than "00". Neither is a country, and what rejects
+    # both is "not two letters", not a list of special codes.
+    cmdline = tmp_path / "cmdline"
+    cmdline.write_text("console=serial0,115200 rootwait\n")
+    monkeypatch.setattr(netcfg, "PROC_CMDLINE", cmdline)
+    assert netcfg.regulatory_domain(run_iw=lambda: "global\ncountry 99: DFS-UNSET\n") is None
+
+
 def test_regulatory_domain_is_none_when_nothing_can_be_read(tmp_path, monkeypatch):
     # No cmdline, no iw. Unknown must read as "not configured", so the file is
     # refused with an explanation rather than applied into a radio that is off.
@@ -618,6 +653,84 @@ def test_run_raspi_config_timeout_raises_network_error(monkeypatch):
 
     with pytest.raises(NetworkError):
         netcfg._run_raspi_config(["nonint", "do_wifi_country", "US"])
+
+
+def _capture_subprocess(monkeypatch, stdout=""):
+    """Run each runner against a fake subprocess.run, returning its kwargs."""
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen.update(kwargs)
+        seen["argv"] = argv
+        return subprocess.CompletedProcess(argv, 0, stdout, "")
+
+    monkeypatch.setattr(netcfg.subprocess, "run", fake_run)
+    return seen
+
+
+RUNNERS = [
+    ("nmcli", lambda: netcfg._run_nmcli(["-t", "-f", "STATE", "general"])),
+    ("raspi-config", lambda: netcfg._run_raspi_config(["nonint", "do_wifi_country", "US"])),
+    ("iw", netcfg._run_iw_reg_get),
+]
+
+
+@pytest.mark.parametrize("name,call", RUNNERS, ids=[r[0] for r in RUNNERS])
+def test_every_runner_forces_an_untranslated_but_utf8_locale(name, call, monkeypatch):
+    # nmcli translates STATE even under -t, and network-manager-l10n is on the
+    # image, so the English this module compares against has to be forced. The
+    # forced locale must still be a UTF-8 one: nmcli prints SSIDs through
+    # GLib's g_print(), which converts to the locale's charset on the way out,
+    # so plain "C" (ANSI_X3.4-1968) would mangle a non-ASCII SSID -- which the
+    # settings screen then shows and hands straight back to `wifi connect`.
+    seen = _capture_subprocess(monkeypatch)
+    call()
+    env = seen["env"]
+    assert "UTF-8" in env["LC_ALL"].upper(), f"{name} must keep a UTF-8 charset"
+    assert "UTF-8" in env["LANG"].upper()
+    # gettext lets LANGUAGE override LC_ALL for message translation, so
+    # clearing it is what actually guarantees untranslated output.
+    assert env["LANGUAGE"] == ""
+
+
+@pytest.mark.parametrize("name,call", RUNNERS, ids=[r[0] for r in RUNNERS])
+def test_every_runner_decodes_as_utf8_whatever_the_parent_locale_is(name, call, monkeypatch):
+    # text=True decodes with the PARENT process's locale, not the child's env,
+    # so it would depend on PEP 538's C-locale coercion -- which is off when
+    # PYTHONCOERCECLOCALE=0 is set. The encoding is named explicitly instead,
+    # and errors="replace" so a genuinely undecodable byte from the air cannot
+    # raise out of the render loop.
+    seen = _capture_subprocess(monkeypatch)
+    call()
+    assert seen.get("encoding") == "utf-8", f"{name} must name its decoding"
+    assert seen.get("errors") == "replace"
+
+
+def test_a_non_ascii_ssid_survives_the_scan_and_comes_back_to_connect():
+    # The whole point of the UTF-8 charset, end to end: an SSID with an accent
+    # is scanned, shown in the settings list, and handed back to `nmcli device
+    # wifi connect` byte for byte. A mangled name joins nothing.
+    ssid = "Café Münster"
+    fake = FakeNmcli({"list": f"{ssid}:71:WPA2\n"})
+    manager = NetworkManager(run=fake)
+    found = manager.scan()
+    assert [n.ssid for n in found] == [ssid]
+    manager.apply(WifiSettings(ssid=found[0].ssid, psk="supersecret"))
+    assert ["device", "wifi", "connect", ssid, "password", "supersecret"] in fake.calls
+
+
+def test_a_non_ascii_ssid_survives_the_runners_own_decoding(monkeypatch):
+    # One level lower: the bytes nmcli really writes, decoded by _run_nmcli
+    # itself rather than by a fake runner.
+    ssid = "Café Münster"
+
+    def fake_run(argv, **kwargs):
+        raw = f"{ssid}:71:WPA2\n".encode("utf-8")
+        return subprocess.CompletedProcess(
+            argv, 0, raw.decode(kwargs["encoding"], kwargs["errors"]), "")
+
+    monkeypatch.setattr(netcfg.subprocess, "run", fake_run)
+    assert [n.ssid for n in NetworkManager().scan()] == [ssid]
 
 
 def test_apply_boot_file_warns_but_still_succeeds_when_the_file_cannot_be_cleared(
