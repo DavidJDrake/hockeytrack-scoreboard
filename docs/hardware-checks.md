@@ -23,6 +23,11 @@ for step 4. H8's core path passed on 2026-09-19, once v0.1.3 fixed the Wi-Fi
 join that had blocked it; four of its steps are still open, and its section
 says which.
 
+Not everything here is one of the eight. **Display behavior**, at the end,
+records what ordinary use turned up about when the panel is lit and when it
+is dark — a fault no check had thought to ask about, and one the test suite
+was busy asserting was correct.
+
 ## Reading a failed panel
 
 Added 2026-09-18. This is how the v0.1.1 failure below was actually diagnosed,
@@ -1085,3 +1090,118 @@ alarm needs twenty in five minutes, which a three-panel fleet will never
 reach. If the claim 404s with everything else correct, suspect that line first.
 
 **2026-09-19.** It did not 404: the first real claim succeeded on the first try.
+
+## Display behavior
+
+**2026-09-19 — the panel switched itself off during a countdown, on v0.1.3,
+on a Pi 4.** Found by the owner, not by a test, and not findable by one: the
+suite had a test asserting exactly this behavior, and it passed.
+
+**What was observed.** A game six hours ahead was chosen on the site. The
+panel picked it up and showed `PUCK DROP in 06:00:00`, counting down, the
+right way up. Thirty minutes later the panel was black, and it stayed black.
+The owner's words:
+
+> This is not good behaviour. We have a countdown running, so it should
+> maintain the display. We lack a way to return to the display showing as
+> there is no input to the device. Even dimming is no good as this becomes
+> the state of the device until a change is made.
+
+The panel in normal use has no keyboard, no touch and no buttons wired up.
+A black panel with no input is indistinguishable from a dead one.
+
+**The old rule.** `main.should_blank`: anything whose state was not `LIVE`
+went to a pure black frame once `BLANK_AFTER_S` (30 minutes) had passed with
+no state update, and came back on the next update or button press. Two
+things were wrong with it. A countdown produces no updates — it is redrawn
+from the clock every second — so a running countdown looked exactly like an
+abandoned panel. And on a panel with no input device, "comes back on the
+next update or a button press" is not a way back at all: if nothing is due
+to update, nothing ever will.
+
+**The new model.** The screen is on when there is something to show and off
+when there is not, and it always comes back **by itself** — because a time
+passed, or because the owner chose something on the site. Going dark was
+never the fault; an unused screen should be essentially off. The fault was
+going dark with no way back.
+
+One pure function, `main.presentation`, decides what the render loop draws,
+and every `off` it can return is paired with the thing that ends it without
+anybody touching the panel:
+
+| Off because | Comes back when |
+|---|---|
+| The game is further away than the countdown lead | the window opens, or the owner chooses another game |
+| The final hold has run out | the owner chooses a game, or a new state arrives |
+| No game is selected, past the grace period | the owner chooses a game, or a state arrives |
+| Inside the owner's sleep hours | the window ends, or a live game starts |
+
+Three timings the owner will be able to set, with the defaults a panel runs
+on until it is told otherwise:
+
+| Setting | Default | What it does |
+|---|---|---|
+| Countdown lead | 2 hours | How long before puck drop the countdown appears. Before that, a selected future game shows nothing. Once it appears it never blanks and never dims on its own. |
+| Final hold | 3 hours | How long a final score stays up, measured from the moment **this panel first saw the game go final** — the state document carries no end timestamp, and the Pi's own wall clock cannot be trusted to compare against `asOf`. Then off. |
+| Sleep hours | unset | A daily local-time window (may cross midnight) in an explicitly chosen IANA zone. A **live game overrides it**; a countdown and a final hold do not, and resume by themselves when the window ends if they are still due. |
+
+Two further rules that are the panel's own, not settings:
+
+- **Grace period, 5 minutes.** After anything the owner caused or needs to
+  see — boot, a game chosen or cleared, a game going final — the relevant
+  screen stays up for five minutes whatever the hour, then the rules above
+  apply. It exists so that somebody who has just clicked something on the
+  site, or just powered the panel on, sees that it was heard.
+- **The screens that ask for help are never off**, in or out of sleep hours:
+  not registered, the pairing code, enrollment failing, no network. A panel
+  that cannot say "I have no network" cannot be fixed by the person standing
+  in front of it. These also sit on screen the longest — a pairing code for
+  up to a day — so they get the burn-in shift described below.
+
+Burn-in is now handled by moving what is drawn rather than by switching it
+off: a whole-frame offset of at most 4 px that steps round a fixed
+eight-point ring every seven minutes, in the 1920×480 drawing space before
+the frame is turned for the panel. It never moves the frame downward,
+because the game layout's real bottom margin is zero with two penalties a
+side. Sleep hours are the only thing here that needs wall-clock local time,
+and they are not in effect until `/run/systemd/timesync/synchronized`
+exists; every other duration is measured on `time.monotonic()`, because this
+board has no RTC and NTP may step the clock hours forward after boot.
+
+**What the next session should watch for:**
+
+1. **A countdown is still lit after 30+ minutes.** The exact case that
+   failed. Choose a game about 90 minutes out, leave the panel alone for an
+   hour, and confirm it is still counting down.
+2. **A game further out than the lead shows nothing, and appears by
+   itself.** Choose a game 3+ hours out: the panel should show it for the
+   five-minute grace, go black, and then light up on its own two hours
+   before puck drop, with nobody touching anything. This is the one that
+   proves "comes back by itself" on real hardware rather than in a test.
+3. **A final falls back after its time.** Watch a game end; the score should
+   still be there three hours later and gone shortly after. Re-choosing that
+   same game on the site should bring it back for another three hours.
+4. **The shift is invisible from a few meters.** Watch the panel across a
+   room for a quarter of an hour: nothing should be seen to move. Then
+   photograph the same screen seven minutes apart from a fixed position and
+   confirm the frame really did move a few pixels.
+5. **The pairing code and "No network" never switch off**, including
+   overnight if sleep hours are set once they can be delivered.
+6. **Nothing is dark that should not be.** Anything the panel does that
+   looks dead is a finding, whether or not it matches the table above.
+
+**Follow-up: can the display itself be put to sleep?** "Off" today is a
+black frame — the HDMI output stays up, the panel's own backlight stays lit,
+and a black 1920×480 frame on an IPS bar panel is dark grey in a dark room.
+Putting the output to sleep (DRM DPMS, or releasing the CRTC) would save
+power and take the backlight out of the burn-in question entirely, but
+nothing about it has been tested on this board, and it interacts with two
+things this image already depends on: SDL's kmsdrm backend holding the DRM
+master, and the hardened `scoreboard.service` (H1). What a session would
+have to establish, in this order: whether the panel's own firmware even
+blanks on DPMS off or just shows black; whether SDL gives the mode back
+cleanly and takes it again without a restart of the service; whether the
+hardening (`ProtectKernelTunables`, the device allowlist) leaves the
+ioctl reachable; and how long the panel takes to come back, since anything
+over a second or two makes "comes back by itself" feel broken. Until that is
+answered, nothing in the software tries it.

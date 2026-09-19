@@ -159,9 +159,25 @@ Cost: a heartbeat every 5 s per live game ≈ 720 invocations per game-hour;
   in the state file.
 - Reconnect with backoff; while disconnected, keep rendering the last state
   with a small "no link" glyph. The service restarts on crash.
-- Pre-game (`state: PRE`): puck-drop countdown from `start`. Post-game:
-  FINAL held with the final score. Screen blanks (backlight off via DPMS)
-  after a configurable idle period when no game is selected.
+- Pre-game (`state: PRE`): puck-drop countdown from `start`, shown once the
+  game is inside the countdown lead (default 2 h) and never interrupted
+  while it runs. Post-game: FINAL held with the final score for the final
+  hold (default 3 h), measured from the moment this panel first saw the game
+  end. The screen is black outside those windows, when no game is selected
+  (after a five-minute grace, so whoever just chose or cleared one sees that
+  the panel heard them), and inside the owner's sleep hours — which a live
+  game overrides, and which are not in effect until NTP has set the clock.
+  The screens that ask the owner for something (not registered, pairing
+  code, enrollment failing, no network) are never switched off. Burn-in is
+  handled by a few pixels of whole-frame shift on a slow schedule, not by
+  blanking.
+  **Corrected 2026-09-19**, from "screen blanks (backlight off via DPMS)
+  after a configurable idle period when no game is selected": that rule was
+  found wrong on hardware — it blanked a running countdown, which nothing
+  could then bring back. See `docs/hardware-checks.md`, "Display behavior".
+  Whether the backlight itself can be put to sleep (DPMS under kmsdrm with
+  the hardened unit) is untested on this board and is carried there as a
+  follow-up; "off" means a black frame until it is.
 - Provisioning: `tools/provision.sh` creates the IoT thing and certificate
   and writes an image-ready `config/` directory; first boot needs only
   Wi-Fi credentials.
