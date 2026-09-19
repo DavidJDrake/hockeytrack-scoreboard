@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 import sys
@@ -12,12 +13,12 @@ from scoreboard import main as main_module
 from scoreboard import screens
 from scoreboard.display import EX_CONFIG
 from scoreboard.main import (COUNTDOWN, FINAL, GAME, GRACE_S, IGNORE, MESSAGE,
-                             NO_GAME, OFF, REARM, SELECT, Display, Sleep,
-                             asleep, carry_out, changed_at, clock_synced,
-                             config_action, final_seen_at, presentation,
-                             shift_at)
+                             NO_GAME, OFF, REARM, SELECT, STALE_AFTER_S,
+                             Display, Sleep, asleep, carry_out, changed_at,
+                             clock_synced, config_action, final_seen_at,
+                             presentation, shift_at)
 from scoreboard.model import GameState
-from scoreboard.netcfg import WifiSettings
+from scoreboard.netcfg import NetworkError, WifiSettings
 from scoreboard.settings import RESULT, Settings
 
 FIX = Path(__file__).parent / "fixtures"
@@ -34,6 +35,13 @@ def final_state() -> GameState:
 
 def off_state() -> GameState:
     return GameState.from_json((FIX / "state_live.json").read_text().replace('"state":"LIVE"', '"state":"OFF"'))
+
+
+def odd_state() -> GameState:
+    """A state name this build has never heard of. The reducer cannot
+    produce one; a document that did not come through it, or a newer cloud,
+    could."""
+    return GameState.from_json((FIX / "state_live.json").read_text().replace('"state":"LIVE"', '"state":"WOBBLE"'))
 
 
 def pregame_state(start: str | None = "2026-10-01T23:30:00Z") -> GameState:
@@ -128,10 +136,81 @@ def test_a_countdown_never_falls_back_once_it_is_running():
         assert shown(now=31 * 60, now_utc=before_puck_drop(hours), state=game).show == COUNTDOWN
 
 
-def test_a_countdown_whose_start_has_already_passed_stays_up():
+def test_a_countdown_whose_start_has_just_passed_stays_up():
     # A game that should be under way is the last thing to switch off: the
-    # LIVE document that supersedes this is moments away.
-    assert shown(now_utc=PUCK_DROP + timedelta(minutes=5), state=pregame_state()).show == COUNTDOWN
+    # LIVE document that supersedes it is usually moments away. Games start
+    # a few minutes late as a matter of course, and an ice or weather delay
+    # can run an hour or more.
+    for minutes in (5, 45, 119):
+        assert shown(now_utc=PUCK_DROP + timedelta(minutes=minutes),
+                     state=pregame_state()).show == COUNTDOWN
+
+
+def test_a_game_that_never_starts_stops_being_shown():
+    # The far end of the same window, and the fault it closes. A postponed
+    # or cancelled game stops producing documents while its last one still
+    # says PRE, and render.draw draws that as PUCK DROP 00:00:00 -- checked
+    # against the real renderer: seconds_to_start floors at zero, so the
+    # frame is identical five minutes and five days after the start. It
+    # would have stayed there for ever, because nothing else was ever going
+    # to arrive. That is the owner's own complaint pointing the other way.
+    game = pregame_state()
+    assert shown(now_utc=PUCK_DROP + timedelta(seconds=STALE_AFTER_S - 1), state=game).show == COUNTDOWN
+    assert shown(now_utc=PUCK_DROP + timedelta(seconds=STALE_AFTER_S), state=game).show == OFF
+    assert shown(now_utc=PUCK_DROP + timedelta(days=3), state=game).show == OFF
+
+
+def test_a_live_document_lights_the_panel_whenever_it_turns_up():
+    # The way back from that OFF, and it does not matter how late: a game
+    # that starts three hours behind schedule is still a game.
+    for late in (timedelta(minutes=5), timedelta(seconds=STALE_AFTER_S),
+                 timedelta(hours=9), timedelta(days=2)):
+        assert shown(now=50 * 3600.0, now_utc=PUCK_DROP + late, state=live_state()).show == GAME
+
+
+def test_any_other_update_also_brings_the_panel_back():
+    # The second way back: a state arriving at all marks the change, and
+    # the panel shows what it says.
+    now, stale = 50 * 3600.0, PUCK_DROP + timedelta(days=3)
+    assert shown(now=now, now_utc=stale, state=pregame_state()).show == OFF
+    assert shown(now=now, now_utc=stale, state=final_state(), final_seen=now,
+                 last_change=now).show == FINAL
+
+
+def test_a_panel_booting_onto_last_nights_countdown_does_not_keep_showing_it():
+    # A panel powered on in the morning is sent the retained document for
+    # the game it was following, which may still say PRE from a game that
+    # was postponed last night. It shows it for the boot grace -- that is
+    # what the grace is for, and it is the panel demonstrating itself -- and
+    # is then off. It does NOT get a fresh two hours, because the bound is
+    # measured against the scheduled start, which passed long before this
+    # boot, and not from the moment the panel first noticed.
+    booted, this_morning = 0.0, PUCK_DROP + timedelta(hours=11)
+    game = pregame_state()
+    assert shown(now=booted, now_utc=this_morning, state=game, last_change=booted).show == COUNTDOWN
+    assert shown(now=booted + GRACE_S, now_utc=this_morning, state=game,
+                 last_change=booted).show == OFF
+
+
+def test_an_unrecognized_state_is_shown_and_then_bounded():
+    # The reducer only ever emits PRE, LIVE and FINAL, so this is a
+    # document that did not come through it, or this build talking to a
+    # newer cloud. It is shown, because a panel that hides what it does not
+    # understand cannot be diagnosed by anybody looking at it -- and then it
+    # goes off, because "shown" must never quietly mean "shown for ever".
+    arrived = 1_000.0
+    assert shown(now=arrived, state=odd_state(), last_change=arrived).show == GAME
+    assert shown(now=arrived + STALE_AFTER_S - 1, state=odd_state(), last_change=arrived).show == GAME
+    assert shown(now=arrived + STALE_AFTER_S, state=odd_state(), last_change=arrived).show == OFF
+
+
+def test_an_unrecognized_state_comes_back_on_the_next_change():
+    # The same two ways back as everything else: another state arrives, or
+    # the owner chooses a game. Both write last_change.
+    late = 10 * 3600.0
+    assert shown(now=late, state=odd_state(), last_change=0.0).show == OFF
+    assert shown(now=late, state=odd_state(), last_change=late).show == GAME
+    assert shown(now=late, state=live_state(), last_change=0.0).show == GAME
 
 
 def test_the_countdown_lead_is_a_setting_not_a_constant():
@@ -148,10 +227,13 @@ def test_a_pregame_document_with_nothing_to_count_down_to_is_off():
     assert shown(now_utc=before_puck_drop(1), state=pregame_state(start=None)).show == OFF
 
 
-def test_an_unreadable_start_time_switches_off_rather_than_raising():
+@pytest.mark.parametrize("start", ["not a timestamp", "2026-10-01T23:30:00", "23:30"])
+def test_an_unreadable_start_time_switches_off_rather_than_raising(start):
     # render.draw parses this same string every frame. Deciding not to draw
-    # it is also what keeps the render loop from meeting the exception.
-    assert shown(now_utc=before_puck_drop(1), state=pregame_state(start="not a timestamp")).show == OFF
+    # it is also what keeps the render loop from meeting the exception. A
+    # timestamp with no zone is refused too: it names no instant, and
+    # guessing one would be guessing which continent the panel is on.
+    assert shown(now_utc=before_puck_drop(1), state=pregame_state(start=start)).show == OFF
 
 
 def test_the_countdown_window_is_not_applied_before_the_clock_is_set():
@@ -461,8 +543,10 @@ def every_condition():
     """A sweep of the panel's conditions, to be checked all at once."""
     for screen in (screens.SCOREBOARD, screens.OFFLINE, screens.WAITING,
                    screens.UNREGISTERED, screens.ENROLL_PROBLEM, screens.SETTINGS):
-        for state in (None, live_state(), pregame_state(), final_state(), off_state()):
+        for state in (None, live_state(), pregame_state(), pregame_state(start=None),
+                      final_state(), off_state(), odd_state()):
             for now_utc in (None, before_puck_drop(6), before_puck_drop(1),
+                            PUCK_DROP + timedelta(days=3),
                             datetime(2026, 10, 2, 8, 0, tzinfo=timezone.utc)):
                 for final_seen in (None, 0.0):
                     for last_change in (0.0, LONG_AGO):
@@ -473,11 +557,12 @@ def every_condition():
                                            last_change=last_change, display=display)
 
 
-def test_the_panel_is_only_ever_dark_for_one_of_four_stated_reasons():
+def test_the_panel_is_only_ever_dark_for_a_stated_reason():
     # The invariant, at the decision layer. Not "never black" -- an unused
     # screen should be essentially off -- but "never black for a reason that
     # is not on this list", every one of which ends without anybody being
-    # able to touch the panel.
+    # able to touch the panel. Anything dark that is not one of these is a
+    # panel somebody will report as broken.
     for case in every_condition():
         result = presentation(**case)
         assert result.show in (GAME, COUNTDOWN, FINAL, NO_GAME, MESSAGE, OFF)
@@ -485,18 +570,25 @@ def test_the_panel_is_only_ever_dark_for_one_of_four_stated_reasons():
             continue
         state, display = case["state"], case["display"]
         within_grace = case["now"] - case["last_change"] < GRACE_S
+        stale = case["now"] - case["last_change"] >= STALE_AFTER_S
+        name = state.state if state is not None else None
         reasons = {
-            "asleep": asleep(case["now_utc"], display.sleep),
-            "no game": state is None,
-            "before the countdown window":
-                state is not None and state.state in main_module.PREGAME,
+            "inside sleep hours": asleep(case["now_utc"], display.sleep),
+            "no game is selected": state is None,
+            # Too early for the countdown, or so long past the start that
+            # the game is never going to happen.
+            "outside the countdown window": name in main_module.PREGAME,
             "past the final hold":
-                state is not None and state.state in main_module.OVER
-                and case["final_seen"] is not None
+                name in main_module.OVER and case["final_seen"] is not None
                 and case["now"] - case["final_seen"] >= display.final_hold_s,
+            "an unrecognized state went stale":
+                name is not None and name not in main_module.PREGAME
+                and name not in main_module.OVER and name not in main_module.IN_PLAY
+                and stale,
         }
         assert case["screen"] == screens.SCOREBOARD, "a help screen was switched off"
         assert not within_grace, "switched off inside the grace period"
+        assert name not in main_module.IN_PLAY, "a live game was switched off"
         assert any(reasons.values()), f"dark for no stated reason: {case}"
 
 
@@ -566,6 +658,114 @@ def test_the_screens_that_sit_there_longest_are_shifted_too():
 # --------------------------------------------------------------------------
 # Getting the display back from the site
 # --------------------------------------------------------------------------
+
+
+def a_loop_that_receives(monkeypatch, tmp_path, script, game_id=2026020001, passes=5):
+    """Run the real render loop, delivering MQTT messages to it.
+
+    The two lines that rearm an aged-out final live in the loop, not in a
+    pure function, so the only honest test of them drives the loop -- the
+    way the first-frame tests above do, with a scripted pygame.event.get.
+    ``script`` maps a pass number to a list of (callback name, args) to fire
+    through a stand-in Link at the top of that pass -- so the message
+    scripted for pass n is drained by pass n, and the returned row n is what
+    presentation() saw once it had been acted on. Returns one row per pass.
+    """
+    (tmp_path / "device.json").write_text(json.dumps(
+        {"endpoint": "localhost", "thingName": "scoreboard-test"}))
+    (tmp_path / "state.json").write_text(json.dumps({"gameId": game_id}))
+    monkeypatch.setenv("SCOREBOARD_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("SDL_VIDEODRIVER", "dummy")
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("SCOREBOARD_FIXTURE", raising=False)
+
+    hooks = {}
+
+    class FakeLink:
+        def __init__(self, *a, **kw):
+            hooks.update(kw)
+
+        def follow(self, game_id):
+            pass
+
+        def start(self):
+            hooks["on_link"](True)   # a working broker: screen_for says SCOREBOARD
+
+        def stop(self):
+            pass
+
+    class FakeNM:
+        def status(self):
+            raise NetworkError("no nmcli in a test")
+
+        def scan(self):
+            raise NetworkError("no nmcli in a test")
+
+    monkeypatch.setattr(main_module, "Link", FakeLink)
+    monkeypatch.setattr(main_module, "NetworkManager", FakeNM)
+
+    seen = []
+    real = main_module.presentation
+    monkeypatch.setattr(main_module, "presentation",
+                        lambda *a: seen.append(a) or real(*a))
+
+    passed = {"n": 0}
+
+    def fake_get(*a, **k):
+        n = passed["n"]
+        passed["n"] += 1
+        for name, args in script.get(n, []):
+            hooks[name](*args)
+        return [] if n < passes else [pygame.event.Event(pygame.QUIT)]
+
+    monkeypatch.setattr(pygame.event, "get", fake_get)
+    main_module.main()
+    # (now, now_utc, screen, state, final_seen, last_change, display)
+    return [dict(zip(("now", "now_utc", "screen", "state", "final_seen",
+                      "last_change", "display"), args)) for args in seen]
+
+
+def test_re_choosing_the_same_game_restarts_the_hold_in_the_real_loop(tmp_path, monkeypatch):
+    # config_action says REARM; these are the two lines in the loop that act
+    # on it. Without them the site's config message for a game the panel
+    # already follows is dropped as a no-op and an aged-out final stays
+    # dark -- with no input device, that is the end of the road.
+    final = (FIX / "state_live.json").read_text().replace('"state":"LIVE"', '"state":"FINAL"')
+    passes = a_loop_that_receives(monkeypatch, tmp_path, {
+        0: [("on_state", (2026020001, final.encode()))],
+        2: [("on_config", (b'{"gameId": 2026020001}',))],
+    })
+
+    before = passes[1]          # the final has been seen and is being held
+    after = passes[2]           # the config message has been acted on
+    assert before["state"].state == "FINAL"
+    assert before["final_seen"] is not None
+    assert after["final_seen"] > before["final_seen"], \
+        "re-choosing the game did not restart the three-hour hold"
+    assert after["last_change"] > before["last_change"], \
+        "re-choosing the game did not restart the grace period"
+
+
+def test_a_state_that_changes_restarts_the_grace_in_the_real_loop(tmp_path, monkeypatch):
+    # The other half: changed_at, driven by real documents arriving rather
+    # than by strings passed to it. A repeat of the same state must NOT
+    # restart the grace, or a live game's ten updates a minute would hold
+    # the panel awake through any sleep window.
+    pre = (FIX / "state_pre.json").read_text()
+    live = (FIX / "state_live.json").read_text()
+    passes = a_loop_that_receives(monkeypatch, tmp_path, {
+        0: [("on_state", (2026020001, pre.encode()))],
+        2: [("on_state", (2026020001, pre.encode()))],    # the same state again
+        3: [("on_state", (2026020001, live.encode()))],   # PRE -> LIVE
+    })
+
+    assert passes[0]["state"].state == "PRE"
+    assert passes[2]["state"].state == "PRE"
+    assert passes[2]["last_change"] == passes[0]["last_change"], \
+        "the same state arriving twice restarted the grace period"
+    assert passes[3]["state"].state == "LIVE"
+    assert passes[3]["last_change"] > passes[0]["last_change"], \
+        "the game going live did not restart the grace period"
 
 
 def test_choosing_a_different_game_selects_it():

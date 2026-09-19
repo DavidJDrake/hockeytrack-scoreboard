@@ -72,15 +72,33 @@ DRAWS_THE_GAME = (GAME, COUNTDOWN, FINAL, NO_GAME)
 
 SELECT, REARM, IGNORE = "select", "rearm", "ignore"
 
-# The states that mean the game is over, and the one that means it has not
-# started. cloud/internal/reduce/reduce.go collapses the NHL's states into
+# The three kinds of state, and what this build does with one it has never
+# heard of. cloud/internal/reduce/reduce.go collapses the NHL's states into
 # exactly three before they reach a panel: OFF becomes FINAL, CRIT becomes
 # LIVE, and everything else -- FUT included -- becomes PRE. "OFF" is kept
-# here for a document that somehow did not pass through the reducer;
-# anything else unrecognized is treated as a game in progress, which errs
-# toward a lit panel rather than a dark one.
+# here for a document that somehow did not pass through the reducer.
+#
+# An unrecognized state is SHOWN, because a panel that hides what it does not
+# understand is a panel nobody can diagnose -- but only until STALE_AFTER_S
+# has passed since it arrived. Unknown states fail lit and then off, never
+# lit for ever.
 OVER = ("FINAL", "OFF")
 PREGAME = ("PRE",)
+IN_PLAY = ("LIVE",)
+
+# How long past its scheduled start a game may go on never turning up LIVE
+# before the panel treats it as nothing due, and the same bound for a state
+# this build does not recognize.
+#
+# Two hours. Games start a few minutes late as a matter of course, and an ice
+# or weather delay can run an hour or more, so a shorter bound would switch
+# the panel off on a game that is merely late. Past two hours with no LIVE
+# document the game is postponed, cancelled, or the feed is broken -- and
+# none of those is worth lighting a wall with, least of all in the form the
+# panel would take: render.draw shows a countdown frozen at 00:00:00 for ever
+# once the start has passed, because GameState.seconds_to_start floors at
+# zero. That stuck frame is the owner's own complaint pointing the other way.
+STALE_AFTER_S = 2 * 60 * 60
 
 # How long the panel keeps showing something after a change the owner caused
 # or needs to see: boot, a game chosen or cleared, a game going final. Not a
@@ -417,15 +435,15 @@ def presentation(now: float, now_utc: datetime | None, screen: str,
        whatever the hour -- an owner choosing a game at one in the morning is
        plainly awake, and needs to see that the panel heard them.
     4. Sleep hours.
-    5. Then, and only then, the two windows: a countdown appears
-       ``countdown_lead_s`` before puck drop, a final stays for
-       ``final_hold_s`` after this panel first saw it.
+    5. Then, and only then, the windows: a countdown from ``countdown_lead_s``
+       before puck drop until STALE_AFTER_S after it, a final for
+       ``final_hold_s`` after this panel first saw it, and an unrecognized
+       state for STALE_AFTER_S after it arrived.
     """
     shift = shift_at(now)
     if screen != screens.SCOREBOARD:
         return Presentation(MESSAGE, shift)
-    live = state is not None and state.state not in OVER and state.state not in PREGAME
-    if live:
+    if state is not None and state.state in IN_PLAY:
         return Presentation(GAME, shift)
     within_grace = now - last_change < GRACE_S
     if not within_grace and asleep(now_utc, display.sleep):
@@ -435,32 +453,61 @@ def presentation(now: float, now_utc: datetime | None, screen: str,
     if state.state in OVER:
         held = final_seen is None or now - final_seen < display.final_hold_s
         return Presentation(FINAL, shift) if held or within_grace else Presentation(OFF, (0, 0))
-    # Pre-game. The countdown is drawn from the wall clock against the
-    # document's own start time, so an unsynchronized clock cannot say
-    # whether the window is open: show it, and let the window take effect
-    # once NTP has landed (a minute or so after boot, in practice).
-    due = _countdown_due(now_utc, state, display.countdown_lead_s)
-    return Presentation(COUNTDOWN, shift) if due or within_grace else Presentation(OFF, (0, 0))
+    if state.state in PREGAME:
+        return Presentation(COUNTDOWN, shift) if _countdown_due(now_utc, state, display) \
+            or within_grace else Presentation(OFF, (0, 0))
+    # A state this build does not recognize. Shown, so that whatever is
+    # wrong is visible to somebody who can report it, but on the same clock
+    # as a game that never started: from when it arrived (which is what
+    # changed_at recorded), not for ever. GRACE_S is shorter than
+    # STALE_AFTER_S, so being inside the grace is already covered.
+    return Presentation(GAME, shift) if now - last_change < STALE_AFTER_S \
+        else Presentation(OFF, (0, 0))
 
 
-def _countdown_due(now_utc: datetime | None, state: GameState, lead_s: int) -> bool:
-    """Is puck drop close enough to put the countdown on the wall?
+def _countdown_due(now_utc: datetime | None, state: GameState, display: Display) -> bool:
+    """Is puck drop close enough -- and recent enough -- for a countdown?
 
-    True while the clock is unknown, and true for a start that has already
-    passed (``seconds_to_start`` floors at zero): a game that should have
-    started is the last thing to switch off, and the LIVE state that
-    supersedes it is moments away. False for a document with no start or an
-    unreadable one -- there is nothing to count down to, and this is also
-    what keeps render.draw from parsing that same string and raising inside
-    the render loop.
+    The window is bounded at both ends: it opens ``countdown_lead_s`` before
+    the start and closes STALE_AFTER_S after it. The far end is the one that
+    matters for a stuck panel: a postponed or cancelled game stops producing
+    documents while its last one still says PRE, and render.draw would show
+    that as PUCK DROP 00:00:00 until something else arrived. Nothing else
+    was going to arrive.
+
+    True while the clock is unknown -- an unsynchronized clock cannot say
+    where in the window we are, and of the two ways to be wrong, a panel lit
+    when it should be dark is the one somebody can see and report.
+
+    False for a document with no start, an unreadable one, or one without a
+    time zone. There is nothing to count down to, and refusing to draw it is
+    also what keeps render.draw from parsing that same string and raising
+    inside the render loop.
     """
     if now_utc is None:
         return True
+    left = _seconds_to_start(now_utc, state)
+    return left is not None and -STALE_AFTER_S < left <= display.countdown_lead_s
+
+
+def _seconds_to_start(now_utc: datetime, state: GameState) -> int | None:
+    """Signed seconds until puck drop: negative once it has passed.
+
+    ``GameState.seconds_to_start`` floors at zero, which cannot tell "just
+    started" from "yesterday" -- and the difference between those two is the
+    whole of the rule above. So the same comparison is made here, from the
+    same field, with its sign left on. Parsing matches the model's: an ISO
+    timestamp with "Z" for UTC.
+    """
+    if not state.start:
+        return None
     try:
-        left = state.seconds_to_start(int(now_utc.timestamp() * 1000))
-    except ValueError:
-        return False
-    return left is not None and left <= lead_s
+        start = datetime.fromisoformat(state.start.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    if start.tzinfo is None:
+        return None   # no zone, so no instant: not something to count down to
+    return int((start - now_utc).total_seconds())
 
 
 def config_action(game_id: int | None, following: int | None) -> str:
