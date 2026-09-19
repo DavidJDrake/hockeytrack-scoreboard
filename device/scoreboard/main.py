@@ -897,7 +897,8 @@ def main() -> None:
                     try:
                         current = GameState.from_json(item[2])
                         # When it arrived, on the monotonic clock: the
-                        # "NO LINK - N MIN OLD" banner counts from here.
+                        # "NO UPDATES - N MIN OLD" band, the freeze and the
+                        # freshness test all count from here.
                         state_received_at = time.monotonic()
                     except Exception as e:
                         # Every exception, not ValueError. The document is

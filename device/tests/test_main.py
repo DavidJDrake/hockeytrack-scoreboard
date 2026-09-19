@@ -1456,9 +1456,10 @@ def test_the_help_screen_still_answers_during_the_grace_at_night():
 
 
 def test_a_live_game_keeps_the_panel_when_the_link_drops():
-    # B-4. The owner's rule is that a live game wins, and it wins over this
-    # too: a stalled game with a NO LINK banner is more use than a help
-    # screen, and the banner says exactly what the help screen would.
+    # B-4, as amended by N-1. A live game wins over this too -- a game
+    # with a band saying how old it is tells you more than a help screen
+    # -- but only while its document is arriving. live_game is
+    # main.live_and_fresh, so with the link down the exemption expires.
     assert screens.screen_for(True, True, link_down=True, live_game=True) == screens.SCOREBOARD
     assert screens.screen_for(True, True, link_down=True, live_game=False) == screens.NO_SERVICE
 

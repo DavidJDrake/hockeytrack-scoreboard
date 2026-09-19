@@ -1500,6 +1500,8 @@ anybody touching the panel:
 | The final hold has run out | the owner presses **Show on panel**, or the game's state changes |
 | No game is selected, past the grace period | the owner chooses a game |
 | A state this build does not recognize has been up for 2 h | the state changes, or the owner presses **Show on panel** |
+| A **LIVE** document that nobody has refreshed for 2 h | **any** fresh document arriving, or the owner presses **Show on panel** (which gives it the five-minute grace, then dark again if still nothing has arrived) |
+| Inside sleep hours, on a LIVE document more than 30 s old | a fresh document (a live game beats the window again at once), or the window ending |
 | The clock has never been set and 2 h have passed | NTP sets the clock **and the game is then inside the 12 h window** (if it is not, the panel stays dark for the ordinary reason), the state changes, or the owner presses **Show on panel** |
 | Inside the owner's sleep hours | the window ends, or a live game starts |
 | Inside sleep hours, on "cannot reach the service" | the window ends, or the link comes back |
@@ -1511,7 +1513,16 @@ reaches it, and on reconnect the broker hands it the same retained payload,
 which it ignores — correctly, since that is how it survives reconnecting
 every hour. The fix is a `chosenAt` stamp on the config message: a replay
 carrying a stamp the panel has not acted on is the press that happened while
-it was away. **That needs the API deployed.** Until somebody runs `make
+it was away. **Unseen, not newer**: the panel compares the two stamps for
+*difference*, not for order, because the retained store holds exactly one
+payload — so a differing stamp can only mean a new publish — and nothing on
+the wire makes two server clocks monotonic across a redeployment or a
+failover. (It compared them with `>` until 2026-09-19, which threw away a
+genuine press whenever the server's clock had stepped backwards, and every
+press after it.) A config message the panel could *not* read now leaves the
+remembered stamp alone; it used to keep it, so one malformed publish
+disabled the offline re-send until the panel was rebooted.
+**That needs the API deployed.** Until somebody runs `make
 build` and a Terraform apply, panels behave exactly as they do today: a press
 made while the panel is offline is lost, while the site reports success. The
 panel side works with or without the stamp, and v0.1.3 panels in the field
@@ -1531,7 +1542,7 @@ on until it is told otherwise:
 |---|---|---|
 | Countdown lead | **12 hours** | How long before puck drop the countdown appears. Before that, a selected future game shows nothing. Once it appears it never blanks and never dims on its own. The owner chose 12 h on 2026-09-19, over the 2 h this was first built with: a game picked in the morning then spends the day on the wall. |
 | Final hold | 3 hours | How long a final score stays up, measured from the moment **this panel first saw the game go final** — the state document carries no end timestamp, and the Pi's own wall clock cannot be trusted to compare against `asOf`. Then off. |
-| Sleep hours | unset | A daily local-time window (may cross midnight) in an explicitly chosen IANA zone. A **live game overrides it**; a countdown and a final hold do not, and resume by themselves when the window ends if they are still due. |
+| Sleep hours | unset | A daily local-time window (may cross midnight) in an explicitly chosen IANA zone. A **live game overrides it** — a live game being one whose document is still arriving, see the staleness rule below; a countdown and a final hold do not, and resume by themselves when the window ends if they are still due. |
 
 Four further rules that are the panel's own, not settings:
 
@@ -1600,25 +1611,65 @@ Four further rules that are the panel's own, not settings:
   reporting a connection, so without that it would burn a help screen at
   full brightness every night the outage lasted.) Precedence: **below "No
   network"**, the more specific fault and the one the person there can act
-  on; **above the scoreboard** — except that **a live game keeps the panel**,
-  which is the next rule.
-- **A live game keeps the panel, and stops pretending.** The owner's rule is
-  that a live game wins, and it wins over the help screen too. What makes
-  that safe is that the frame stops lying when the link goes. Every clock on
-  the scoreboard is derived as `seconds − (now − asOf)`, so a frame nobody is
-  updating counts a period down to 0:00 that may still have ten minutes in
-  it, and quietly expires penalties that were never served. With no link the
-  clock and the penalty clocks **freeze** at the document's own numbers, one
-  penalty row a side is shown instead of two, and a band across the bottom
-  says **`NO LINK - N MIN OLD`**. The age is measured on the monotonic clock
-  from when the last document arrived, not from its `asOf` against the
-  panel's wall clock: this banner has to be right on a panel whose clock is
-  wrong, which is exactly the panel somebody is squinting at when a frame
-  has gone stale. The band is inset to the same 60 px as the rule line, so
-  the burn-in shift cannot clip it, and it sits below everything the score
-  columns draw. A countdown does *not* freeze — it is computed from the
-  clock against the document's own start, and a dropped link takes nothing
-  away from it.
+  on; **above the scoreboard** — except that **a live game whose document is
+  still arriving keeps the panel**, which is the next rule. With the link
+  down a document can only get older, so that exemption expires by itself:
+  the frozen frame holds the panel for its first half-minute or so and then
+  this screen takes over, rather than a mid-game frame being held for ever.
+- **A live game keeps the panel, stops pretending, and ends by itself.** The
+  owner's rule is that a live game wins, and it wins over the help screen and
+  over sleep hours — but "a live game" means a document that is *arriving*,
+  not a document that once said LIVE. **Stale is the age of the document, not
+  the state of the socket** (the socket has only the 8 px dot in the corner).
+  The cloud republishes a live game's clock about every five seconds,
+  intermissions included, so there are two thresholds:
+
+  | Age of the LIVE document | What the panel does |
+  |---|---|
+  | under **30 s** | a live game: clocks run, no band, beats sleep hours |
+  | 30 s to **2 h** | frozen at the document's own numbers, **`NO UPDATES - N MIN OLD`** in the gutter above the rule line, both penalty rows kept — and no longer beats sleep hours, so the overnight case is dark |
+  | past **2 h** | nothing due: off, like anything else with nothing true to show |
+
+  Thirty seconds is six missed heartbeats — well above jitter, a retry or a
+  broker hiccup, and far below the two minutes the old rule waited, which was
+  two minutes of the panel making up a hockey game. Two hours is the same
+  bound that already means "too long to be real" everywhere else here.
+
+  Why it matters: every clock on the scoreboard is derived as
+  `seconds − (now − asOf)`, so a frame nobody is updating counts a period
+  down to 0:00 that may still have ten minutes in it and quietly expires
+  penalties that were never served. And **the old rule pinned the panel lit
+  for ever**: a Wi-Fi drop in the second period, a game that then ends with
+  no FINAL ever arriving, and the panel showed a frozen mid-game frame at
+  full brightness every night, immune to sleep hours, because the decision
+  read the state name and nothing bounded the document's age. The three-hour
+  final hold never engaged — it only starts on a FINAL.
+
+  The age is measured on the monotonic clock from when the document arrived,
+  not from its `asOf` against the panel's wall clock: this band has to be
+  right on a panel whose clock is wrong, which is exactly the panel somebody
+  is squinting at when a frame has gone stale. Two consequences worth
+  knowing. The band says **NO UPDATES**, not NO LINK, because a socket that
+  stays up while the reducer errors or the feed dies looks identical from
+  here. And the clock unfreezes **on a document, not on the link**:
+  `Link._on_connect` reports the link up immediately after issuing SUBSCRIBE,
+  so the retained document is at least one round trip behind it, and keying
+  the freeze on the socket meant several frames of a plausible *wrong*
+  running clock with the warning already removed.
+
+  Where the band sits: y 324..371 in the 1920×480 drawing space, the gutter
+  between the period label and the rule line, measured empty on live,
+  intermission and final frames with two penalties a side. It used to sit at
+  y 436..471, which is where the *second* penalty row is drawn — so a stall
+  hid a penalty that had been on screen a moment before, exactly when nothing
+  was arriving to say whether it had ended. Both rows are kept now. It is
+  inset to the same 60 px as the rule line so the burn-in shift cannot clip
+  it, and it is about **32 physical px** tall on the real 400x1280 panel.
+
+  What does *not* freeze: a countdown (computed from the clock against the
+  document's own `start`, so a stall takes nothing from it), and a final (a
+  final game stops producing documents — that is what a final is — so it
+  never carries the band).
 - **Nothing the network sends can stop the render loop.** A `start` the
   panel could not parse used to raise `ValueError` three frames below a loop
   with no handler: the service exited, systemd restarted it, and the panel
@@ -1637,8 +1688,8 @@ because the game layout's real bottom margin is zero with two penalties a
 side. Sleep hours and the two window edges measured against a game's `start`
 are the only things here that need wall-clock time, and none of them is in
 effect until `/run/systemd/timesync/synchronized` exists; every duration —
-the final hold, the grace, the staleness bound, the shift's schedule — is
-measured on `time.monotonic()`, because this board has no RTC and NTP may
+the final hold, the grace, the staleness bound, **the age of the document
+on screen**, the shift's schedule — is measured on `time.monotonic()`, because this board has no RTC and NTP may
 step the clock hours forward after boot.
 
 **What the next session should watch for:**
@@ -1690,20 +1741,46 @@ step the clock hours forward after boot.
    glow, a visible backlight — then either the display-power follow-up below
    becomes urgent, or "off" needs to become something else.
 10. **A live game with the link pulled.** Mid-game, pull the internet: the
-   score must stay, the clock must **stop** rather than run down, and the
-   `NO LINK - N MIN OLD` band must appear and count up. Plug it back in and
-   the game should resume by itself. Watch for the band covering anything it
-   should not on the real panel, where the frame is scaled.
-11. **"Show on panel" while the panel is unplugged.** Only once the API is
+   score must stay, the clock must **stop** within about half a minute
+   rather than run down, and the `NO UPDATES - N MIN OLD` band must appear
+   in the gutter above the rule line and count up, with **both** penalty
+   rows still on screen. About two minutes in, the panel should hand over to
+   **Cannot reach the service** — the frozen game does not hold the panel
+   indefinitely any more. Plug it back in and the game should resume by
+   itself. Watch for the band covering anything it should not on the real
+   panel, where the frame is scaled to 1280x320 and the band is only about
+   32 physical px, and check the text is readable across the room at that
+   size.
+11. **A live game with the link pulled, left overnight.** The direct test of
+   the defect this round fixed, and the one that needs no equipment: start
+   it as above, then leave the panel alone. With sleep hours set it must be
+   **dark** through the night (the stalled game stops beating the window
+   within half a minute); with sleep hours unset, the frozen frame is
+   expected to be gone by **two hours** after the last document, leaving a
+   dark panel or the help screen. A mid-game frame still lit at breakfast is
+   a regression of N-1.
+12. **How long the retained state document takes to arrive after a
+   reconnect.** The gap between "the link is up" and "the frame is true
+   again" — `Link._on_connect` reports up right after issuing SUBSCRIBE, and
+   the band and the freeze deliberately wait for the document rather than
+   the socket. Time it with a stopwatch against the band disappearing, and
+   read `journalctl -u scoreboard` for the "connected:" line beside it. If
+   it is routinely more than a few seconds, the 30-second threshold is worth
+   revisiting; if it is longer than 30 s, a reconnect will briefly show the
+   band over a frame that is about to be replaced, which is honest but worth
+   knowing.
+13. **"Show on panel" while the panel is unplugged.** Only once the API is
    deployed: unplug the panel, press the button, plug it back in. The game
    should come back on reconnect. Before deployment this is expected to do
    nothing — worth confirming both ways round, since the difference is the
    whole point of the `chosenAt` change.
-12. **A refused connection.** Hard to stage deliberately; if a panel is ever
+14. **A refused connection.** Hard to stage deliberately; if a panel is ever
    seen reconnecting in a loop without showing "Cannot reach the service",
    that is the `_on_connect` reason-code path failing and worth a journal
-   dump.
-13. **Nothing is dark that should not be.** Anything the panel does that
+   dump. A panel that connects but never shows a game is the other side of
+   the same path: `journalctl -u scoreboard | grep "cannot tell whether"`
+   says the reason code had a shape this build could not read.
+15. **Nothing is dark that should not be.** Anything the panel does that
    looks dead is a finding, whether or not it matches the table above.
 
 **Finding, measured 2026-09-19: the panel is 400x1280, not 480x1920.** Read
