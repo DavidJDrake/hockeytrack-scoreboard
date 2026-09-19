@@ -637,6 +637,25 @@ assert_masked sshswitch.service "the boot-partition SSH switch"
 for unit in ssh.service ssh.socket sshd.service sshd.socket; do
   assert_masked "$unit" "the SSH server's $unit"
 done
+# dtoverlay=disable-bt makes the PL011 the primary UART, which makes
+# enable_uart default to 1, which turns the console=serial0,115200 already in
+# cmdline.txt into a live kernel console on GPIO 14/15 -- and
+# systemd-getty-generator then puts a login prompt on it, because it reads
+# /sys/class/tty/console/active and instantiates serial-getty@<tty>.service
+# for every active non-virtual console. The kernel console is deliberately
+# KEPT: it is the diagnosis path a panel with no login, no getty on tty1 and a
+# black screen has never had (spec 9.13). The prompt is not kept: every
+# account in the image is locked, so it serves nobody.
+#
+# The TEMPLATE is what must be masked, not an instance. The instance name
+# depends on what the firmware calls the port, so it cannot be asserted from
+# here; systemd resolves serial-getty@ttyAMA0.service through the template
+# when no unit of that exact name exists, and /etc/systemd/system/
+# serial-getty@.service is found first. The mask does not touch kernel console
+# output -- printk does not go through a getty -- and it does not trip the
+# autologin scans above, which are -xtype f and so skip a symlink to a
+# character device.
+assert_masked 'serial-getty@.service' "the serial login prompt"
 
 # Bluetooth is off in the device tree, not merely daemonless. Without this the
 # kernel still attaches the on-board adapter over HCI UART and answers for it.
@@ -704,6 +723,13 @@ ok "no mDNS responder, no Bluetooth stack, no SSH server, no USB-network gadget"
 # /etc/systemd/system is judged too, since that overrides the packaged one.
 # Drop-ins are read as well: a Listen= line in a .d/*.conf is as live as one
 # in the unit.
+# An allow-list rather than a deny-list, so an address shape nobody thought of
+# fails closed. vsock: and vsock-stream: forms are deliberately NOT allowed:
+# an AF_VSOCK socket only means anything inside a VM, a Raspberry Pi is not
+# one, and systemd's own vsock socket (sshd-vsock.socket) is written by a
+# generator at boot only when it detects virtualization -- so nothing on this
+# image can legitimately ship one, and a unit that did would be worth failing
+# the build over rather than waving through.
 socket_listen_is_local() {
   case "$1" in
     /* | @* | %t/*) return 0 ;;                      # AF_UNIX path or abstract

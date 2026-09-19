@@ -270,8 +270,16 @@ GATE = REPO / "tools" / "image-gate.sh"
 WIZARD_STAGE = PIGEN / "stage-scoreboard" / "02-no-first-boot-wizard" / "00-run.sh"
 # The quoted find predicates both files use to name a getty-ish unit or its
 # drop-in directory: -name 'getty@*.service', -path '*/getty@*.service.d/*'.
+#
+# Anchored on the -name/-path that precedes them, not on the quotes alone.
+# Without that anchor any other quoted mention of one of these unit names
+# counts as a find predicate -- which it is not: 05-no-listeners masks
+# 'serial-getty@.service', and before the anchor was added that mask made this
+# test report "the gate's unit set changed" for a file whose autologin scan
+# had not changed at all.
 UNIT_GLOB = re.compile(
-    r"'(?:\*/)?((?:serial-getty|autovt|getty)@\*?\.service(?:\.d)?|console-getty\.service(?:\.d)?)(?:/\*)?'")
+    r"-(?:name|path)\s+'(?:\*/)?"
+    r"((?:serial-getty|autovt|getty)@\*?\.service(?:\.d)?|console-getty\.service(?:\.d)?)(?:/\*)?'")
 
 
 def autologin_unit_globs(text: str) -> set[str]:
@@ -345,6 +353,9 @@ PURGED_FOR_NETWORK_SURFACE = (
 MASKED_FOR_NETWORK_SURFACE = (
     "avahi-daemon.service", "avahi-daemon.socket", "bluetooth.service",
     "sshswitch.service", "ssh.service", "ssh.socket", "sshd.service", "sshd.socket",
+    # The template, not an instance: disable-bt turns GPIO 14/15 into a live
+    # kernel console and systemd-getty-generator puts a login prompt on it.
+    "serial-getty@.service",
 )
 
 
@@ -412,6 +423,34 @@ def test_the_wifi_firmware_is_not_what_the_stage_removes():
     for load_bearing in ("firmware-brcm80211", "raspberrypi-sys-mods", "network-manager",
                          "libbluetooth3"):
         assert load_bearing not in PURGED_FOR_NETWORK_SURFACE
+
+
+def test_the_stage_keeps_the_serial_console_but_not_its_login_prompt():
+    # disable-bt makes the PL011 the primary UART, which makes enable_uart
+    # default to 1, which turns the console=serial0,115200 already in
+    # cmdline.txt into a live kernel console on GPIO 14/15. That console is
+    # kept on purpose -- it is the diagnosis path a panel with no login and a
+    # black screen has never had -- so the stage must NOT strip console= from
+    # cmdline.txt, and must mask the login prompt instead.
+    run = LISTENERS_RUN.read_text()
+    assert "serial-getty@.service" in run, "the serial login prompt is no longer masked"
+    assert "enable_uart" in run, "the stage no longer explains why a console appears"
+    # Option B -- dropping console=serial0,115200 -- would mean editing
+    # cmdline.txt. The stage only ever mentions that file in prose, so a
+    # redirect or a sed against it means the decision changed and the comment
+    # above it no longer describes the image.
+    code = "\n".join(l for l in run.splitlines() if not l.lstrip().startswith("#"))
+    assert "cmdline.txt" not in code, \
+        "the stage now writes cmdline.txt; the serial-console decision changed"
+
+
+def test_the_stage_reads_find_output_without_swallowing_a_failure():
+    # `while ... done < <(find ...)` hides find's exit status from `bash -e`,
+    # so a find that failed part-way would read as "nothing to rewrite" and
+    # the stage would succeed having changed nothing.
+    run = LISTENERS_RUN.read_text()
+    assert "done < <(find" not in run, "a process substitution hides find's exit status"
+    assert "$(find " in run
 
 
 def test_the_stage_recreates_the_sshd_config_directory_pi_gen_writes_into():

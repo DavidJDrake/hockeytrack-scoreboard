@@ -111,13 +111,34 @@
 # ships no system unit of its own, only a user ssh-agent socket no session
 # here ever starts.
 #
-# WHAT AUTOREMOVE WOULD TAKE, and why none is run here. The orphans this purge
-# creates are leaf shared libraries: libavahi-core7 and libdaemon0 (nothing
-# but avahi-daemon Depends on them), and libfido2-1, libwrap0 and libwtmpdb0
-# (nothing but openssh-server or openssh-client). libavahi-common3 is NOT one
-# of them -- libcups2t64 Depends on it -- and neither is libbluetooth3, for
-# the network-manager reason above. As in 03-no-remote-access, this stage runs
-# no autoremove of its own, because pi-gen's export-image/02-set-sources runs
+# WHAT AUTOREMOVE WOULD TAKE, and why none is run here. Eighteen packages, not
+# the five libraries an earlier draft of this comment named. The list is a
+# COMPUTED CLOSURE, not a guess: take the packages apt would treat as manually
+# installed (every name pi-gen lists in an NN-packages file, plus this
+# repository's own 00-packages, plus everything of Priority required or
+# important, which debootstrap installs with dpkg directly), walk
+# Depends/Pre-Depends/Recommends over the image's 836 packages -- Recommends
+# included, because APT::AutoRemove::RecommendsImportant defaults to true --
+# and subtract what is still reachable once the purge set is gone:
+#
+#   libavahi-core7 libdaemon0                       avahi's own
+#   libfido2-1 libcbor0.10 libwrap0 libwtmpdb0      OpenSSH's own
+#   xauth libxmuu1 ncurses-term runit-helper        OpenSSH's Recommends
+#   wget python3-requests python3-urllib3           ssh-import-id's Depends
+#     python3-certifi python3-chardet
+#     python3-charset-normalizer python3-idna
+#   iputils-arping                                  rpi-usb-gadget's Depends
+#
+# None is load-bearing, checked rather than assumed: the appliance's only HTTP
+# client is stdlib urllib.request (device/scoreboard/enroll.py), requirements
+# .txt names paho-mqtt, pygame and cryptography and nothing else, neither
+# python3-cryptography nor python3-paho-mqtt touches anything on that list,
+# and raspi-config, raspberrypi-sys-mods and userconf-pi call none of wget,
+# xauth or arping anywhere in their scripts. ca-certificates is NOT on the
+# list and cannot be: it is named in two NN-packages files, so apt has it
+# marked manual. Nor is libavahi-common3 (libcups2t64 Depends on it) or
+# libbluetooth3 (network-manager does). As in 03-no-remote-access, this stage
+# runs no autoremove of its own, because pi-gen's export-image/02-set-sources runs
 # `apt-get -y dist-upgrade --auto-remove --purge` against the mounted image
 # afterwards regardless. Adding one here would change nothing.
 #
@@ -147,9 +168,9 @@ EOF
 # `cat > /etc/ssh/sshd_config.d/rename_user.conf`. rename-user has no `set -e`
 # and its last statement is an echo, so a failed redirect there would not fail
 # the build; but "would not fail the build" is a worse thing to rely on than
-# a directory that costs nothing. Recreating it also keeps the gate's
-# AuthorizedKeysFile/AuthorizedKeysCommand scan over sshd_config.d live rather
-# than vacuous. Nothing reads what lands in it: there is no sshd.
+# a directory that costs nothing. That is the whole reason. (It does not make
+# the gate's AuthorizedKeysFile scan over sshd_config.d any more meaningful:
+# with no sshd in the image, that scan has nothing to protect either way.)
 install -d -m 755 "${ROOTFS_DIR}/etc/ssh/sshd_config.d"
 
 # --- MASKS ---------------------------------------------------------------
@@ -173,11 +194,20 @@ install -d -m 755 "${ROOTFS_DIR}/etc/ssh/sshd_config.d"
 # `systemctl enable --now ssh`. With openssh-server purged that call can only
 # fail, so masking it costs nothing and removes the path outright rather than
 # leaving a failed unit in the journal of any panel whose card someone poked.
+#
+# serial-getty@.service is masked for a reason the Bluetooth block below
+# creates rather than inherits, and it is the TEMPLATE that is masked, not an
+# instance: systemd resolves serial-getty@ttyAMA0.service by looking for a
+# unit of that exact name and then falling back to the template, and
+# /etc/systemd/system/serial-getty@.service is found first, so every instance
+# is masked -- including one systemd-getty-generator writes at boot, which is
+# a name we cannot predict from here. See THE SERIAL CONSOLE below.
 for unit in \
 	avahi-daemon.service avahi-daemon.socket \
 	bluetooth.service \
 	sshswitch.service \
-	ssh.service ssh.socket sshd.service sshd.socket; do
+	ssh.service ssh.socket sshd.service sshd.socket \
+	serial-getty@.service; do
 	ln -sfn /dev/null "${ROOTFS_DIR}/etc/systemd/system/${unit}"
 done
 
@@ -202,27 +232,24 @@ done
 #    (Zero 2 W) the Wi-Fi side is on SDIO, not the UART: the journal has
 #    brcmfmac on .../mmc_host/mmc1/mmc1:0001 while Bluetooth arrives over
 #    HCI UART. Different bus, different node.
-#  - Both target boards are covered. The overlay README says "On Pis prior to
-#    Pi 5 this restores UART0/ttyAMA0 over GPIOs 14 & 15", which is the Pi 4
-#    and the Zero 2 W. (disable-bt-pi5 exists for the other case; this image
-#    does not target it.)
-#  - The console survives. cmdline.txt says console=serial0,115200 and the
-#    firmware substitutes serial0 from /aliases, which fragment@5 repoints at
-#    the PL011 -- so the line resolves to ttyAMA0 instead of ttyS0. It is more
-#    capable than what is there today, not less: the real boots show the
-#    firmware passing 8250.nr_uarts=0, which means the ttyS0 that
-#    console=serial0 currently resolves to does not exist. Either way the
-#    console is not this panel's diagnosis surface; 04-persistent-journal is.
+#  - The Pi 4B is covered, which is what this image now targets. The overlay
+#    README says "On Pis prior to Pi 5 this restores UART0/ttyAMA0 over GPIOs
+#    14 & 15", so it also covers the Zero 2 W if that board is ever unshelved
+#    (docs/hardware-checks.md, H6); disable-bt-pi5 exists for the other case
+#    and this image does not target it.
 #  - The GPIO buttons are unaffected. They are BCM 5 and 6
 #    (device/scoreboard/buttons.py); the overlay claims 14 and 15, which the
 #    mini UART already had.
+#  - It CREATES A SERIAL CONSOLE. This is the one consequence that is not a
+#    removal, so it has its own block below.
 #  - Nothing later undoes it. config.txt is written once, by pi-gen's
 #    stage1/00-boot-files, and no stage or export-image step touches it again
 #    (export-image/04-set-partuuid seds fstab and cmdline.txt, not config.txt).
 #
 # The block is appended under an explicit [all] rather than relying on the
-# file happening to end in one, so a pi-gen bump that adds a trailing
-# [pi5]-style section cannot quietly scope this to one board.
+# file happening to end in one. pi-gen's file does end in [all] today, after
+# [cm4], [cm5] and [pi5] -- but a bump that adds another board-specific
+# section at the end would otherwise scope this to that board alone.
 config="${ROOTFS_DIR}/boot/firmware/config.txt"
 if ! grep -qE '^[[:space:]]*dtoverlay=disable-bt[[:space:]]*$' "$config"; then
 	cat >>"$config" <<-'EOF'
@@ -232,11 +259,64 @@ if ! grep -qE '^[[:space:]]*dtoverlay=disable-bt[[:space:]]*$' "$config"; then
 		# The panel has no Bluetooth function. This disables the device
 		# tree's &bt node, so no adapter is ever attached: no hci0, no
 		# SDP server, no rfkill device to unblock. Wi-Fi is on SDIO and
-		# is not affected. console=serial0 follows /aliases to the
-		# PL011 (ttyAMA0), which the overlay puts back on GPIO 14/15.
+		# is not affected. It also turns GPIO 14/15 into a real serial
+		# console -- see 05-no-listeners' "THE SERIAL CONSOLE" block,
+		# and spec 9.13.
 		dtoverlay=disable-bt
 	EOF
 fi
+
+# --- THE SERIAL CONSOLE THE OVERLAY CREATES ------------------------------
+#
+# This is a surface the hardening pass ADDS, so it is argued rather than
+# assumed. What changes, read from Raspberry Pi's own UART documentation and
+# from the two real boots:
+#
+#   Today the Pi 4's primary UART is the mini UART and the PL011 is the
+#   secondary, carrying Bluetooth (documentation/asciidoc/computers/
+#   configuration/interfaces.adoc, "Primary and secondary UARTs"). The default
+#   for enable_uart follows the primary: "If the primary interface is PL011,
+#   the system defaults to 'on'. If the primary interface is the more
+#   sensitive mini UART, the system defaults to 'off'". So today the firmware
+#   passes 8250.nr_uarts=0, the ttyS0 that console=serial0 resolves to never
+#   registers, and there is NO serial console at all -- the journal shows only
+#   "printk: legacy console [tty1] enabled" and no serial getty under
+#   getty.target.
+#
+#   disable-bt makes the PL011 primary (fragment@5 points /aliases serial0 at
+#   /soc/serial@7e201000). enable_uart therefore defaults to 1, the PL011
+#   registers -- as ttyAMA0, since it now takes alias index 0; the journal
+#   shows it today as ttyAMA1, which is what the secondary UART gets -- and
+#   console=serial0,115200 becomes a live kernel console on GPIO 14/15.
+#
+# KEPT, because it is the diagnosis path this project has needed on every
+# failed boot. v0.1.0, v0.1.1 and v0.1.2 all had to be diagnosed by powering
+# the panel down and reading the card; spec 9.12 has been asking for an
+# on-panel failure painter ever since. A 3.3 V USB-serial adapter on pins 8
+# and 10 now reads the boot log live, and with
+# systemd.journald.forward_to_console=1 added to cmdline.txt by hand (the
+# procedure docs/hardware-checks.md already documents) it reads the journal
+# live too -- with no card removal and no login. It costs nothing to anyone
+# who does not attach a cable, and it cannot be reached over a network.
+#
+# THE LOGIN PROMPT IS NOT KEPT. systemd-getty-generator reads
+# /sys/class/tty/console/active and instantiates serial-getty@<tty>.service
+# for every active non-virtual console (src/getty-generator/getty-generator.c,
+# add_serial_getty). That prompt serves nobody here: every account in the
+# image is locked, so nothing can get past it. It is masked above, by the
+# template rather than the instance, because the instance name depends on what
+# the firmware calls the port. Kernel console output is unaffected by the
+# mask: printk does not go through a getty.
+#
+# WHAT IT COSTS, and the escape hatch. printk to a 115200 UART is synchronous,
+# so a boot that previously wrote to tty1 alone now also serializes every
+# kernel line out the UART, attached or not. docs/hardware-checks.md H9 part 1
+# measures first paint against v0.1.3 for exactly this reason. If it turns out
+# to cost more than a second or two on a panel that is already dark for up to
+# 85 s (spec 9.12), the fix is one line: drop console=serial0,115200 from
+# /boot/firmware/cmdline.txt here. That file is written by pi-gen's
+# stage1/00-boot-files and only sed-edited afterwards (export-image/
+# 04-set-partuuid substitutes ROOTDEV), so this stage can edit it safely.
 
 # pi-gen's stage2/02-net-tweaks/01-run.sh deliberately un-blocks the on-board
 # Bluetooth adapter, by writing 0 into a state file for each known on-board
@@ -253,8 +333,19 @@ fi
 # /var/lib/systemd/rfkill/*:wlan, and its other two levers are
 # `nmcli radio wifi on` and `rfkill unblock wifi`. All three are Wi-Fi-typed.
 # Nothing on the panel runs `rfkill unblock all`.
+#
+# find's output is captured into a variable first rather than piped in through
+# a process substitution: `bash -e` does not see the exit status of a process
+# substitution, so a find that failed part-way -- an unreadable directory, a
+# broken mount -- would read here as "no files to rewrite" and the stage would
+# succeed having changed nothing. The gate would then be the only thing
+# between that and a published image. This way the stage fails instead.
 if [ -d "${ROOTFS_DIR}/var/lib/systemd/rfkill" ]; then
+	bt_state_files="$(find "${ROOTFS_DIR}/var/lib/systemd/rfkill" -maxdepth 1 -type f -name '*:bluetooth' -print)"
 	while IFS= read -r state; do
+		[ -n "$state" ] || continue
 		echo 1 >"$state"
-	done < <(find "${ROOTFS_DIR}/var/lib/systemd/rfkill" -maxdepth 1 -type f -name '*:bluetooth' -print)
+	done <<-EOF
+		${bt_state_files}
+	EOF
 fi

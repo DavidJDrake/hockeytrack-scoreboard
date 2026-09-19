@@ -148,6 +148,10 @@ def _display_path(root: Path) -> None:
 MASKED_UNITS = (
     "avahi-daemon.service", "avahi-daemon.socket", "bluetooth.service",
     "sshswitch.service", "ssh.service", "ssh.socket", "sshd.service", "sshd.socket",
+    # The TEMPLATE, not an instance: disable-bt makes GPIO 14/15 a live kernel
+    # console, systemd-getty-generator puts a serial-getty on it, and the
+    # instance name depends on what the firmware calls the port.
+    "serial-getty@.service",
 )
 
 # The socket units a real trixie + Raspberry Pi OS image actually has enabled,
@@ -753,6 +757,27 @@ def test_openssh_documentation_from_another_package_is_not_a_credential(tmp_path
            "ssh-ed25519 AAAAexample this is documentation, not a real key\n")
     result = gate(root, boot)
     assert result.returncode == 0, result.stderr
+
+
+def test_the_serial_getty_mask_does_not_trip_the_autologin_scan(tmp_path):
+    # The mask is a symlink named serial-getty@.service sitting directly in
+    # /etc/systemd/system -- exactly where the autologin scan looks for a
+    # replacement getty unit, and the glob serial-getty@*.service matches the
+    # template's name. It must not fail the gate: that scan is -xtype f and
+    # the mask points at a character device. The clean fixture already carries
+    # the pair; this says out loud that it is deliberate, so a future change
+    # from -xtype f to -type l is not made by accident.
+    root, boot = clean_image(tmp_path)
+    assert (root / "etc/systemd/system/serial-getty@.service").is_symlink()
+    result = gate(root, boot)
+    assert result.returncode == 0, result.stderr
+    # And a real autologin drop-in on the serial console still fails, mask or
+    # no mask -- the kernel console is kept, so that scan still has a job.
+    _write(root / "etc/systemd/system/serial-getty@ttyAMA0.service.d/autologin.conf",
+           "[Service]\nExecStart=\nExecStart=-/sbin/agetty --autologin root %I $TERM\n")
+    broken = gate(root, boot)
+    assert broken.returncode == 1, broken.stdout
+    assert "autologin" in broken.stderr
 
 
 def test_a_socket_listening_only_on_loopback_passes(tmp_path):
