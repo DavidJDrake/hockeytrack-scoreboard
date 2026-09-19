@@ -16,6 +16,11 @@ from .render import W, H, BG, INK, MUTED
 
 SCOREBOARD, UNREGISTERED, OFFLINE = "scoreboard", "unregistered", "offline"
 WAITING, ENROLL_PROBLEM = "waiting", "enroll-problem"
+# Not a screen_for answer: the settings screen is opened by a keypress, not
+# decided from the panel's condition. It is named here so main can tell the
+# display decision "somebody is using this panel", which is one of the things
+# that is never switched off.
+SETTINGS = "settings"
 BUILD_FILE = Path("/etc/scoreboard-build")
 NETWORK_WINDOW = 5  # rows of the network list shown at once on the settings screen
 

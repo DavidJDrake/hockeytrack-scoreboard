@@ -14,6 +14,32 @@ RED = (200, 16, 46)
 RULE = (48, 52, 60)
 
 
+def shift_frame(surface: pygame.Surface, offset: tuple[int, int]) -> None:
+    """Move everything already drawn on ``surface`` by ``offset``, in place.
+
+    The panel's burn-in mitigation, in place of blanking: a few pixels of
+    whole-frame offset, stepped every few minutes, so no pixel holds the same
+    bright glyph edge for hours. Applied here, in the 1920x480 drawing space,
+    before display.present turns the frame for a portrait panel -- so the
+    content moves the way it was laid out rather than sideways.
+
+    ``Surface.scroll`` leaves the vacated band at its old pixel values, which
+    would read as a four-pixel copy of the opposite edge; the fills below are
+    what make it a shift rather than a smear. Which offsets are safe is not
+    this function's business -- it will happily push content off an edge --
+    and main.SHIFT_PATTERN is where that is decided and explained.
+    """
+    dx, dy = offset
+    if not dx and not dy:
+        return
+    w, h = surface.get_size()
+    surface.scroll(dx, dy)
+    if dx:
+        surface.fill(BG, (0, 0, dx, h) if dx > 0 else (w + dx, 0, -dx, h))
+    if dy:
+        surface.fill(BG, (0, 0, w, dy) if dy > 0 else (0, h + dy, w, -dy))
+
+
 def _text(surface, assets, s, px, color, x, y, anchor="topleft", bold=True):
     img = assets.font(px, bold).render(s, True, color)
     rect = img.get_rect(**{anchor: (x, y)})

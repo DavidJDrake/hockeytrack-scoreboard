@@ -7,6 +7,11 @@ import queue
 import sys
 import threading
 import time
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import NamedTuple
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pygame
 
@@ -19,12 +24,157 @@ from .display import display_failure, parse_size, placement, present
 from .link import Link
 from .model import GameState, parse_today, parse_config
 from .netcfg import NetworkError, NetworkManager, Status, owner_hint, rotate_hint
-from .render import H, W, draw
+from .render import H, W, draw, shift_frame
 from .reset import factory_reset
 from .settings import Settings
 
 log = logging.getLogger("scoreboard")
-BLANK_AFTER_S = 30 * 60
+
+# ---------------------------------------------------------------------------
+# What the panel shows, and where on the glass
+#
+# The owner's model: the screen is on when there is something to show and off
+# when there is not, and it always comes back BY ITSELF -- either because a
+# time passed or because they chose something on the site. The panel has no
+# keyboard, no touch and usually no buttons, so "comes back by itself" is not
+# a nicety: it is the only thing standing between "off" and "dead". What was
+# wrong with the rule this replaces was never that it went dark. It was that
+# it went dark during a running countdown, and nothing would ever have
+# brought it back (docs/hardware-checks.md, "Display behavior").
+#
+# So every OFF below is paired, here in one place, with the thing that ends
+# it and needs nobody to touch the panel:
+#
+#   before the countdown window  -> the window opens, or the owner chooses
+#   after the final hold         -> the owner chooses, or a new state arrives
+#   no game, past the grace      -> the owner chooses, or a state arrives
+#   inside sleep hours           -> the window ends, or a live game starts
+#
+# And three screens are never off at all, in or out of sleep hours, because
+# each one is the panel asking for help it cannot get any other way: not
+# registered, the pairing code, enrollment failing, and no network.
+#
+# Clocks. Durations and phases are measured on time.monotonic(): the Pi has
+# no RTC, so its wall clock starts wrong and NTP may move it hours forward
+# once the network is up, and "three hours since the final" measured on
+# time.time() would expire instantly or never. Sleep hours are the one thing
+# here that is genuinely about wall-clock local time, so they take a UTC
+# datetime -- and None until the clock is known to be synchronized, which is
+# how this module says "do not trust me yet".
+# ---------------------------------------------------------------------------
+
+# What to draw. The first four all mean "draw the scoreboard, which knows
+# from the state itself which of them it is"; they are named apart so the
+# tests, and anyone reading a log, can say which rule fired.
+GAME, COUNTDOWN, FINAL, NO_GAME = "game", "countdown", "final", "no-game"
+MESSAGE, OFF = "message", "off"
+DRAWS_THE_GAME = (GAME, COUNTDOWN, FINAL, NO_GAME)
+
+SELECT, REARM, IGNORE = "select", "rearm", "ignore"
+
+# The states that mean the game is over, and the one that means it has not
+# started. cloud/internal/reduce/reduce.go collapses the NHL's states into
+# exactly three before they reach a panel: OFF becomes FINAL, CRIT becomes
+# LIVE, and everything else -- FUT included -- becomes PRE. "OFF" is kept
+# here for a document that somehow did not pass through the reducer;
+# anything else unrecognized is treated as a game in progress, which errs
+# toward a lit panel rather than a dark one.
+OVER = ("FINAL", "OFF")
+PREGAME = ("PRE",)
+
+# How long the panel keeps showing something after a change the owner caused
+# or needs to see: boot, a game chosen or cleared, a game going final. Not a
+# user setting -- it is the panel saying "heard you" to somebody who has just
+# clicked something and is looking up at the panel to see whether it worked.
+# Five minutes is long enough to walk into the next room and check.
+GRACE_S = 5 * 60
+
+# The pixel shift: a whole-frame offset that steps through a fixed ring.
+#
+# Bounds. +-4 px across (the layout's side margins are 60 px) and never
+# downward (they are not symmetric: with two penalties a side the second
+# row's progress bar already reaches y=479, so the game screen's real bottom
+# margin is zero, while its top margin is 76). A ring rather than a random
+# walk so it is testable and repeatable, and so panels agree on the shape.
+#
+# Schedule. Seven minutes a step: minutes rather than seconds, because at
+# 10 Hz anything faster reads as jitter from across the room, and a full
+# circuit still comes in under an hour (8 x 7 min = 56 min), so a pairing
+# code left up for a day traces the whole ring about 25 times. Steps are at
+# most 2 px so no single step is visible as movement.
+SHIFT_STEP_S = 7 * 60
+SHIFT_PATTERN = ((0, 0), (2, 0), (4, -2), (2, -4), (0, -2), (-2, -4), (-4, -2), (-2, 0))
+
+# Where systemd-timesyncd says the clock has been set from the network. The
+# image installs tzdata (2026c, from the base stage) and runs timesyncd, so
+# both halves of "what time is it, locally?" are present on the panel.
+SYNC_FLAG = Path("/run/systemd/timesync/synchronized")
+
+
+@dataclass(frozen=True)
+class Sleep:
+    """A daily local-time window during which the panel is off.
+
+    ``start`` and ``end`` are "HH:MM" in ``zone``, an IANA name -- the wire
+    form the site will eventually send, parsed and validated here where it
+    can be tested, rather than somewhere on the way in. A window may cross
+    midnight (23:00 to 07:00); one whose ends are equal is no window at all.
+
+    The zone is explicit rather than the panel's own /etc/localtime: an
+    appliance that never had a keyboard has whatever zone the image was built
+    with, and the owner setting "23:00" means 23:00 where the panel hangs.
+    """
+    start: str
+    end: str
+    zone: str
+
+
+@dataclass(frozen=True)
+class Display:
+    """The three timings the owner can set, with the defaults a panel that
+    has never been told anything runs on.
+
+    One value, passed to ``presentation`` on every pass, so the day this is
+    delivered over the config topic the change is: parse it, build one of
+    these, assign it. Nothing else in the loop has to learn about it.
+    """
+    # How long before puck drop the countdown appears. Two hours is about
+    # when somebody starts thinking about the game; before that a selected
+    # game is a plan, not something to light a wall with.
+    countdown_lead_s: int = 2 * 60 * 60
+    # How long a final score stays up. Three hours covers "it ended while we
+    # were out" -- a game finishing at 22:00 is still there at 01:00 --
+    # without the panel still showing last night's result over breakfast.
+    final_hold_s: int = 3 * 60 * 60
+    sleep: Sleep | None = None
+
+
+class Presentation(NamedTuple):
+    """What to draw, and the whole-frame pixel shift to draw it with.
+
+    ``shift`` is (0, 0) for OFF, which is a black frame and has nothing to
+    move. Everything else is shifted, including the message screens: those
+    are the ones that sit there for hours or days, so they are the ones that
+    need it most.
+    """
+    show: str
+    shift: tuple[int, int]
+
+
+def shift_at(now: float) -> tuple[int, int]:
+    """Which step of SHIFT_PATTERN a monotonic ``now`` falls in."""
+    return SHIFT_PATTERN[int(now // SHIFT_STEP_S) % len(SHIFT_PATTERN)]
+
+
+def clock_synced(flag: Path = SYNC_FLAG) -> bool:
+    """Has NTP set this panel's clock yet?
+
+    systemd-timesyncd creates this file once it has accepted an answer. A
+    stat rather than a `timedatectl` subprocess: this is read from the render
+    loop, and the loop is the one thing on the panel that must never block.
+    """
+    return flag.exists()
+
 
 # What to show for a pending settings action that raised something other than
 # NetworkError. Never the exception's own text: subprocess.TimeoutExpired's
@@ -152,20 +302,182 @@ def chosen_rotation(device_json: int | None, setup_file, env: str | None) -> int
     return setup_file()
 
 
-def should_blank(now: float, last_update: float, state: GameState | None, blank_after_s: float) -> bool:
-    """Decide whether the panel should go dark.
+def final_seen_at(previous: float | None, state: GameState | None, now: float) -> float | None:
+    """When this panel first saw the game it follows go final.
 
-    A game in progress (state "LIVE", which includes intermissions) never
-    blanks, even if updates stall briefly -- that's normal jitter, not
-    idleness. Anything else -- pre-game, final, or nothing selected --
-    blanks once ``blank_after_s`` has passed with no state update, which is
-    exactly the "board left up overnight" case that causes burn-in. The
-    caller is responsible for bumping ``last_update`` on the next update or
-    a button press, which is how the panel wakes back up.
+    The state document carries no end timestamp -- only ``asOf`` (when the
+    reducer last wrote it) and ``start`` -- so there is nothing in the model
+    to measure "three hours since the game ended" from. ``asOf`` would have
+    to be compared against this panel's wall clock, and this panel has no
+    RTC: until NTP answers it may be hours out, which would make a final
+    either instantly stale or permanent. So the panel measures from its own
+    first sighting, on its own monotonic clock, and the honest reading of
+    ``final_hold_s`` is "three hours since this panel learned the game
+    ended" -- which also means a panel rebooted an hour after the final
+    holds the retained document for another full three hours.
+
+    Called every pass rather than from the event handlers, so every route to
+    a new state -- an MQTT update, the site choosing another game, a fixture,
+    ``select`` clearing ``current`` -- goes through one rule. A second final
+    document for the same game keeps the first sighting: a final game stops
+    producing updates, and the refreshes it does send must not push the hold
+    out indefinitely.
     """
-    if state is not None and state.state == "LIVE":
+    if state is None or state.state not in OVER:
+        return None
+    return now if previous is None else previous
+
+
+def changed_at(previous: float, before: str | None, after: str | None, now: float) -> float:
+    """When the panel last had something new to tell its owner.
+
+    Called with the followed game's state name, so PRE -> LIVE -> FINAL and
+    "a game appeared" or "a game went away" each restart the grace period.
+    An owner action that does not change the state name -- re-choosing the
+    game already showing -- is marked by the loop instead; both write the
+    same clock.
+    """
+    return now if after != before else previous
+
+
+def _minutes(hhmm: str) -> int | None:
+    """"HH:MM" as minutes since local midnight, or None if it is not that."""
+    hours, _, mins = hhmm.partition(":")
+    if not hours.isdigit() or not mins.isdigit():
+        return None
+    h, m = int(hours), int(mins)
+    return h * 60 + m if 0 <= h < 24 and 0 <= m < 60 else None
+
+
+_bad_sleep: set[str] = set()   # zones and times already complained about
+
+
+def asleep(now_utc: datetime | None, sleep: Sleep | None) -> bool:
+    """Is the panel inside its owner's sleep hours?
+
+    ``now_utc`` is an aware UTC datetime, or None when the clock has not been
+    synchronized yet -- and an unsynchronized clock means no sleep hours. A
+    panel that has just booted with a wrong clock would otherwise switch
+    itself off at the wrong time of day, and the one failure this whole
+    change exists to avoid is a panel that is dark for a reason nobody
+    standing in front of it can work out. Fail lit, then settle.
+
+    DST needs no special case *because* the comparison is done this way
+    round: an instant is converted to local wall time and matched against the
+    window, rather than the window being turned into instants. So the hour
+    that does not exist in spring simply never matches, and the hour that
+    happens twice in autumn matches twice -- both of which are what an owner
+    who wrote "23:00 to 07:00" meant.
+
+    Anything malformed -- an unknown zone, a time that is not HH:MM -- means
+    no window, logged once. The render loop must not be brought down by a
+    settings value, and a panel that stays on is a panel somebody can read a
+    complaint off.
+    """
+    if sleep is None or now_utc is None:
         return False
-    return now - last_update >= blank_after_s
+    start, end = _minutes(sleep.start), _minutes(sleep.end)
+    if start is None or end is None or start == end:
+        _complain_once(f"{sleep.start}-{sleep.end}", "sleep hours are not HH:MM to HH:MM")
+        return False
+    try:
+        local = now_utc.astimezone(ZoneInfo(sleep.zone))
+    except (ZoneInfoNotFoundError, ValueError, TypeError) as e:
+        _complain_once(sleep.zone, f"sleep hours ignored: {e}")
+        return False
+    now_m = local.hour * 60 + local.minute
+    if start < end:
+        return start <= now_m < end
+    return now_m >= start or now_m < end   # the window crosses midnight
+
+
+def _complain_once(key: str, message: str) -> None:
+    if key not in _bad_sleep:
+        _bad_sleep.add(key)
+        log.warning("%s (%r)", message, key)
+
+
+def presentation(now: float, now_utc: datetime | None, screen: str,
+                 state: GameState | None, final_seen: float | None,
+                 last_change: float, display: Display) -> Presentation:
+    """The one decision the render loop obeys: what to draw, and where.
+
+    ``now`` is ``time.monotonic()``; ``now_utc`` is an aware UTC datetime, or
+    None while the clock is not to be trusted. ``screen`` is what
+    ``screens.screen_for`` said, so that the screens asking for help can be
+    exempted here rather than by the loop quietly not asking.
+    ``final_seen`` and ``last_change`` come from ``final_seen_at`` and
+    ``changed_at``. The order of the rules below is the whole design:
+
+    1. A screen asking the owner for something is never off, and never
+       asleep. A panel that cannot say "I have no network" is just broken.
+    2. A live game beats everything, including sleep hours: the late game on
+       the west coast is exactly what somebody bought a wall panel for.
+    3. Anything the owner just did, or needs to see, gets GRACE_S on screen
+       whatever the hour -- an owner choosing a game at one in the morning is
+       plainly awake, and needs to see that the panel heard them.
+    4. Sleep hours.
+    5. Then, and only then, the two windows: a countdown appears
+       ``countdown_lead_s`` before puck drop, a final stays for
+       ``final_hold_s`` after this panel first saw it.
+    """
+    shift = shift_at(now)
+    if screen != screens.SCOREBOARD:
+        return Presentation(MESSAGE, shift)
+    live = state is not None and state.state not in OVER and state.state not in PREGAME
+    if live:
+        return Presentation(GAME, shift)
+    within_grace = now - last_change < GRACE_S
+    if not within_grace and asleep(now_utc, display.sleep):
+        return Presentation(OFF, (0, 0))
+    if state is None:
+        return Presentation(NO_GAME, shift) if within_grace else Presentation(OFF, (0, 0))
+    if state.state in OVER:
+        held = final_seen is None or now - final_seen < display.final_hold_s
+        return Presentation(FINAL, shift) if held or within_grace else Presentation(OFF, (0, 0))
+    # Pre-game. The countdown is drawn from the wall clock against the
+    # document's own start time, so an unsynchronized clock cannot say
+    # whether the window is open: show it, and let the window take effect
+    # once NTP has landed (a minute or so after boot, in practice).
+    due = _countdown_due(now_utc, state, display.countdown_lead_s)
+    return Presentation(COUNTDOWN, shift) if due or within_grace else Presentation(OFF, (0, 0))
+
+
+def _countdown_due(now_utc: datetime | None, state: GameState, lead_s: int) -> bool:
+    """Is puck drop close enough to put the countdown on the wall?
+
+    True while the clock is unknown, and true for a start that has already
+    passed (``seconds_to_start`` floors at zero): a game that should have
+    started is the last thing to switch off, and the LIVE state that
+    supersedes it is moments away. False for a document with no start or an
+    unreadable one -- there is nothing to count down to, and this is also
+    what keeps render.draw from parsing that same string and raising inside
+    the render loop.
+    """
+    if now_utc is None:
+        return True
+    try:
+        left = state.seconds_to_start(int(now_utc.timestamp() * 1000))
+    except ValueError:
+        return False
+    return left is not None and left <= lead_s
+
+
+def config_action(game_id: int | None, following: int | None) -> str:
+    """What an admin-site config message asks of a panel already following
+    ``following``.
+
+    A different game is a selection. The *same* game is the only lever an
+    owner has on a panel with no input device: re-choosing it on the site
+    says "put that back", and rearming the sighting gives an aged-out final
+    another ``final_hold_s`` on screen. Without this the message would be
+    dropped as a no-op, and requirement or not, "choose it again" is the
+    first thing anybody would try. ``None`` -- unreadable, or an explicit
+    null gameId -- leaves the panel showing whatever it is showing.
+    """
+    if game_id is None:
+        return IGNORE
+    return SELECT if game_id != following else REARM
 
 
 def main() -> None:
@@ -242,28 +554,41 @@ def main() -> None:
     build = screens.build_identity()
     nm = NetworkManager()
     net_ok = False
-    # 0.0 means "poll on the first pass", which is what we want -- but the
+    # None means "poll on the first pass", which is what we want -- but the
     # poll is at the BOTTOM of the loop, after the frame has been flipped, so
     # the first pass paints with net_ok still False rather than waiting on
     # nmcli to tell it otherwise. One frame of a panel that says OFFLINE is a
     # far better first boot than up to 30 s of a panel that says nothing.
-    last_net_check = 0.0
+    # (A sentinel rather than 0.0, because the clock below is monotonic: on
+    # Linux that is uptime, and a service started five seconds after boot
+    # would otherwise wait out the interval before its first poll.)
+    last_net_check: float | None = None
     NET_POLL_S = 10
 
     current: GameState | None = None
+    # When this panel first saw the game it follows go final; see
+    # final_seen_at, which owns every write to it after this one.
+    final_seen: float | None = None
+    # Booting is a change the owner needs to see: a panel that lit up, showed
+    # what it had and then went dark on schedule has demonstrated itself.
+    last_change = time.monotonic()
+    shown_state: str | None = None
+    synced = clock_synced()
+    # The defaults, until there is a channel to deliver anything else; see
+    # Display, and docs/hardware-checks.md for what carrying them will touch.
+    display = Display()
     today = []
     following = cfg.load_game_id() if cfg else None
     link_ok = bool(fixture)
     brightness = cfg.brightness if cfg else 1.0
-    last_update = time.time()
     if fixture:
         with open(fixture, "rb") as f:
             current = GameState.from_json(f.read())
         following = current.game_id
 
     def select(game_id):
-        nonlocal following, current, last_update
-        following, current, last_update = game_id, None, time.time()
+        nonlocal following, current, last_change
+        following, current, last_change = game_id, None, time.monotonic()
         if cfg:
             cfg.save_game_id(game_id)
         if link:
@@ -318,7 +643,10 @@ def main() -> None:
                     on_a()
                 if ev.type == pygame.KEYDOWN and ev.key == pygame.K_b:
                     on_b()
-            if holds.update(*buttons.pressed(), time.time()):
+            # monotonic, not time.time(): this is a ten-second duration, and
+            # NTP correcting a clock that started at the epoch would either
+            # fire the reset on the first pass or never fire it at all.
+            if holds.update(*buttons.pressed(), time.monotonic()):
                 log.warning("both buttons held: factory reset")
                 if panel is None:
                     panel = Settings()
@@ -340,16 +668,19 @@ def main() -> None:
                 if kind == "state" and item[1] == following:
                     try:
                         current = GameState.from_json(item[2])
-                        last_update = time.time()
                     except ValueError as e:
                         log.warning("bad state doc: %s", e)
                 elif kind == "config":
                     gid = parse_config(item[1])
-                    if gid is None:
+                    action = config_action(gid, following)
+                    if action == IGNORE:
                         log.warning("ignoring unreadable config message")
-                    elif gid != following:
+                    elif action == SELECT:
                         log.info("admin site selected game %s", gid)
                         select(gid)
+                    else:
+                        log.info("admin site re-chose game %s; holding it again", gid)
+                        final_seen, last_change = None, time.monotonic()
                 elif kind == "today":
                     today = parse_today(item[1])
                     pregame_from_today()
@@ -358,8 +689,10 @@ def main() -> None:
                 elif kind == "select":
                     select(item[1])
                 elif kind == "brightness":
+                    # Manual, and it stays where it is put: the panel has no
+                    # automatic dimming to fight with, because a dim panel
+                    # nobody can brighten again is the same trap as a dark one.
                     brightness = {1.0: 0.6, 0.6: 0.3}.get(brightness, 1.0)
-                    last_update = time.time()  # a button press counts as activity too
                 elif kind == "enroll":
                     enroll_state = item[1]
                     if isinstance(enroll_state, enroll.Ready):
@@ -372,29 +705,66 @@ def main() -> None:
                         enroll_stop.set()
                         pygame.quit()
                         sys.exit(0)
+            # Three clocks, for three different jobs. now_ms is wall time
+            # because it is compared against the state document's own asOf,
+            # which the reducer stamped in wall time. mono is monotonic
+            # because durations must survive NTP moving the clock. now_utc is
+            # wall time again, and None until NTP has been, because sleep
+            # hours are the one thing here that really is about what time of
+            # day it is where the panel hangs. See presentation.
             now_ms = int(time.time() * 1000)
+            mono = time.monotonic()
+            if not synced:
+                synced = clock_synced()
+            now_utc = datetime.now(timezone.utc) if synced else None
+            final_seen = final_seen_at(final_seen, current, mono)
+            state_name = current.state if current is not None else None
+            last_change = changed_at(last_change, shown_state, state_name, mono)
+            shown_state = state_name
+            if fixture:
+                # The desktop preview exists to be looked at, and its fixture
+                # never changes. Hold it inside the grace period so the frame
+                # somebody is inspecting does not switch itself off.
+                last_change = mono
             if panel is not None and panel.pending is not None:
                 new_status = carry_out(panel, nm, cfg, enroll_stop)
                 if new_status is not None:
                     status = new_status
-            if panel is not None:
+            # The settings screen is somebody standing at the panel with a
+            # keyboard, so it counts as a screen that must not switch itself
+            # off mid-sentence -- presentation exempts everything that is not
+            # the scoreboard.
+            showing = (screens.SETTINGS if panel is not None else
+                       screens.screen_for(cfg is not None or bool(fixture),
+                                          net_ok or bool(fixture), enroll_state))
+            now_showing = presentation(mono, now_utc, showing, current,
+                                       final_seen, last_change, display)
+            if now_showing.show == OFF:
+                # Black, and that is all this change claims. Whether the HDMI
+                # output itself can be put to sleep under kmsdrm -- so the
+                # panel's own backlight goes off -- is a hardware question
+                # nobody has tested on this board; docs/hardware-checks.md
+                # carries it as a follow-up.
+                frame.fill((0, 0, 0))
+            elif panel is not None:
                 screens.draw_settings(frame, assets, panel, status, build)
+            elif showing == screens.WAITING:
+                screens.draw_waiting(frame, assets, enroll_state.display,
+                                     enroll.SITE, enroll_state.owner, build)
+            elif showing == screens.ENROLL_PROBLEM:
+                screens.draw_enroll_problem(frame, assets, enroll_state.detail, build)
+            elif showing == screens.UNREGISTERED:
+                screens.draw_unregistered(frame, assets, build)
+            elif showing == screens.OFFLINE:
+                screens.draw_offline(frame, assets, build)
             else:
-                showing = screens.screen_for(cfg is not None or bool(fixture),
-                                             net_ok or bool(fixture), enroll_state)
-                if showing == screens.WAITING:
-                    screens.draw_waiting(frame, assets, enroll_state.display,
-                                         enroll.SITE, enroll_state.owner, build)
-                elif showing == screens.ENROLL_PROBLEM:
-                    screens.draw_enroll_problem(frame, assets, enroll_state.detail, build)
-                elif showing == screens.UNREGISTERED:
-                    screens.draw_unregistered(frame, assets, build)
-                elif showing == screens.OFFLINE:
-                    screens.draw_offline(frame, assets, build)
-                elif should_blank(time.time(), last_update, current, BLANK_AFTER_S):
-                    frame.fill((0, 0, 0))
-                else:
-                    draw(frame, current, now_ms, assets, link_ok)
+                draw(frame, current, now_ms, assets, link_ok)
+            # Everything drawn gets the shift, including the screens that are
+            # not the scoreboard: a pairing code sits there until somebody
+            # claims the panel and "No network" until somebody fixes the
+            # Wi-Fi, which is longer than any game. A black frame has nothing
+            # to move, and presentation returns (0, 0) with it.
+            shift_frame(frame, now_showing.shift)
             if brightness < 1.0:
                 dim = pygame.Surface((W, H))
                 dim.fill((0, 0, 0))
@@ -423,9 +793,9 @@ def main() -> None:
             # scoreboard path costs no nmcli calls at all. Only a panel that
             # isn't working asks the radio, and then only every 10 seconds.
             if link_ok:
-                net_ok, last_net_check = True, time.time()
-            elif time.time() - last_net_check >= NET_POLL_S:
-                last_net_check = time.time()
+                net_ok, last_net_check = True, mono
+            elif last_net_check is None or mono - last_net_check >= NET_POLL_S:
+                last_net_check = mono
                 try:
                     net_ok = nm.status().online
                 except Exception as e:  # nmcli absent on a desktop, or failing

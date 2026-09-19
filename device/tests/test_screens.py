@@ -3,12 +3,12 @@ from pathlib import Path
 import pygame
 import pytest
 
-from scoreboard import main as main_module
 from scoreboard import screens
 from scoreboard.assets import Assets
+from scoreboard.main import SHIFT_PATTERN
 from scoreboard.model import GameState
 from scoreboard.netcfg import Network
-from scoreboard.render import W, H, BG, INK, MUTED, draw, shift_frame
+from scoreboard.render import W, H, BG, draw, shift_frame
 from scoreboard.settings import Settings
 
 FIX = Path(__file__).parent / "fixtures"
@@ -236,104 +236,18 @@ def test_the_two_setup_screens_do_not_look_alike():
 
 
 # --------------------------------------------------------------------------
-# The idle screen
+# Nothing the decision asks for comes out dark
 #
-# What a panel with nothing to show does instead of going black. It has to
-# be three things at once: legible enough to say what to do about it, faint
-# and moving so no pixel is lit for long, and proof the panel is alive.
-# --------------------------------------------------------------------------
-
-
-def _ink(surface: pygame.Surface, area: pygame.Rect):
-    """Exact bounds of the non-background pixels inside ``area``.
-
-    Every pixel, no stepping: this is measuring whether a message that has
-    drifted to an edge is still whole, so a sampled scan would be no
-    evidence at all. Bounded to ``area`` to keep that affordable.
-    """
-    area = area.clip(surface.get_rect())
-    top = bottom = left = right = None
-    for y in range(area.top, area.bottom):
-        for x in range(area.left, area.right):
-            if surface.get_at((x, y))[:3] != BG:
-                top = y if top is None else top
-                bottom = y
-                left = x if left is None else min(left, x)
-                right = x if right is None else max(right, x)
-    return top, bottom, left, right
-
-
-def test_the_idle_screen_says_what_is_wrong_and_where_to_fix_it():
-    pygame.init()
-    assets = RecordingAssets()
-    screens.draw_idle(pygame.Surface((W, H)), assets, SITE)
-    assert "No game selected" in assets.drawn
-    assert any(SITE in line for line in assets.drawn), assets.drawn
-
-
-def test_the_idle_screen_is_lit_but_quiet():
-    # Lit, because a dark panel with no input device is indistinguishable
-    # from a dead one -- that is the whole finding. Quiet, because this is
-    # what the panel shows for hours at a time: nothing on it is as bright
-    # as the scoreboard's own INK.
-    pygame.init()
-    surface = pygame.Surface((W, H))
-    screens.draw_idle(surface, Assets(), SITE)
-    brightest = max(max(surface.get_at((x, y))[:3]) for x in range(0, W, 3) for y in range(0, H, 3))
-    assert brightest > max(BG), "the idle screen painted nothing"
-    assert brightest <= max(MUTED) < max(INK)
-
-
-@pytest.mark.parametrize("drift", [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0), (0.5, 0.5)])
-def test_the_whole_idle_message_is_on_the_panel_at_the_extremes_of_its_drift(drift):
-    # The corners of the travel box, measured in painted pixels rather than
-    # in the rect draw_idle reports, so an off-by-one in the box arithmetic
-    # shows up as ink on the edge column rather than passing quietly.
-    pygame.init()
-    surface = pygame.Surface((W, H))
-    rect = screens.draw_idle(surface, Assets(), SITE, drift)
-    assert surface.get_rect().contains(rect), rect
-    top, bottom, left, right = _ink(surface, surface.get_rect())
-    assert top is not None, "nothing painted"
-    assert 0 < top and bottom < H - 1, f"ink touches the top or bottom edge: {top}..{bottom}"
-    assert 0 < left and right < W - 1, f"ink touches the left or right edge: {left}..{right}"
-
-
-def test_the_idle_message_keeps_its_size_wherever_it_drifts():
-    # The same message, whole, at every point of the path: if any position
-    # clipped it, its ink would measure smaller there.
-    pygame.init()
-    sizes = set()
-    for drift in [(0.0, 0.0), (1.0, 1.0), (0.5, 0.0), (0.0, 0.5), (1.0, 0.5)]:
-        surface = pygame.Surface((W, H))
-        rect = screens.draw_idle(surface, Assets(), SITE, drift)
-        top, bottom, left, right = _ink(surface, rect.inflate(8, 8))
-        sizes.add((right - left, bottom - top))
-    assert len(sizes) == 1, sizes
-
-
-def test_the_idle_message_moves_slowly_enough_to_be_calm():
-    # "Drifts" across a room, not "slides". A pixel or two a second at most,
-    # from the real message size against the real drift path.
-    pygame.init()
-    surface = pygame.Surface((W, H))
-    assets = Assets()
-    step = 5
-    places = [screens.draw_idle(surface, assets, SITE, main_module.drift_at(float(t))).topleft
-              for t in range(0, 2 * 3600, step)]
-    worst = max(abs(b[0] - a[0]) + abs(b[1] - a[1]) for a, b in zip(places, places[1:]))
-    assert worst <= 2.0 * step, f"{worst / step:.2f} px/s is too fast to be calm"
-    assert worst > 0, "the message never moved"
-
-
-# --------------------------------------------------------------------------
-# No powered panel is ever black
+# The other half of test_main's invariant. There, the rule: the panel is only
+# ever black when presentation says OFF, for one of four stated reasons.
+# Here, the consequence: every screen it can ask for INSTEAD of OFF really
+# does put something on the glass, shifted or not. A screen that decided to
+# stay on and then painted nothing would be the owner's original complaint
+# with extra steps.
 #
-# The invariant the whole change exists for, across every screen the device
-# can be showing, including the ones the old rule would have blanked. Stated
-# as "something is lit", not "something differs from the background": a frame
-# filled with BG and nothing else is exactly the dead-looking panel the owner
-# reported.
+# Stated as "something is lit", not "something differs from the background":
+# a frame filled with BG and nothing else is exactly the dead-looking panel
+# that was reported.
 # --------------------------------------------------------------------------
 
 
@@ -365,9 +279,9 @@ def _screens():
     yield "countdown", lambda s: draw(s, pre, pre.as_of_ms, assets)
     yield "countdown, six hours out", lambda s: draw(s, pre, pre.as_of_ms - 6 * 3600 * 1000, assets)
     yield "countdown expired", lambda s: draw(s, pre, pre.as_of_ms + 24 * 3600 * 1000, assets)
-    for t in (0, 900, 1800, 2700, 5400):
-        yield f"idle, aged out, t+{t}", (
-            lambda s, t=t: screens.draw_idle(s, assets, SITE, main_module.drift_at(float(t))))
+    # NO_GAME: what the grace period shows when nothing is selected, before
+    # the panel goes off.
+    yield "no game", lambda s: draw(s, None, 0, assets)
     yield "unregistered", lambda s: screens.draw_unregistered(s, assets, "development build")
     yield "offline", lambda s: screens.draw_offline(s, assets, "development build")
     yield "pairing code", lambda s: screens.draw_waiting(
@@ -384,7 +298,7 @@ IDS = [name for name, _ in SCREENS]
 
 
 @pytest.mark.parametrize("name,paint", SCREENS, ids=IDS)
-def test_no_state_this_panel_can_be_in_renders_a_black_frame(name, paint):
+def test_every_screen_the_decision_can_ask_for_is_lit(name, paint):
     assert _lit(paint) > 20, f"{name} is a dark panel with nothing on it"
 
 
@@ -392,7 +306,7 @@ def test_no_state_this_panel_can_be_in_renders_a_black_frame(name, paint):
 def test_no_frame_goes_dark_once_the_pixel_shift_has_moved_it(name, paint):
     # The corners of the shift pattern, which are the only offsets that can
     # move anything off an edge.
-    for offset in ((4, -2), (-4, -2), (2, -4), (-2, -4)):
+    for offset in [o for o in SHIFT_PATTERN if abs(o[0]) == 4 or o[1] == -4]:
         def painted(surface):
             paint(surface)
             shift_frame(surface, offset)
