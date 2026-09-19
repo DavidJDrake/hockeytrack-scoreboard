@@ -268,12 +268,91 @@ QUERY_TIMEOUT_S = 10
 CONNECT_TIMEOUT_S = 45
 
 # How long to let a Wi-Fi interface settle after the radio is switched on,
-# before trying to connect through it. Ten cheap queries two seconds apart is
-# twenty seconds at worst, which sits inside the unit's start timeout together
-# with one CONNECT_TIMEOUT_S connect -- and scoreboard-netcfg.service runs
+# before trying to connect through it. scoreboard-netcfg.service runs
 # Before=scoreboard.service, so this budget is time the panel spends dark.
-WIFI_READY_TRIES = 10
+#
+# Six cheap queries two seconds apart is twelve seconds at worst. It was ten
+# tries (twenty seconds) until 2026-09-19, and the two v0.1.2 boots say that
+# was far more than this step needs: NetworkManager logged "Wi-Fi now enabled
+# by radio killswitch" at 14.584 s and wlan0 went "unavailable ->
+# disconnected" at 14.736 s, 152 ms later; on the second boot the device was
+# ready 266 ms after the service started. Twelve seconds is still eighty
+# times the observed wait, and the eight seconds it gives back are spent on
+# the step that was actually short of budget -- waiting for the network to be
+# scanned, below.
+WIFI_READY_TRIES = 6
 WIFI_READY_WAIT_S = 2
+
+# How long to wait for the target network to turn up in NetworkManager's scan
+# list before connecting, shared across every attempt, and how often to look.
+#
+# This is the v0.1.2 defect. wait_for_wifi() waits for the DEVICE; it does not
+# wait for the NETWORK, and `nmcli device wifi connect <ssid>` fails at once
+# when the SSID is not yet in NetworkManager's AP list -- nmcli checks its own
+# list before starting any activation (src/nmcli/devices.c:3927 at 1.52.1).
+# Both v0.1.2 boots failed that way 79 ms and 413 ms after wlan0 became
+# usable, with nothing to retry them.
+#
+# The size comes from the journals. NetworkManager logs no scan at info level,
+# so the only marker available is "manager: startup complete", which came
+# 5.82 s and 5.81 s after wlan0 reached "disconnected" on the two boots.
+# Reading that as "the first scan's results had landed by then" is inference,
+# so the budget is set at roughly three and a half times it rather than beside
+# it. Shared across retries: three attempts must not mean three full waits.
+SCAN_BUDGET_S = 20
+SSID_POLL_S = 2
+
+# How long every connect attempt may take between them, and how many there
+# may be. Shared, because two full CONNECT_TIMEOUT_S connects would not fit
+# inside what the unit and the site promise -- and because the error worth
+# retrying is the one nmcli reports instantly, so a retry costs almost none of
+# this. A connect that really did run for CONNECT_TIMEOUT_S was associating,
+# not failing to find the network, and there is nothing to retry.
+#
+# The whole first-boot arithmetic, asserted by
+# device/tests/test_netcfg.py::test_the_whole_first_boot_budget_fits_what_the_unit_and_the_site_promise:
+#   raspi-config setting the regulatory domain  QUERY_TIMEOUT_S    10 s
+#   waiting for the Wi-Fi device                6 x 2 s            12 s
+#   waiting for the network to be scanned       SCAN_BUDGET_S      20 s
+#   every connect attempt together              CONNECT_BUDGET_S   45 s
+#                                                                  ----
+#                                                                  87 s
+# inside the unit's TimeoutStartSec=120 and inside the "up to a minute and a
+# half" the download page and the setup steps promise.
+CONNECT_BUDGET_S = 45
+CONNECT_ATTEMPTS = 3
+
+# How nmcli says "that network is not here" as against "that password is
+# wrong". Both come back as text on stderr, which _run_nmcli turns into a
+# NetworkError, and the locale is forced to C.UTF-8 with LANGUAGE cleared
+# (see UTF8_LOCALE_ENV) so these strings are the untranslated English ones.
+#
+# Not found: nmcli's own check, before any activation, in
+# src/nmcli/devices.c:3927 -- "Error: No network with SSID '%s' found." and
+# the BSSID form beside it. Worth retrying after a rescan; that is the whole
+# of this fix.
+#
+# Secrets: NetworkManager's, reported through nmcli as "Error: Connection
+# activation failed: <reason>." (src/nmcli/devices.c:2156) where the reason
+# comes from src/libnmc-base/nm-client-utils.c -- NO_SECRETS is "Secrets were
+# required, but not provided", and the supplicant reasons are the "802.1X
+# supplicant ..." family, which is what a wrong WPA-PSK comes back as too.
+# Never retried: it cannot start working, and each retry is another 45 seconds
+# of dark panel for somebody who has already mistyped their password once.
+NOT_FOUND_MARKERS = ("no network with ssid", "no access point with bssid")
+SECRETS_MARKERS = ("secrets were required", "no valid secrets", "802.1x supplicant")
+
+
+def is_network_not_found(message: str) -> bool:
+    """Did nmcli refuse because the network was not in its scan list?"""
+    low = message.lower()
+    return any(marker in low for marker in NOT_FOUND_MARKERS)
+
+
+def is_secrets_problem(message: str) -> bool:
+    """Did the connect fail over the password rather than the airwaves?"""
+    low = message.lower()
+    return any(marker in low for marker in SECRETS_MARKERS)
 
 
 # nmcli translates device and connection STATE even under -t, and
@@ -488,6 +567,14 @@ class NetworkManager:
         file has anything to do, that opens the window, because that is the
         boot where the radio was off until a moment ago.
 
+        **This is only half the race, which is what v0.1.2 found out.** This
+        method answers "is there a usable Wi-Fi device". It does not answer
+        "has the network been seen", and the two v0.1.2 boots failed on the
+        second question with this one already satisfied: wlan0 reached
+        "disconnected" and the connect failed 79 ms later with "No network
+        with SSID ... found". wait_for_ssid() below is the other half; join()
+        does both in order.
+
         Never raises, and never blocks longer than tries*wait: this runs
         Before=scoreboard.service, so every second spent here is a second the
         panel shows nothing. A false return is not fatal; the caller tries the
@@ -524,13 +611,132 @@ class NetworkManager:
                 best[found.ssid] = found
         return sorted(best.values(), key=lambda n: n.signal, reverse=True)
 
-    def apply(self, settings: WifiSettings) -> None:
+    def rescan(self) -> bool:
+        """Ask NetworkManager for a fresh scan. True if it accepted.
+
+        Deliberately not fatal. NetworkManager answers
+        NM_DEVICE_ERROR_NOT_ALLOWED when a scan is already running, when one
+        finished very recently, or while the device is still unavailable
+        ("Scanning not allowed while unavailable" and its siblings, in
+        src/core/devices/wifi/nm-device-wifi.c) -- and the first two of those
+        mean results are on their way, which is the thing being asked for.
+        A refusal is a hint about timing, not a failure to report.
+        """
+        try:
+            self._run(["device", "wifi", "rescan"])
+            return True
+        except NetworkError as e:
+            log.debug("rescan refused: %s", e)
+            return False
+
+    def visible_ssids(self) -> set[str]:
+        """Every named network NetworkManager can currently see.
+
+        Split with split_terse, so an SSID containing a colon or a backslash
+        comes back as it really is rather than cut in half -- and decoded as
+        UTF-8 by the runner, so a non-ASCII name compares equal to the one in
+        the setup file byte for byte. Unnamed rows are dropped: a hidden
+        network advertises no SSID and can never be matched here, which is
+        why join() does not wait for one.
+        """
+        out = self._run(["-t", "-f", "SSID", "device", "wifi", "list"])
+        found: set[str] = set()
+        for line in out.splitlines():
+            fields = split_terse(line)
+            if fields and fields[0]:
+                found.add(fields[0])
+        return found
+
+    def wait_for_ssid(self, ssid: str, seconds: float = SCAN_BUDGET_S,
+                      poll: float = SSID_POLL_S, clock=None) -> bool:
+        """Wait for one network to appear in the scan list. True if it did.
+
+        A wall-clock deadline rather than a count of attempts, because
+        `nmcli device wifi list` is not always cheap: with its default
+        --rescan auto it can trigger a scan and block for results, so N tries
+        of an unbounded query is not a bound at all.
+
+        Never raises. A query that errors returns False for the same reason
+        wait_for_wifi does: the caller should attempt the connect and let
+        nmcli's own message be the one that reaches the journal.
+        """
+        now = clock if clock is not None else time.monotonic
+        deadline = now() + seconds
+        while True:
+            try:
+                if ssid in self.visible_ssids():
+                    return True
+            except NetworkError as e:
+                log.debug("could not read the scan list: %s", e)
+                return False
+            remaining = deadline - now()
+            if remaining <= 0:
+                return False
+            time.sleep(min(poll, remaining))
+
+    def apply(self, settings: WifiSettings, timeout: float = CONNECT_TIMEOUT_S) -> None:
         args = ["device", "wifi", "connect", settings.ssid]
         if settings.psk:
             args += ["password", settings.psk]
         if settings.hidden:
             args += ["hidden", "yes"]
-        self._run(args, timeout=CONNECT_TIMEOUT_S)
+        self._run(args, timeout=timeout)
+
+    def join(self, settings: WifiSettings, clock=None) -> None:
+        """Connect, having first made sure there is something to connect to.
+
+        The boot path's entry point, and the fix for the v0.1.2 defect.
+        apply() on its own is a bare `nmcli device wifi connect`, which is
+        right for the settings screen -- there the user picked a name out of a
+        list scanned a moment earlier -- and wrong at boot, where the radio
+        came up seconds ago and nothing has scanned yet.
+
+        Three things in order. Ask for a scan, which may be refused and that
+        is fine. Wait for the name to appear, unless the network is hidden and
+        so cannot. Connect, and if nmcli says the network is not there, rescan
+        and try again -- but only for that error, and only inside the budgets
+        at the top of this module.
+
+        Raises the last NetworkError when every attempt failed, so the caller
+        reports nmcli's own words rather than a summary of them.
+        """
+        now = clock if clock is not None else time.monotonic
+        scan_deadline = now() + SCAN_BUDGET_S
+        connect_left = float(CONNECT_BUDGET_S)
+        last: NetworkError | None = None
+
+        for attempt in range(CONNECT_ATTEMPTS):
+            self.rescan()
+            if not settings.hidden:
+                # A hidden SSID never appears in the list, so waiting for one
+                # is pure dark-panel time. nmcli's own `hidden yes` path asks
+                # NetworkManager for a directed probe of that exact name
+                # (src/nmcli/devices.c:3878) and then reports what it found,
+                # which is a better answer than any wait here could give.
+                remaining = scan_deadline - now()
+                if remaining > 0 and not self.wait_for_ssid(
+                        settings.ssid, seconds=remaining, clock=now):
+                    log.info("%r has not been seen in a scan yet; trying anyway",
+                             settings.ssid)
+            if connect_left <= 0:
+                break
+            started = now()
+            try:
+                self.apply(settings, timeout=min(CONNECT_TIMEOUT_S, connect_left))
+                return
+            except NetworkError as e:
+                connect_left -= now() - started
+                last = e
+                if not is_network_not_found(str(e)):
+                    # A wrong password, a device that went away, anything
+                    # else: retrying cannot change it, and each retry is
+                    # another stretch of dark panel.
+                    raise
+                if attempt + 1 < CONNECT_ATTEMPTS:
+                    log.info("%s -- rescanning and trying again", e)
+
+        if last is not None:
+            raise last
 
     def forget_all(self) -> None:
         out = self._run(["-t", "-f", "UUID,TYPE", "connection", "show"])
@@ -594,8 +800,12 @@ def apply_boot_file(path: Path | None = None, nm: "NetworkManager | None" = None
     # Order matters, and the first three steps are all the radio. The
     # regulatory domain is what makes transmitting legal (and, on this image,
     # possible at all); radio_on() covers whichever branch raspi-config took;
-    # and the interface then needs a moment to become usable before a connect
-    # can go through it.
+    # and the interface then needs a moment to become usable.
+    #
+    # The fourth step is join(), not apply(). A usable interface is not the
+    # same as a scanned one, and on both v0.1.2 boots the connect went out
+    # within a second of wlan0 becoming usable and came straight back with
+    # "No network with SSID ... found" -- see join() and the constants above.
     country = settings.country
     if country:
         manager.set_country(country)
@@ -612,7 +822,7 @@ def apply_boot_file(path: Path | None = None, nm: "NetworkManager | None" = None
         log.info("no country= line, but this panel is already set to %s; using that", country)
     manager.radio_on()
     manager.wait_for_wifi()
-    manager.apply(settings)
+    manager.join(settings)
     stamp = now() if now is not None else datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     try:
         consume(target, stamp, parse_owner(text), country)

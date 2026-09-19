@@ -206,7 +206,8 @@ def test_applying_wifi_keeps_the_owner_line(tmp_path):
         def set_country(self, code): self.country = code
         def radio_on(self): self.radio_on_called = True
         def wait_for_wifi(self): return True
-        def apply(self, settings): self.applied = settings
+        def join(self, settings): self.applied = settings   # the boot path's entry point
+        def apply(self, settings, timeout=None): self.applied = settings
 
     assert netcfg.apply_boot_file(path, nm=FakeNM(), now=lambda: "2026-09-13 10:00 UTC") is True
     left = path.read_text()
@@ -243,7 +244,8 @@ def test_a_card_with_only_the_old_filename_still_gets_its_wifi_applied(tmp_path,
         def set_country(self, code): self.country = code
         def radio_on(self): self.radio_on_called = True
         def wait_for_wifi(self): return True
-        def apply(self, settings): self.applied = settings
+        def join(self, settings): self.applied = settings   # the boot path's entry point
+        def apply(self, settings, timeout=None): self.applied = settings
 
     nm = FakeNM()
     assert netcfg.apply_boot_file(nm=nm, now=lambda: "2026-09-13 10:00 UTC") is True
@@ -547,7 +549,6 @@ def test_it_waits_for_the_wifi_device_to_come_out_of_unavailable(tmp_path, monke
     path = tmp_path / "scoreboard-setup.txt"
     path.write_text("ssid=HomeNet\npsk=supersecret\ncountry=US\n")
     monkeypatch.setattr(netcfg, "set_country", lambda code, run=None: None)
-    monkeypatch.setattr(netcfg.time, "sleep", lambda s: None)
     states = ["wlan0:wifi:unavailable", "wlan0:wifi:unavailable", "wlan0:wifi:disconnected"]
 
     class Settling(FakeNmcli):
@@ -565,7 +566,6 @@ def test_waiting_for_the_radio_gives_up_rather_than_hanging_the_boot(monkeypatch
     # scoreboard-netcfg.service is Before=scoreboard.service, so every second
     # spent here is a second the panel shows nothing. An interface that never
     # becomes available must not hold the boot open indefinitely.
-    monkeypatch.setattr(netcfg.time, "sleep", lambda s: None)
     nm = NetworkManager(run=lambda args, timeout=None: "wlan0:wifi:unavailable\n")
     assert nm.wait_for_wifi() is False
 
@@ -585,12 +585,349 @@ def test_waiting_for_the_radio_survives_nmcli_failing(monkeypatch):
     # A query that errors partway through the settle window is not a reason to
     # abandon the connect -- it is a reason to try the connect anyway and let
     # its own error be the one that gets reported.
-    monkeypatch.setattr(netcfg.time, "sleep", lambda s: None)
 
     def boom(args, timeout=None):
         raise NetworkError("nmcli failed")
 
     assert NetworkManager(run=boom).wait_for_wifi() is False
+
+
+# --------------------------------------------------------------------------
+# The connect races the scan (v0.1.2, two boots on a Pi 4, 2026-09-18)
+#
+# Both boots failed identically and immediately. First boot: netcfg started at
+# 14.083 s, NetworkManager reported "Wi-Fi now enabled by radio killswitch" at
+# 14.584, wlan0 went "unavailable -> disconnected (reason 'supplicant-
+# available')" at 14.736, and the connect failed at 14.815 --
+#
+#     ERROR:scoreboard.netcfg:could not apply /boot/firmware/scoreboard-setup.txt:
+#     Error: No network with SSID 'ExampleNet' found.
+#
+# -- 79 ms after the device became usable. The second boot had the radio on
+# from the start (cfg80211.ieee80211_regdom=US was in the kernel command line
+# by then) and still failed 679 ms after the service began.
+#
+# wait_for_wifi() had done its job both times: it waits for the DEVICE to
+# leave "unavailable", which had happened. What it does not wait for is the
+# NETWORK to be seen, and `nmcli device wifi connect <ssid>` fails at once
+# when the SSID is not in NetworkManager's AP list -- nmcli's own check,
+# before any activation (src/nmcli/devices.c:3927 at 1.52.1, "Error: No
+# network with SSID '%s' found."). Nothing retried, so the setup file was
+# left in place and the panel never joined.
+#
+# What the journals bound: the gap between wlan0 reaching "disconnected" and
+# NetworkManager logging "manager: startup complete" was 5.82 s on the first
+# boot and 5.81 s on the second. NetworkManager logs no scan line at info
+# level, so that is the only marker available; treating it as the first scan's
+# results landing is inference, and it is used as a floor for the budget
+# below, not as a measurement.
+# --------------------------------------------------------------------------
+
+
+class FakeClock:
+    """A monotonic clock that only moves when something sleeps on it.
+
+    Installed for every test in this file, because netcfg's waits are now
+    wall-clock deadlines rather than counted attempts: a no-op sleep against
+    a real clock would spin for the whole budget instead of skipping it.
+    """
+
+    def __init__(self) -> None:
+        self.t = 1000.0
+
+    def __call__(self) -> float:
+        return self.t
+
+    def sleep(self, seconds) -> None:
+        self.t += seconds
+
+
+@pytest.fixture(autouse=True)
+def clock(monkeypatch):
+    c = FakeClock()
+    monkeypatch.setattr(netcfg.time, "sleep", c.sleep)
+    monkeypatch.setattr(netcfg.time, "monotonic", c)
+    return c
+
+
+class Air(FakeNmcli):
+    """nmcli with an airwave: which SSIDs a `device wifi list` can see, and
+    what each `device wifi connect` does."""
+
+    def __init__(self, visible=(), appears_after=None, connect_errors=(), clock=None):
+        super().__init__()
+        self.visible = list(visible)
+        self.appears_after = appears_after  # (ssid, number of list calls first)
+        self.connect_errors = list(connect_errors)
+        self.clock = clock
+        self.lists = 0
+        self.rescans = 0
+        self.connects = 0
+        self.connect_timeouts = []
+
+    def __call__(self, args, timeout=None):
+        self.calls.append(list(args))
+        if args[:3] == ["device", "wifi", "rescan"]:
+            self.rescans += 1
+            return ""
+        if "list" in args:
+            self.lists += 1
+            names = list(self.visible)
+            if self.appears_after is not None:
+                ssid, after = self.appears_after
+                if self.lists > after:
+                    names.append(ssid)
+            return "".join(n.replace("\\", r"\\").replace(":", r"\:") + "\n" for n in names)
+        if args[:3] == ["device", "wifi", "connect"]:
+            self.connects += 1
+            self.connect_timeouts.append(timeout)
+            if self.connect_errors:
+                error = self.connect_errors.pop(0)
+                if error is not None:
+                    if self.clock is not None:
+                        self.clock.sleep(0.1)  # nmcli's own not-found check is instant
+                    raise NetworkError(error)
+            return ""
+        return ""
+
+
+NOT_FOUND = "Error: No network with SSID 'ExampleNet' found."
+BAD_PASSWORD = "Error: Connection activation failed: Secrets were required, but not provided."
+HOME = WifiSettings(ssid="ExampleNet", psk="supersecret", country="US")
+
+
+def test_the_network_is_scanned_for_before_the_connect_is_attempted(clock):
+    # The defect itself. wait_for_wifi() returning True says the device is
+    # usable; it says nothing about whether the network has been seen yet.
+    air = Air(appears_after=("ExampleNet", 2), clock=clock)
+    NetworkManager(run=air).join(HOME, clock=clock)
+    assert air.rescans >= 1, "no rescan was requested"
+    assert air.connects == 1
+    connect_at = next(i for i, c in enumerate(air.calls) if c[:3] == ["device", "wifi", "connect"])
+    lists_before = [i for i, c in enumerate(air.calls) if "list" in c and i < connect_at]
+    assert len(lists_before) >= 3, "the connect did not wait for the SSID to turn up"
+
+
+def test_a_network_already_in_the_list_is_joined_without_waiting(clock):
+    air = Air(visible=["ExampleNet", "Neighbour"], clock=clock)
+    started = clock()
+    NetworkManager(run=air).join(HOME, clock=clock)
+    assert air.connects == 1
+    assert clock() == started, "waited for a network that was already visible"
+
+
+def test_a_rescan_that_nmcli_refuses_is_not_fatal(clock):
+    # `nmcli device wifi rescan` errors when a scan is already running or was
+    # very recent -- NetworkManager answers NM_DEVICE_ERROR_NOT_ALLOWED
+    # ("Scanning not allowed while unavailable" and its siblings,
+    # src/core/devices/wifi/nm-device-wifi.c). It is a hint, not a step.
+    class Refuses(Air):
+        def __call__(self, args, timeout=None):
+            if args[:3] == ["device", "wifi", "rescan"]:
+                self.rescans += 1
+                raise NetworkError("Error: Scanning not allowed immediately following previous scan.")
+            return super().__call__(args, timeout=timeout)
+
+    air = Refuses(visible=["ExampleNet"], clock=clock)
+    NetworkManager(run=air).join(HOME, clock=clock)
+    assert air.rescans >= 1 and air.connects == 1
+
+
+def test_a_connect_that_cannot_find_the_network_is_rescanned_and_retried(clock):
+    air = Air(visible=["ExampleNet"], connect_errors=[NOT_FOUND, None], clock=clock)
+    NetworkManager(run=air).join(HOME, clock=clock)
+    assert air.connects == 2
+    assert air.rescans >= 2, "the retry did not rescan first"
+
+
+def test_a_wrong_password_is_not_retried(clock):
+    # NetworkManager reports secrets failures differently from a missing
+    # network: nmcli prints "Error: Connection activation failed: <reason>."
+    # (src/nmcli/devices.c:2156) with the reason text from
+    # src/libnmc-base/nm-client-utils.c -- "Secrets were required, but not
+    # provided" for NM_DEVICE_STATE_REASON_NO_SECRETS, or one of the "802.1X
+    # supplicant ..." strings. Retrying a bad password joins nothing and
+    # costs the owner another 45 seconds of dark panel.
+    air = Air(visible=["ExampleNet"], connect_errors=[BAD_PASSWORD, None], clock=clock)
+    with pytest.raises(NetworkError, match="Secrets"):
+        NetworkManager(run=air).join(HOME, clock=clock)
+    assert air.connects == 1, "a wrong password was retried"
+
+
+@pytest.mark.parametrize("message", [
+    "Error: Connection activation failed: Secrets were required, but not provided.",
+    "Error: Connection activation failed: 802.1X supplicant took too long to authenticate.",
+    "Error: Connection activation failed: 802.1X supplicant failed.",
+    "Error: Connection activation failed: No valid secrets.",
+])
+def test_every_secrets_failure_nmcli_prints_stops_the_retries(message, clock):
+    air = Air(visible=["ExampleNet"], connect_errors=[message, None], clock=clock)
+    with pytest.raises(NetworkError):
+        NetworkManager(run=air).join(HOME, clock=clock)
+    assert air.connects == 1, f"{message!r} was retried"
+
+
+def test_the_retries_are_bounded(clock):
+    air = Air(visible=["ExampleNet"], connect_errors=[NOT_FOUND] * 20, clock=clock)
+    with pytest.raises(NetworkError, match="No network with SSID"):
+        NetworkManager(run=air).join(HOME, clock=clock)
+    assert air.connects == netcfg.CONNECT_ATTEMPTS
+
+
+def test_a_network_that_never_appears_is_still_attempted_so_nmcli_reports_it(clock):
+    # The wait is a courtesy, not a gate. An SSID that never turns up may be
+    # hidden, mistyped, or simply out of range -- and nmcli's own message says
+    # which far better than "we gave up waiting" would.
+    air = Air(visible=["Neighbour"], connect_errors=[NOT_FOUND] * 20, clock=clock)
+    with pytest.raises(NetworkError, match="No network with SSID"):
+        NetworkManager(run=air).join(HOME, clock=clock)
+    assert air.connects >= 1, "gave up without letting nmcli say why"
+
+
+def test_a_hidden_network_is_not_waited_for(clock):
+    # A hidden SSID never appears in `device wifi list` -- it advertises no
+    # name, and both visible_ssids() and scan() drop unnamed rows. Waiting
+    # fifteen seconds for something that cannot arrive is fifteen seconds of
+    # dark panel. nmcli's `hidden yes` does its own directed probe for the
+    # name (src/nmcli/devices.c:3878) and reports its own error.
+    hidden = WifiSettings(ssid="ExampleNet", psk="supersecret", country="US", hidden=True)
+    air = Air(visible=["Neighbour"], clock=clock)
+    started = clock()
+    NetworkManager(run=air).join(hidden, clock=clock)
+    assert clock() == started, "waited for a hidden network to appear by name"
+    assert air.connects == 1
+    assert air.calls[-1][-2:] == ["hidden", "yes"]
+
+
+def test_the_ssid_comparison_survives_nmclis_terse_escaping(clock):
+    # An SSID may contain a colon, and nmcli -t escapes it. A naive `in`
+    # against the raw line would miss the network and wait out the budget.
+    ssid = "Cafe:Bar"
+    air = Air(visible=[ssid], clock=clock)
+    started = clock()
+    NetworkManager(run=air).join(
+        WifiSettings(ssid=ssid, psk="supersecret", country="US"), clock=clock)
+    assert clock() == started, "the escaped SSID was not recognised"
+    assert air.connects == 1
+
+
+def test_a_non_ascii_ssid_is_recognised_in_the_scan_list(clock):
+    # The runners force C.UTF-8 precisely so this round-trips; this is the
+    # wait loop's half of it.
+    ssid = "Café Münster"
+    air = Air(visible=[ssid], clock=clock)
+    started = clock()
+    NetworkManager(run=air).join(
+        WifiSettings(ssid=ssid, psk="supersecret", country="US"), clock=clock)
+    assert clock() == started
+    assert air.connects == 1
+
+
+def test_the_scan_wait_gives_up_rather_than_holding_the_boot_open(clock):
+    air = Air(visible=["Neighbour"], clock=clock)
+    started = clock()
+    assert NetworkManager(run=air).wait_for_ssid("ExampleNet", clock=clock) is False
+    assert clock() - started <= netcfg.SCAN_BUDGET_S
+
+
+def test_a_failing_scan_query_does_not_abandon_the_connect(clock):
+    # Same rule as wait_for_wifi: a query that errors is a reason to try the
+    # connect and let its error be the one reported.
+    def boom(args, timeout=None):
+        raise NetworkError("nmcli failed")
+
+    assert NetworkManager(run=boom).wait_for_ssid("ExampleNet", clock=clock) is False
+
+
+def test_the_scan_waits_share_one_budget_across_the_retries(clock):
+    # Three attempts must not mean three full waits: the unit is
+    # Before=scoreboard.service and every second here is a dark panel.
+    air = Air(visible=["Neighbour"], connect_errors=[NOT_FOUND] * 20, clock=clock)
+    started = clock()
+    with pytest.raises(NetworkError):
+        NetworkManager(run=air).join(HOME, clock=clock)
+    waited = clock() - started
+    assert waited <= netcfg.SCAN_BUDGET_S + netcfg.CONNECT_ATTEMPTS, \
+        f"the retries waited {waited}s, more than the {netcfg.SCAN_BUDGET_S}s budget"
+
+
+def test_the_first_connect_gets_a_full_association_plus_dhcp(clock):
+    # The budget must not clip the attempt that matters. Killing the nmcli
+    # client early leaves NetworkManager still activating, so the panel would
+    # report a timeout for a connect that went on to succeed.
+    air = Air(visible=["ExampleNet"], clock=clock)
+    NetworkManager(run=air).join(HOME, clock=clock)
+    assert air.connect_timeouts[0] == netcfg.CONNECT_TIMEOUT_S
+
+
+def test_the_connects_share_one_budget_across_the_retries(clock):
+    # Three attempts must not mean three full connects. The budget is time
+    # SPENT, not time granted: a retry after an instant "not found" costs
+    # almost none of it, while an attempt that really does run its timeout
+    # leaves nothing for another -- which is right, because a connect that ran
+    # for 45 s was associating, not failing to find the network.
+    class Slow(Air):
+        def __call__(self, args, timeout=None):
+            if args[:3] == ["device", "wifi", "connect"]:
+                self.clock.sleep(timeout)  # the pathological case: nmcli hangs
+            return super().__call__(args, timeout=timeout)
+
+    air = Slow(visible=["ExampleNet"], connect_errors=[NOT_FOUND] * 20, clock=clock)
+    started = clock()
+    with pytest.raises(NetworkError):
+        NetworkManager(run=air).join(HOME, clock=clock)
+    # The clock only moves when something sleeps on it, and the network is
+    # visible from the first look, so every second here was a connect.
+    spent = clock() - started
+    assert spent <= netcfg.CONNECT_BUDGET_S + netcfg.CONNECT_ATTEMPTS, \
+        f"the connects ran {spent}s between them, past the {netcfg.CONNECT_BUDGET_S}s budget"
+
+
+def test_the_boot_path_joins_rather_than_connecting_blind(tmp_path, clock):
+    # apply_boot_file must go through join(), not a bare connect: this is the
+    # one call site that runs at boot, into a radio that came up moments ago.
+    path = tmp_path / "scoreboard-setup.txt"
+    path.write_text("ssid=ExampleNet\npsk=supersecret\ncountry=US\n")
+    air = Air(appears_after=("ExampleNet", 1), clock=clock)
+    nm = NetworkManager(run=air, run_raspi_config=NO_RASPI_CONFIG)
+    assert apply_boot_file(path, nm=nm, now=lambda: "NOW") is True
+    assert air.rescans >= 1, "the boot path connected without asking for a scan"
+    assert air.connects == 1
+
+
+def test_the_whole_first_boot_budget_fits_what_the_unit_and_the_site_promise():
+    # scoreboard-netcfg.service is Type=oneshot, Before=scoreboard.service and
+    # TimeoutStartSec=120; the site tells owners the screen can stay dark "up
+    # to a minute and a half". Both have to hold, and the arithmetic lives
+    # here so changing a constant fails a test rather than a panel.
+    #
+    # The parts that actually spend time:
+    #   raspi-config setting the regulatory domain   QUERY_TIMEOUT_S   10 s
+    #   waiting for the Wi-Fi device to be usable    6 x 2 s           12 s
+    #   waiting for the network to be scanned        SCAN_BUDGET_S     20 s
+    #   every connect attempt, together              CONNECT_BUDGET_S  45 s
+    #
+    # The cheap nmcli queries each carry their own QUERY_TIMEOUT_S guard
+    # against a hung binary. Those are not part of the intended budget, and
+    # they are why TimeoutStartSec is 120 rather than 90.
+    worst_case = (netcfg.QUERY_TIMEOUT_S
+                  + netcfg.WIFI_READY_TRIES * netcfg.WIFI_READY_WAIT_S
+                  + netcfg.SCAN_BUDGET_S
+                  + netcfg.CONNECT_BUDGET_S)
+    assert worst_case <= 90, \
+        f"a first boot can now be dark for {worst_case}s; the site promises 90"
+    assert netcfg.CONNECT_BUDGET_S >= netcfg.CONNECT_TIMEOUT_S, \
+        "the first connect cannot get a full association plus DHCP"
+
+
+def test_the_scan_budget_covers_what_the_panel_actually_took():
+    # From the journals: wlan0 reached "disconnected" 5.82 s and 5.81 s before
+    # NetworkManager logged "manager: startup complete" on the two boots. That
+    # marker is the only bound the journal offers on the first scan, so the
+    # budget is set well clear of it rather than next to it.
+    observed = 5.82
+    assert netcfg.SCAN_BUDGET_S >= 3 * observed, \
+        f"SCAN_BUDGET_S={netcfg.SCAN_BUDGET_S}s leaves no room over the {observed}s observed"
 
 
 def test_a_missing_boot_file_is_not_worth_a_warning(tmp_path, caplog):

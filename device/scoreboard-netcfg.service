@@ -21,12 +21,30 @@ ExecStart=/opt/scoreboard/.venv/bin/python -m scoreboard.netcfg
 # even when the file is wrong so a typo cannot stop the panel starting.
 #
 # Stated rather than inherited, because this unit is Before=scoreboard.service
-# and so every second it takes is a second the panel shows nothing. The worst
-# case is raspi-config setting the regulatory domain (10 s), waiting for the
-# radio to become usable afterwards (20 s), and one connect (45 s). 75 s is
-# close enough to systemd's 90 s default that inheriting it would mean the
-# first slow connect gets killed part-way through, leaving the setup file
-# looking as though it had been ignored.
+# and so every second it takes is a second the panel shows nothing.
+#
+# The worst case, revised 2026-09-19 after v0.1.2's first light -- the step
+# that waits for the network to be scanned is new, and the wait for the device
+# shrank because the journals showed it taking 152 ms and 266 ms rather than
+# anything near its old budget (device/scoreboard/netcfg.py has the evidence):
+#
+#   raspi-config setting the regulatory domain  QUERY_TIMEOUT_S    10 s
+#   waiting for the Wi-Fi device to be usable   6 x 2 s            12 s
+#   waiting for the network to be scanned       SCAN_BUDGET_S      20 s
+#   every connect attempt, together             CONNECT_BUDGET_S   45 s
+#                                                                  ----
+#                                                                  87 s
+#
+# It was 75 s before. Both stay inside the "up to a minute and a half" that
+# the download page and the setup steps promise an owner watching a dark
+# panel, and device/tests/test_netcfg.py asserts that, so a constant which
+# breaks the promise fails a test rather than a panel.
+#
+# 120 s rather than 90: each cheap nmcli query carries its own QUERY_TIMEOUT_S
+# guard against a hung binary, which is not part of the 87 s but can add to
+# it. And 87 s is close enough to systemd's 90 s default that inheriting it
+# would mean the first slow connect gets killed part-way through, leaving the
+# setup file looking as though it had been ignored.
 TimeoutStartSec=120
 
 [Install]

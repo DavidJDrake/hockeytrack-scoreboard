@@ -118,20 +118,35 @@ def test_systemd_seconds_reads_the_spans_this_file_accepts():
 def test_the_network_unit_states_its_own_start_budget():
     # It is Before=scoreboard.service, so everything it does is time the panel
     # spends showing nothing. Its worst case is raspi-config (10 s), the settle
-    # wait for the radio (20 s) and one connect (45 s) = 75 s -- close enough
-    # to systemd's 90 s default that inheriting it silently would mean the
-    # first slow connect gets killed part-way through, leaving the setup file
-    # looking as though it had been ignored.
+    # wait for the radio, the wait for the network to be scanned, and every
+    # connect attempt together -- close enough to systemd's 90 s default that
+    # inheriting it silently would mean the first slow connect gets killed
+    # part-way through, leaving the setup file looking as though it had been
+    # ignored.
     #
-    # The bound is the reasoning, not a round number: it must exceed the 75 s
-    # worst case with room to spare, and stay small enough that a panel which
-    # cannot connect still reaches the screen in reasonable time.
+    # Read from netcfg's own constants rather than repeated here, so the unit
+    # and the code cannot drift: the scan wait was added on 2026-09-19 after
+    # v0.1.2's connect raced the first scan on both boots, which changed this
+    # arithmetic from 75 s to 87 s.
+    #
+    # The bound is the reasoning, not a round number: it must exceed the worst
+    # case with room to spare, and stay small enough that a panel which cannot
+    # connect still reaches the screen in reasonable time.
+    from scoreboard import netcfg
+
     fields = unit(NETCFG_UNIT.read_text())
     assert "TimeoutStartSec" in fields, "the unit inherits DefaultTimeoutStartSec without saying so"
     budget = systemd_seconds(fields["TimeoutStartSec"])
-    worst_case = 10 + 20 + 45
+    worst_case = (netcfg.QUERY_TIMEOUT_S
+                  + netcfg.WIFI_READY_TRIES * netcfg.WIFI_READY_WAIT_S
+                  + netcfg.SCAN_BUDGET_S
+                  + netcfg.CONNECT_BUDGET_S)
     assert budget > worst_case, f"TimeoutStartSec={budget}s cannot cover the {worst_case}s worst case"
     assert budget <= 300, f"TimeoutStartSec={budget}s leaves the panel dark too long when Wi-Fi fails"
+    # And the number the unit's own comment states, so the comment is a
+    # tripwire rather than a decoration.
+    assert f"{worst_case} s" in NETCFG_UNIT.read_text(), \
+        f"the unit's comment no longer states the {worst_case}s worst case it adds up to"
 
 
 def test_appliance_unit_runs_as_its_own_account(checkout):
