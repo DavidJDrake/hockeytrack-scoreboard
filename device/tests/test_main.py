@@ -12,10 +12,11 @@ import pytest
 from scoreboard import main as main_module
 from scoreboard import screens
 from scoreboard.display import EX_CONFIG
-from scoreboard.main import (COUNTDOWN, FINAL, GAME, GRACE_S, IGNORE, MESSAGE,
-                             NO_GAME, OFF, REARM, SELECT, STALE_AFTER_S,
-                             Display, Sleep, asleep, carry_out, changed_at,
-                             clock_synced, config_action, final_seen_at,
+from scoreboard.main import (COUNTDOWN, FINAL, GAME, GRACE_S, IGNORE,
+                             LINK_HELP_AFTER_S, MESSAGE, NO_GAME, OFF, REARM,
+                             SELECT, STALE_AFTER_S, Display, Sleep, asleep,
+                             carry_out, changed_at, clock_synced,
+                             config_action, final_seen_at, needs_link_help,
                              presentation, shift_at)
 from scoreboard.model import GameState
 from scoreboard.netcfg import NetworkError, WifiSettings
@@ -115,16 +116,16 @@ def test_a_selected_game_shows_nothing_until_its_countdown_window_opens():
     # half, which blanked a countdown that was already running. Now the
     # panel is dark *before* the window instead, and lit through it.
     game = pregame_state()
-    assert shown(now_utc=before_puck_drop(6), state=game).show == OFF
-    assert shown(now_utc=before_puck_drop(2.1), state=game).show == OFF
-    assert shown(now_utc=before_puck_drop(2), state=game).show == COUNTDOWN
+    assert shown(now_utc=before_puck_drop(13), state=game).show == OFF
+    assert shown(now_utc=before_puck_drop(12.1), state=game).show == OFF
+    assert shown(now_utc=before_puck_drop(12), state=game).show == COUNTDOWN
 
 
 def test_the_countdown_window_opens_by_itself():
     # The way back from that OFF: nothing happens except time passing.
     game = pregame_state()
-    assert shown(now=0.0, now_utc=before_puck_drop(6), state=game).show == OFF
-    assert shown(now=4 * 3600.0, now_utc=before_puck_drop(1), state=game).show == COUNTDOWN
+    assert shown(now=0.0, now_utc=before_puck_drop(13), state=game).show == OFF
+    assert shown(now=4 * 3600.0, now_utc=before_puck_drop(11), state=game).show == COUNTDOWN
 
 
 def test_a_countdown_never_falls_back_once_it_is_running():
@@ -168,13 +169,28 @@ def test_a_live_document_lights_the_panel_whenever_it_turns_up():
         assert shown(now=50 * 3600.0, now_utc=PUCK_DROP + late, state=live_state()).show == GAME
 
 
-def test_any_other_update_also_brings_the_panel_back():
-    # The second way back: a state arriving at all marks the change, and
-    # the panel shows what it says.
-    now, stale = 50 * 3600.0, PUCK_DROP + timedelta(days=3)
-    assert shown(now=now, now_utc=stale, state=pregame_state()).show == OFF
-    assert shown(now=now, now_utc=stale, state=final_state(), final_seen=now,
-                 last_change=now).show == FINAL
+def test_a_rescheduled_game_puts_itself_back_on_the_panel():
+    # I-2. The honest second way back, and it needs nobody: the game is
+    # rescheduled, the reducer publishes a PRE document with a later start,
+    # and the window is recomputed from `start` on the very next pass. No
+    # state-name change, no owner action, no last_change involved.
+    #
+    # What is NOT a way back -- and the earlier version of this test said it
+    # was -- is "any state update". changed_at moves only when the state
+    # NAME changes, so a reducer republishing the same stale PRE every
+    # minute leaves the panel dark, which is exactly what the bound is for.
+    now, tonight = 50 * 3600.0, PUCK_DROP + timedelta(days=3)
+    assert shown(now=now, now_utc=tonight, state=pregame_state()).show == OFF
+    assert shown(now=now, now_utc=tonight, state=pregame_state()).show == OFF   # again: still dark
+    rescheduled = pregame_state(start="2026-10-05T06:00:00Z")   # ~6 h after `tonight`
+    assert shown(now=now, now_utc=tonight, state=rescheduled).show == COUNTDOWN
+
+
+def test_a_state_name_change_is_the_other_way_back():
+    # The game turns up live, or final, and the loop records the change.
+    now, tonight = 50 * 3600.0, PUCK_DROP + timedelta(days=3)
+    assert shown(now=now, now_utc=tonight, state=pregame_state()).show == OFF
+    assert shown(now=now, now_utc=tonight, state=live_state()).show == GAME
 
 
 def test_a_panel_booting_onto_last_nights_countdown_does_not_keep_showing_it():
@@ -204,12 +220,16 @@ def test_an_unrecognized_state_is_shown_and_then_bounded():
     assert shown(now=arrived + STALE_AFTER_S, state=odd_state(), last_change=arrived).show == OFF
 
 
-def test_an_unrecognized_state_comes_back_on_the_next_change():
-    # The same two ways back as everything else: another state arrives, or
-    # the owner chooses a game. Both write last_change.
+def test_an_unrecognized_state_comes_back_only_on_a_real_change():
+    # I-4. An unrecognized state has no window of its own to re-enter, so
+    # the only ways back are a state-NAME change and the owner's re-send --
+    # both of which write last_change, in the loop, on real documents
+    # (test_a_state_that_changes_restarts_the_grace_in_the_real_loop and
+    # test_re_choosing_the_same_game_restarts_the_hold_in_the_real_loop).
+    # A republished identical document is not one of them: changed_at does
+    # not move for a repeat, and if it did, nothing would ever bound this.
     late = 10 * 3600.0
     assert shown(now=late, state=odd_state(), last_change=0.0).show == OFF
-    assert shown(now=late, state=odd_state(), last_change=late).show == GAME
     assert shown(now=late, state=live_state(), last_change=0.0).show == GAME
 
 
@@ -227,20 +247,53 @@ def test_a_pregame_document_with_nothing_to_count_down_to_is_off():
     assert shown(now_utc=before_puck_drop(1), state=pregame_state(start=None)).show == OFF
 
 
+@pytest.mark.parametrize("start", ["not a timestamp", None])
+def test_a_game_this_panel_cannot_show_still_answers_the_owner_for_the_grace(start):
+    # Lit, because somebody has just chosen this game and is looking up at
+    # the panel; the no-game screen rather than a countdown, because a game
+    # whose start cannot be read is one this panel has nothing to say about.
+    # Off once the grace runs out, like anything else with nothing due.
+    bad = pregame_state(start=start)
+    assert shown(now=0.0, now_utc=before_puck_drop(1), state=bad, last_change=0.0).show == NO_GAME
+    assert shown(now=GRACE_S, now_utc=before_puck_drop(1), state=bad, last_change=0.0).show == OFF
+
+
 @pytest.mark.parametrize("start", ["not a timestamp", "2026-10-01T23:30:00", "23:30"])
-def test_an_unreadable_start_time_switches_off_rather_than_raising(start):
-    # render.draw parses this same string every frame. Deciding not to draw
-    # it is also what keeps the render loop from meeting the exception. A
-    # timestamp with no zone is refused too: it names no instant, and
+def test_an_unreadable_start_time_is_never_routed_to_the_countdown(start):
+    # C-1, the decision half. render.draw parses this same string every
+    # frame, and raised ValueError out of the render loop for it. There is
+    # nothing to count down to, so this is not a countdown -- inside the
+    # grace period as much as outside it, which is where the first version
+    # of this test was wrong: it checked only outside (last_change=LONG_AGO)
+    # and the grace branch was the one that bypassed the check entirely.
+    bad = pregame_state(start=start)
+    assert shown(now=0.0, now_utc=before_puck_drop(1), state=bad, last_change=0.0).show != COUNTDOWN
+    # A timestamp with no zone is refused too: it names no instant, and
     # guessing one would be guessing which continent the panel is on.
     assert shown(now_utc=before_puck_drop(1), state=pregame_state(start=start)).show == OFF
 
 
-def test_the_countdown_window_is_not_applied_before_the_clock_is_set():
-    # now_utc is None until NTP has been. Deciding a window from a clock
-    # that may be hours out would switch the panel off at the wrong moment,
-    # so the window simply is not in effect yet: fail lit, then settle.
-    assert shown(now_utc=None, state=pregame_state()).show == COUNTDOWN
+def test_a_countdown_on_an_unsynchronized_clock_is_lit_but_bounded():
+    # I-6. Until NTP has been, the panel cannot say where in the window it
+    # is, and every digit it could print would come from a clock it knows is
+    # wrong (render.draw is told, and prints dashes). It stays lit, because
+    # a panel that has just booted should show what it has -- but not for
+    # ever: "not synchronized" is a permanent condition on a network that
+    # blocks NTP while MQTT still works, and an unbounded frozen countdown
+    # is the fault this whole branch exists to prevent.
+    game = pregame_state()
+    assert shown(now=0.0, now_utc=None, state=game, last_change=0.0).show == COUNTDOWN
+    assert shown(now=STALE_AFTER_S - 1, now_utc=None, state=game, last_change=0.0).show == COUNTDOWN
+    assert shown(now=STALE_AFTER_S, now_utc=None, state=game, last_change=0.0).show == OFF
+
+
+def test_an_unsynchronized_countdown_comes_back_on_the_next_change():
+    # The way back, with nobody at the panel: the game goes live, the state
+    # changes, or the owner re-sends -- all of which write last_change.
+    stale = STALE_AFTER_S + 3600.0
+    assert shown(now=stale, now_utc=None, state=pregame_state(), last_change=0.0).show == OFF
+    assert shown(now=stale, now_utc=None, state=pregame_state(), last_change=stale).show == COUNTDOWN
+    assert shown(now=stale, now_utc=None, state=live_state(), last_change=0.0).show == GAME
 
 
 # --------------------------------------------------------------------------
@@ -335,7 +388,7 @@ def test_booting_lights_the_panel_whether_or_not_anything_is_due():
     # main() sets last_change at startup, so a panel that boots with nothing
     # to show still demonstrates itself for five minutes before going dark.
     assert shown(now=1.0, last_change=0.0).show == NO_GAME
-    assert shown(now=1.0, now_utc=before_puck_drop(9), state=pregame_state(),
+    assert shown(now=1.0, now_utc=before_puck_drop(20), state=pregame_state(),
                  last_change=0.0).show == COUNTDOWN
 
 
@@ -479,7 +532,8 @@ def test_sleep_hours_do_not_apply_until_the_clock_has_been_set():
     # has just booted with a wrong clock must not switch itself off at what
     # it thinks is midnight.
     assert not asleep(None, NIGHT)
-    assert shown(now_utc=None, state=pregame_state(), display=Display(sleep=NIGHT)).show == COUNTDOWN
+    assert shown(now=0.0, now_utc=None, state=pregame_state(), last_change=0.0,
+                 display=Display(sleep=NIGHT)).show == COUNTDOWN
 
 
 @pytest.mark.parametrize("sleep", [
@@ -499,12 +553,12 @@ def test_settings_that_cannot_be_read_are_ignored_not_fatal(sleep):
 
 def test_an_unreadable_setting_is_logged_once_not_every_frame():
     # At 10 Hz, a log line per frame fills the journal in an afternoon.
-    main_module._bad_sleep.clear()
+    main_module._complained.clear()
     sleep = Sleep("23:00", "07:00", "Mars/Olympus_Mons")
     instant = datetime(2026, 10, 2, 8, 0, tzinfo=timezone.utc)
     for _ in range(50):
         asleep(instant, sleep)
-    assert main_module._bad_sleep == {"Mars/Olympus_Mons"}
+    assert main_module._complained == {"Mars/Olympus_Mons"}
 
 
 def test_the_clock_is_read_as_synchronized_from_systemds_own_flag(tmp_path):
@@ -531,7 +585,11 @@ def test_a_screen_asking_the_owner_for_something_is_never_off(screen):
     result = shown(now=48 * 3600.0, now_utc=at_three_am, screen=screen,
                    display=night_display)
     assert result.show == MESSAGE
-    assert result.shift in main_module.SHIFT_PATTERN
+    # ...and shifted like everything else that holds still, since these are
+    # the screens that hold still longest. (in SHIFT_PATTERN would pass for
+    # any offset the pattern contains, including the one for a different
+    # time; this pins the offset to the clock that was passed in.)
+    assert result.shift == shift_at(48 * 3600.0)
 
 
 # --------------------------------------------------------------------------
@@ -539,22 +597,76 @@ def test_a_screen_asking_the_owner_for_something_is_never_off(screen):
 # --------------------------------------------------------------------------
 
 
+# The settings are swept too, not just their defaults: a zero lead or a zero
+# hold is a perfectly orderable setting, and "off the moment it is chosen" and
+# "on for two days" are the two ends somebody will eventually ask for.
+SETTINGS_SWEPT = (
+    DEFAULTS,
+    Display(sleep=NIGHT),
+    Display(countdown_lead_s=0),
+    Display(countdown_lead_s=48 * 3600),
+    Display(final_hold_s=0),
+    Display(final_hold_s=48 * 3600),
+)
+
+
 def every_condition():
     """A sweep of the panel's conditions, to be checked all at once."""
     for screen in (screens.SCOREBOARD, screens.OFFLINE, screens.WAITING,
-                   screens.UNREGISTERED, screens.ENROLL_PROBLEM, screens.SETTINGS):
+                   screens.UNREGISTERED, screens.ENROLL_PROBLEM, screens.SETTINGS,
+                   screens.NO_SERVICE):
         for state in (None, live_state(), pregame_state(), pregame_state(start=None),
+                      pregame_state(start="not a timestamp"),
                       final_state(), off_state(), odd_state()):
-            for now_utc in (None, before_puck_drop(6), before_puck_drop(1),
-                            PUCK_DROP + timedelta(days=3),
+            for now_utc in (None, before_puck_drop(20), before_puck_drop(6),
+                            before_puck_drop(1), PUCK_DROP + timedelta(days=3),
                             datetime(2026, 10, 2, 8, 0, tzinfo=timezone.utc)):
                 for final_seen in (None, 0.0):
                     for last_change in (0.0, LONG_AGO):
-                        for display in (DEFAULTS, Display(sleep=NIGHT)):
+                        for display in SETTINGS_SWEPT:
                             for now in (0.0, GRACE_S, 10 * 3600.0):
                                 yield dict(now=now, now_utc=now_utc, screen=screen,
                                            state=state, final_seen=final_seen,
                                            last_change=last_change, display=display)
+
+
+def why_it_could_be_dark(case) -> dict:
+    """Every reason this panel is allowed to be dark, each worked out from
+    the inputs alone.
+
+    Deliberately not a reading of the branch that produced the answer --
+    two of these predicates used to be exactly that, which made them
+    unfalsifiable. The arithmetic is done again here, from `start` and the
+    clocks, so a decision that switched off for the wrong reason fails.
+    """
+    state, display = case["state"], case["display"]
+    now, now_utc, last_change = case["now"], case["now_utc"], case["last_change"]
+    name = state.state if state is not None else None
+    stale = now - last_change >= STALE_AFTER_S
+    left = None
+    if name in main_module.PREGAME and now_utc is not None and state.start:
+        try:
+            when = datetime.fromisoformat(state.start.replace("Z", "+00:00"))
+            left = int((when - now_utc).total_seconds()) if when.tzinfo else None
+        except ValueError:
+            left = None
+    return {
+        "inside sleep hours": asleep(now_utc, display.sleep),
+        "no game is selected": state is None,
+        "nothing to count down to":
+            name in main_module.PREGAME and now_utc is not None and left is None,
+        "outside the countdown window":
+            left is not None and not (-STALE_AFTER_S < left <= display.countdown_lead_s),
+        "a clock it cannot trust, past the bound":
+            name in main_module.PREGAME and now_utc is None and stale,
+        "past the final hold":
+            name in main_module.OVER and case["final_seen"] is not None
+            and now - case["final_seen"] >= display.final_hold_s,
+        "an unrecognized state went stale":
+            name is not None and name not in main_module.PREGAME
+            and name not in main_module.OVER and name not in main_module.IN_PLAY
+            and stale,
+    }
 
 
 def test_the_panel_is_only_ever_dark_for_a_stated_reason():
@@ -563,33 +675,23 @@ def test_the_panel_is_only_ever_dark_for_a_stated_reason():
     # is not on this list", every one of which ends without anybody being
     # able to touch the panel. Anything dark that is not one of these is a
     # panel somebody will report as broken.
+    swept = 0
     for case in every_condition():
+        swept += 1
         result = presentation(**case)
         assert result.show in (GAME, COUNTDOWN, FINAL, NO_GAME, MESSAGE, OFF)
         if result.show != OFF:
             continue
-        state, display = case["state"], case["display"]
-        within_grace = case["now"] - case["last_change"] < GRACE_S
-        stale = case["now"] - case["last_change"] >= STALE_AFTER_S
-        name = state.state if state is not None else None
-        reasons = {
-            "inside sleep hours": asleep(case["now_utc"], display.sleep),
-            "no game is selected": state is None,
-            # Too early for the countdown, or so long past the start that
-            # the game is never going to happen.
-            "outside the countdown window": name in main_module.PREGAME,
-            "past the final hold":
-                name in main_module.OVER and case["final_seen"] is not None
-                and case["now"] - case["final_seen"] >= display.final_hold_s,
-            "an unrecognized state went stale":
-                name is not None and name not in main_module.PREGAME
-                and name not in main_module.OVER and name not in main_module.IN_PLAY
-                and stale,
-        }
+        name = case["state"].state if case["state"] is not None else None
         assert case["screen"] == screens.SCOREBOARD, "a help screen was switched off"
-        assert not within_grace, "switched off inside the grace period"
+        assert case["now"] - case["last_change"] >= GRACE_S, \
+            "switched off inside the grace period"
         assert name not in main_module.IN_PLAY, "a live game was switched off"
-        assert any(reasons.values()), f"dark for no stated reason: {case}"
+        assert any(why_it_could_be_dark(case).values()), f"dark for no stated reason: {case}"
+    # 7 screens x 8 states x 6 clocks x 2 sightings x 2 last-changes
+    # x 6 settings x 3 monotonic times. Stated so that a sweep that
+    # silently stops covering something is a failure, not a quiet pass.
+    assert swept == 7 * 8 * 6 * 2 * 2 * 6 * 3 == 24_192, swept
 
 
 def test_a_dark_frame_is_never_also_shifted():
@@ -620,13 +722,17 @@ def test_the_shift_holds_still_for_minutes_at_a_time():
     assert main_module.SHIFT_STEP_S >= 60
 
 
-def test_the_shift_is_deterministic_and_cycles():
-    # Derived from the clock, never random: a test can say what the offset
-    # will be, and a panel steps the same way every time round.
-    step = main_module.SHIFT_STEP_S
-    circuit = len(main_module.SHIFT_PATTERN)
-    assert [shift_at(i * step) for i in range(circuit)] == list(main_module.SHIFT_PATTERN)
-    assert shift_at(circuit * step) == shift_at(0)
+def test_the_shift_is_deterministic_and_bounded_and_comes_back_round():
+    # Properties, not a restatement of the table: the old version of this
+    # test asserted that shift_at returns SHIFT_PATTERN in order, which is
+    # its implementation written twice and could not fail.
+    step, circuit = main_module.SHIFT_STEP_S, len(main_module.SHIFT_PATTERN)
+    offsets = [shift_at(i * step) for i in range(circuit)]
+    assert all(-4 <= dx <= 4 and -4 <= dy <= 0 for dx, dy in offsets), offsets
+    assert len(set(offsets)) > 1, "a shift that never moves is not a shift"
+    assert shift_at(circuit * step) == shift_at(0), "the ring does not close"
+    assert shift_at(1234.0) == shift_at(1234.0), "not a function of the clock alone"
+    assert shift_at(0) != shift_at(step), "two clocks a step apart must differ"
 
 
 def test_every_offset_the_shift_can_take_fits_the_layout_margins():
@@ -660,7 +766,8 @@ def test_the_screens_that_sit_there_longest_are_shifted_too():
 # --------------------------------------------------------------------------
 
 
-def a_loop_that_receives(monkeypatch, tmp_path, script, game_id=2026020001, passes=5):
+def a_loop_that_receives(monkeypatch, tmp_path, script, game_id=2026020001, passes=5,
+                         connect=True):
     """Run the real render loop, delivering MQTT messages to it.
 
     The two lines that rearm an aged-out final live in the loop, not in a
@@ -689,14 +796,18 @@ def a_loop_that_receives(monkeypatch, tmp_path, script, game_id=2026020001, pass
             pass
 
         def start(self):
-            hooks["on_link"](True)   # a working broker: screen_for says SCOREBOARD
+            if connect:
+                hooks["on_link"](True)   # a working broker: screen_for says SCOREBOARD
 
         def stop(self):
             pass
 
+    class Online:
+        online, ssid, ip = True, "TestNet", "10.0.0.5"
+
     class FakeNM:
         def status(self):
-            raise NetworkError("no nmcli in a test")
+            return Online()          # the Wi-Fi is fine; only the broker may not be
 
         def scan(self):
             raise NetworkError("no nmcli in a test")
@@ -733,7 +844,7 @@ def test_re_choosing_the_same_game_restarts_the_hold_in_the_real_loop(tmp_path, 
     final = (FIX / "state_live.json").read_text().replace('"state":"LIVE"', '"state":"FINAL"')
     passes = a_loop_that_receives(monkeypatch, tmp_path, {
         0: [("on_state", (2026020001, final.encode()))],
-        2: [("on_config", (b'{"gameId": 2026020001}',))],
+        2: [("on_config", (b'{"gameId": 2026020001}', False))],   # live: the owner
     })
 
     before = passes[1]          # the final has been seen and is being held
@@ -746,11 +857,33 @@ def test_re_choosing_the_same_game_restarts_the_hold_in_the_real_loop(tmp_path, 
         "re-choosing the game did not restart the grace period"
 
 
+def test_a_reconnect_does_not_look_like_the_owner_choosing_a_game(tmp_path, monkeypatch):
+    # C-2 through the loop. The broker replays the retained config every
+    # time this panel resubscribes, which it does on every reconnect. Read
+    # as a choice, a panel that reconnects hourly could never finish holding
+    # a final, and one that flapped would be lit for ever.
+    final = (FIX / "state_live.json").read_text().replace('"state":"LIVE"', '"state":"FINAL"')
+    passes = a_loop_that_receives(monkeypatch, tmp_path, {
+        0: [("on_state", (2026020001, final.encode()))],
+        # What a reconnect delivers: the same choice, flagged as a replay.
+        2: [("on_config", (b'{"gameId": 2026020001}', True))],
+    })
+
+    before, after = passes[1], passes[3]
+    assert before["state"].state == "FINAL"
+    assert before["final_seen"] is not None
+    assert after["final_seen"] == before["final_seen"], \
+        "a reconnect restarted the three-hour hold"
+    assert after["last_change"] == before["last_change"], \
+        "a reconnect lit the panel for five minutes"
+
+
 def test_a_state_that_changes_restarts_the_grace_in_the_real_loop(tmp_path, monkeypatch):
     # The other half: changed_at, driven by real documents arriving rather
     # than by strings passed to it. A repeat of the same state must NOT
-    # restart the grace, or a live game's ten updates a minute would hold
-    # the panel awake through any sleep window.
+    # restart the grace -- a live game's ten updates a minute would hold the
+    # panel awake through any sleep window, and a reducer republishing a
+    # stale PRE would defeat the staleness bound outright (I-2).
     pre = (FIX / "state_pre.json").read_text()
     live = (FIX / "state_live.json").read_text()
     passes = a_loop_that_receives(monkeypatch, tmp_path, {
@@ -766,6 +899,87 @@ def test_a_state_that_changes_restarts_the_grace_in_the_real_loop(tmp_path, monk
     assert passes[3]["state"].state == "LIVE"
     assert passes[3]["last_change"] > passes[0]["last_change"], \
         "the game going live did not restart the grace period"
+
+
+# --------------------------------------------------------------------------
+# Nothing the network says may stop the loop
+#
+# C-1. The panel's worst outcome is not a wrong frame, it is no frame: the
+# service dies, systemd restarts it, and it crash-loops on a black screen
+# that nobody standing in front of it can tell from dead hardware. Every
+# document below is one this panel can be sent, from the reducer or from
+# anything that can publish to its topics.
+# --------------------------------------------------------------------------
+
+
+def a_state_doc(**changes) -> bytes:
+    doc = json.loads((FIX / "state_pre.json").read_text())
+    doc.update(changes)
+    return json.dumps(doc).encode()
+
+
+@pytest.mark.parametrize("name,payload", [
+    # The crash the review found: three frames below the loop, in
+    # datetime.fromisoformat, with no handler anywhere above it.
+    ("an unreadable start", a_state_doc(start="not a timestamp")),
+    ("a start with no date", a_state_doc(start="23:30")),
+    # from_json's own arithmetic, none of which is ValueError:
+    ("no gameId at all", b'{"v":1,"state":"PRE"}'),                    # KeyError
+    ("a gameId that is not a number", a_state_doc(gameId="soon")),     # ValueError
+    ("a null where a number goes", b'{"v":1,"gameId":null}'),          # TypeError
+    ("penalties that are not a list", a_state_doc(penalties={"a": 1})),
+    ("not JSON at all", b"<html>404</html>"),
+    ("not even a document", b"[]"),
+    # Text from the network reaching pygame's font renderer, which refuses
+    # a null byte with a ValueError of its own.
+    ("a null byte in a team abbreviation",
+     a_state_doc(away={"abbrev": "T\0BL", "score": 0, "sog": 0, "color": "002868"})),
+])
+def test_no_state_document_can_stop_the_render_loop(name, payload, tmp_path, monkeypatch):
+    # main() must return normally rather than raise. If it raises, systemd
+    # restarts it and the panel is black until somebody notices.
+    a_loop_that_receives(monkeypatch, tmp_path, {0: [("on_state", (2026020001, payload))]})
+
+
+@pytest.mark.parametrize("payload", [
+    b'{"games":[{"gameId":"soon"}]}',   # ValueError from int()
+    b'{"games":[{"away":"TBL"}]}',      # KeyError: no gameId
+    b'[]',                              # AttributeError: not an object
+    b'{"games":"none"}',                # TypeError: not iterable as records
+    b"not json",
+])
+def test_no_today_list_can_stop_the_render_loop(payload, tmp_path, monkeypatch):
+    # parse_today had no handler at all around it in the loop, where
+    # GameState.from_json at least had one for ValueError.
+    a_loop_that_receives(monkeypatch, tmp_path, {0: [("on_today", (payload,))]})
+
+
+def test_a_frame_that_cannot_be_drawn_shows_a_help_screen_rather_than_dying(tmp_path, monkeypatch):
+    # The guard of last resort. Whatever gets through the parsers, the panel
+    # says something rather than going dark: text from the network reaches
+    # the font renderer, and the settings screen draws SSIDs the same way.
+    drawn = []
+    monkeypatch.setattr(screens, "draw_cannot_draw",
+                        lambda surface, assets, build: drawn.append(build))
+    a_loop_that_receives(monkeypatch, tmp_path, {
+        0: [("on_state", (2026020001,
+                          a_state_doc(away={"abbrev": "T\0BL", "score": 0, "sog": 0, "color": "002868"})))],
+    })
+    assert drawn, "the panel drew nothing at all when the frame failed"
+
+
+def test_the_same_drawing_failure_is_logged_once_not_every_frame(tmp_path, monkeypatch, caplog):
+    # At 10 Hz an unguarded log line fills the journal in an afternoon, and
+    # the journal is how a failed panel is read (see "Reading a failed
+    # panel"). One line per distinct failure, then silence.
+    main_module._complained.clear()
+    with caplog.at_level("WARNING", logger="scoreboard"):
+        a_loop_that_receives(monkeypatch, tmp_path, {
+            0: [("on_state", (2026020001,
+                              a_state_doc(away={"abbrev": "T\0BL", "score": 0, "sog": 0, "color": "002868"})))],
+        }, passes=6)
+    complaints = [r for r in caplog.records if "could not paint" in r.getMessage()]
+    assert len(complaints) == 1, [r.getMessage() for r in complaints]
 
 
 def test_choosing_a_different_game_selects_it():
@@ -785,13 +999,105 @@ def test_an_unreadable_config_message_changes_nothing():
     assert config_action(None, following=2026020001) == IGNORE
 
 
+def test_the_brokers_replay_of_the_current_game_is_not_the_owner_choosing_it():
+    # C-2. The config topic is retained and this panel resubscribes on every
+    # reconnect, so the broker replays {"gameId": N} each time the link comes
+    # back. Treating that as a choice re-armed the three-hour hold and lit
+    # the panel for five minutes -- on a link that reconnects hourly, the
+    # final hold could never expire; on one that flaps, the panel never
+    # slept. A replay of what we are already following says nothing new.
+    assert config_action(2026020001, following=2026020001, retain=True) == IGNORE
+
+
+def test_a_replay_naming_a_different_game_is_still_obeyed():
+    # The replay at the first subscribe after boot is how a panel that was
+    # unplugged when the game changed learns what to follow -- the reason
+    # the topic is retained in the first place.
+    assert config_action(2026020002, following=2026020001, retain=True) == SELECT
+    assert config_action(2026020001, following=None, retain=True) == SELECT
+
+
+def test_a_live_resend_of_the_current_game_is_the_owner_pulling_the_lever():
+    # retain=0 on an established subscription means somebody published it
+    # just now: the "Show on panel" button on the site.
+    assert config_action(2026020001, following=2026020001, retain=False) == REARM
+
+
+# --------------------------------------------------------------------------
+# Wi-Fi up, broker down
+#
+# I-5. The panel is registered, the network is fine, and MQTT has been down
+# for a while: nothing arrives, nothing is due, and after the grace the panel
+# goes black -- which is exactly the picture the owner reported as
+# indistinguishable from dead hardware, for the one fault they care most
+# about being able to see.
+# --------------------------------------------------------------------------
+
+
+def test_a_brief_link_drop_is_not_worth_a_help_screen():
+    # MQTT reconnects with backoff; a few seconds of nothing is normal, and
+    # a game already on screen keeps its own "no link" dot in the corner.
+    assert not needs_link_help(down_since=100.0, now=100.0)
+    assert not needs_link_help(down_since=100.0, now=100.0 + LINK_HELP_AFTER_S - 1)
+
+
+def test_a_link_that_stays_down_earns_a_help_screen():
+    assert needs_link_help(down_since=100.0, now=100.0 + LINK_HELP_AFTER_S)
+
+
+def test_a_link_that_is_up_never_earns_one():
+    assert not needs_link_help(down_since=None, now=10_000.0)
+
+
+def test_the_help_screen_outranks_the_scoreboard_but_not_no_network():
+    # Precedence, deliberately: "No network" is the more specific fault and
+    # the one the person standing there can fix, so it wins. Below that, a
+    # panel that cannot reach the service says so -- including over a game
+    # that is still on screen, because after two minutes the clock it is
+    # showing is wrong, and a wrong scoreboard is worse than one that admits
+    # it. The 8 px "no link" dot is invisible across a room.
+    assert screens.screen_for(True, True, link_down=True) == screens.NO_SERVICE
+    assert screens.screen_for(True, False, link_down=True) == screens.OFFLINE
+    assert screens.screen_for(True, True, link_down=False) == screens.SCOREBOARD
+
+
+def test_a_panel_with_no_identity_yet_is_unaffected():
+    # An unregistered panel has no MQTT link to lose: its enrollment screens
+    # already say what is wrong, and they outrank this.
+    from scoreboard import enroll
+    assert screens.screen_for(False, True, None, link_down=True) == screens.UNREGISTERED
+    waiting = enroll.Waiting("7K4M-9QX2", 1757800000, None)
+    assert screens.screen_for(False, True, waiting, link_down=True) == screens.WAITING
+
+
+def test_the_help_screen_is_never_switched_off():
+    # Like the other screens that ask for help: in sleep hours, with nothing
+    # due, hours after the last change.
+    result = shown(now=48 * 3600.0, now_utc=datetime(2026, 10, 2, 10, 0, tzinfo=timezone.utc),
+                   screen=screens.NO_SERVICE, display=Display(sleep=NIGHT))
+    assert result.show == MESSAGE
+
+
+def test_the_panel_says_it_cannot_reach_the_service_and_then_stops_when_it_can(tmp_path, monkeypatch):
+    # Through the real loop: the link never comes up, and two minutes later
+    # the panel is showing the help screen rather than going dark. Then the
+    # link connects and it goes back to the scoreboard by itself.
+    monkeypatch.setattr(main_module, "LINK_HELP_AFTER_S", 0.0)  # no waiting in a test
+    passes = a_loop_that_receives(monkeypatch, tmp_path, {
+        0: [],                         # the stand-in Link starts disconnected
+        2: [("on_link", (True,))],
+    }, connect=False)
+    assert passes[1]["screen"] == screens.NO_SERVICE
+    assert passes[2]["screen"] == screens.SCOREBOARD
+
+
 # --------------------------------------------------------------------------
 # The settings value
 # --------------------------------------------------------------------------
 
 
 def test_the_three_settings_have_the_defaults_a_panel_runs_on():
-    assert DEFAULTS.countdown_lead_s == 2 * 3600
+    assert DEFAULTS.countdown_lead_s == 12 * 3600   # owner's choice, 2026-09-19
     assert DEFAULTS.final_hold_s == 3 * 3600
     assert DEFAULTS.sleep is None
 

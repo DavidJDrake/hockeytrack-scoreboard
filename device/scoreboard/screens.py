@@ -15,7 +15,7 @@ from .assets import Assets
 from .render import W, H, BG, INK, MUTED
 
 SCOREBOARD, UNREGISTERED, OFFLINE = "scoreboard", "unregistered", "offline"
-WAITING, ENROLL_PROBLEM = "waiting", "enroll-problem"
+WAITING, ENROLL_PROBLEM, NO_SERVICE = "waiting", "enroll-problem", "no-service"
 # Not a screen_for answer: the settings screen is opened by a keypress, not
 # decided from the panel's condition. It is named here so main can tell the
 # display decision "somebody is using this panel", which is one of the things
@@ -25,7 +25,8 @@ BUILD_FILE = Path("/etc/scoreboard-build")
 NETWORK_WINDOW = 5  # rows of the network list shown at once on the settings screen
 
 
-def screen_for(has_identity: bool, has_network: bool, enrollment=None) -> str:
+def screen_for(has_identity: bool, has_network: bool, enrollment=None,
+               link_down: bool = False) -> str:
     """Which panel is showing.
 
     Identity first: a panel nobody has registered has nothing to say about
@@ -37,9 +38,23 @@ def screen_for(has_identity: bool, has_network: bool, enrollment=None) -> str:
     because a code the panel cannot refresh is worse than useless: it may have
     rotated already, and "no network" is the thing the person standing there
     can actually fix.
+
+    ``link_down`` says MQTT has been down long enough to be worth reporting
+    (main.needs_link_help owns "long enough"). It sits below OFFLINE, which
+    is the more specific fault and the one somebody standing there can act
+    on, and above the scoreboard -- including above a game already drawn.
+    That last part is a choice: after a couple of minutes with no updates
+    the clock on screen is wrong and still ticking, and a scoreboard that is
+    wrong is worse than one that says it cannot reach the service. The
+    existing "no link" dot is eight pixels, which settles nothing across a
+    room. Brief drops never get here; that is what the threshold is for.
+    An unregistered panel never gets here either: it has no link to lose,
+    and its own screens already say what is wrong.
     """
     if has_identity:
-        return SCOREBOARD if has_network else OFFLINE
+        if not has_network:
+            return OFFLINE
+        return NO_SERVICE if link_down else SCOREBOARD
     if enrollment is None:
         return UNREGISTERED
     if not has_network:
@@ -98,6 +113,39 @@ def draw_offline(surface: pygame.Surface, assets: Assets, build: str) -> None:
     draw_message(surface, assets, "No network", [
         "This panel cannot reach Wi-Fi.",
         "Press S for network settings.",
+        build,
+    ])
+
+
+def draw_no_service(surface: pygame.Surface, assets: Assets, build: str) -> None:
+    """Registered, on the network, and the broker is not answering.
+
+    The gap this closes: everything else about that panel looks healthy, so
+    with nothing due it would simply go dark on schedule -- and a dark panel
+    is the one thing its owner cannot tell from broken hardware. It is
+    deliberately about the *connection*, not about hockey: there is no game
+    on this screen because no game reached it.
+    """
+    draw_message(surface, assets, "Cannot reach the service", [
+        "This panel is on the network but cannot reach the scoreboard service.",
+        "Check the panel's internet connection. It will keep trying.",
+        "Press S for network settings.",
+        build,
+    ])
+
+
+def draw_cannot_draw(surface: pygame.Surface, assets: Assets, build: str) -> None:
+    """The frame that could not be drawn, said out loud.
+
+    main's render loop paints this when drawing raised -- text off the
+    network reaching the font renderer, most likely. It is not a screen
+    anybody should ever see; it exists so that the alternative (the service
+    exiting, systemd restarting it, a panel crash-looping on black) cannot
+    happen. Somebody reading this off a wall has something to report.
+    """
+    draw_message(surface, assets, "Display problem", [
+        "The panel could not draw the last update it received.",
+        "It will keep trying. The journal has the details.",
         build,
     ])
 

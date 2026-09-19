@@ -153,6 +153,71 @@ def test_the_goal_flash_is_the_one_thing_a_shift_trims():
         "the flash should still be washing half the panel"
 
 
+# --------------------------------------------------------------------------
+# A countdown with nothing to count
+#
+# Two ways the digits can be unknowable, and neither may raise or lie: a
+# `start` the panel cannot read (it arrives off the network, unvalidated),
+# and a clock the panel knows has not been set yet (no RTC, NTP not in).
+# Both draw the matchup and PUCK DROP with dashes where the digits go.
+# --------------------------------------------------------------------------
+
+
+class Spy(Assets):
+    """Assets that remember every string drawn through them."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.drawn: list[str] = []
+
+    def font(self, px: int, bold: bool = True):
+        real, drawn = super().font(px, bold), self.drawn
+
+        class Recorder:
+            def render(self, text, antialias, colour):
+                drawn.append(text)
+                return real.render(text, antialias, colour)
+
+            def size(self, text):
+                return real.size(text)
+
+        return Recorder()
+
+
+def pregame(start):
+    doc = json.loads((FIX / "state_pre.json").read_text())
+    doc["start"] = start
+    return GameState.from_json(json.dumps(doc))
+
+
+@pytest.mark.parametrize("start", ["not a timestamp", "23:30", None])
+def test_a_start_the_panel_cannot_read_draws_dashes_rather_than_raising(start):
+    # The crash path: draw -> seconds_to_start -> datetime.fromisoformat.
+    # Nothing between there and the render loop catches ValueError.
+    surf, assets = surface(), Spy()
+    draw(surf, pregame(start), 1790897400000, assets)
+    assert "--:--:--" in assets.drawn, assets.drawn
+    assert "00:00:00" not in assets.drawn, "a start it cannot read must not read as zero"
+    assert "PUCK DROP" in assets.drawn
+    assert "TBL @ NYR" in assets.drawn, "the matchup is still true, and still worth showing"
+
+
+def test_an_untrusted_clock_draws_dashes_rather_than_wrong_digits():
+    # Before NTP has been, this panel's clock may be hours out, so every
+    # digit it could print would be a lie. The matchup and PUCK DROP are
+    # still true, so they stay.
+    surf, assets = surface(), Spy()
+    draw(surf, pregame("2026-10-01T23:30:00Z"), 1790897400000 - 3600_000, assets, clock_ok=False)
+    assert "--:--:--" in assets.drawn, assets.drawn
+    assert "01:00:00" not in assets.drawn
+
+
+def test_a_countdown_with_a_clock_it_trusts_still_draws_digits():
+    surf, assets = surface(), Spy()
+    draw(surf, pregame("2026-10-01T23:30:00Z"), 1790897400000 - 3600_000, assets)
+    assert "01:00:00" in assets.drawn, assets.drawn
+
+
 def test_penalty_row_shrinks_as_time_passes():
     surf, assets = surface(), Assets()
     s = GameState.from_json((FIX / "state_live.json").read_bytes())

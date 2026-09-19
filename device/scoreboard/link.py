@@ -72,11 +72,25 @@ class Link:
 
     def _on_message(self, client, userdata, msg):
         self.route(msg.topic, msg.payload, self.on_state, self.on_today,
-                   self.on_config, self._config_topic)
+                   self.on_config, self._config_topic, msg.retain)
 
     @staticmethod
     def route(topic: str, payload: bytes, on_state, on_today,
-              on_config=None, config_topic_=None) -> None:
+              on_config=None, config_topic_=None, retain: bool = False) -> None:
+        """Dispatch one message. ``retain`` is the flag off the wire.
+
+        It matters for exactly one topic. The config topic is published
+        retained, and this device resubscribes to it on every reconnect, so
+        the broker hands it the same choice again each time the link comes
+        back. MQTT 3.1.1 3.3.1.3 is what makes those two cases separable: the
+        server MUST set RETAIN=1 on a message sent because of a NEW
+        subscription [MQTT-3.3.1-8] and MUST set RETAIN=0 on one sent because
+        it matches an ESTABLISHED subscription, whatever flag the publisher
+        used [MQTT-3.3.1-9]. So retain=1 here means "the broker replayed this
+        when I subscribed" and retain=0 means "somebody published it just
+        now" -- which is the difference between a reconnect and the owner
+        pressing a button. main.config_action is where that is acted on.
+        """
         if topic == TODAY:
             on_today(payload)
             return
@@ -86,7 +100,7 @@ class Link:
         # this panel.
         if config_topic_ is not None and topic == config_topic_:
             if on_config is not None:
-                on_config(payload)
+                on_config(payload, retain)
             return
         parts = topic.split("/")
         if len(parts) == 4 and parts[:2] == ["hockeytrack", "games"] and parts[3] == "state" and parts[2].isdigit():

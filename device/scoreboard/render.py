@@ -96,7 +96,14 @@ def _penalty_rows(surface, assets, state, now_ms, y):
             _text(surface, assets, f"#{p.number}  {p.team}  {fmt_clock(p.seconds)}", 40, INK, x0, ry - 6, "topleft", bold=False)
 
 
-def draw(surface: pygame.Surface, state: GameState | None, now_ms: int, assets: Assets, link_ok: bool = True) -> None:
+def draw(surface: pygame.Surface, state: GameState | None, now_ms: int, assets: Assets,
+         link_ok: bool = True, clock_ok: bool = True) -> None:
+    """Paint one frame of the scoreboard.
+
+    ``clock_ok`` is False while this panel's wall clock has not been set by
+    NTP. It has no RTC, so until then ``now_ms`` may be hours out, and the
+    difference between a countdown and a guess is exactly this flag.
+    """
     surface.fill(BG)
     if state is None:
         _text(surface, assets, "HOCKEYTRACK", 120, INK, W // 2, H // 2 - 40, "center")
@@ -104,15 +111,24 @@ def draw(surface: pygame.Surface, state: GameState | None, now_ms: int, assets: 
         return
 
     if state.state == "PRE":
-        left = state.seconds_to_start(now_ms) or 0
-        d, rem = divmod(left, 86400)
-        h, rem = divmod(rem, 3600)
-        m, s = divmod(rem, 60)
+        left = state.seconds_to_start(now_ms) if clock_ok else None
+        if left is None:
+            # Nothing to count, for one of two reasons: a start this panel
+            # cannot read, or a clock it knows is not set yet. Dashes rather
+            # than zeros, because 00:00:00 reads as "any second now" -- the
+            # one claim that cannot be made here. The matchup and PUCK DROP
+            # are still true, so they stay: the panel says what it knows.
+            digits = "--:--:--"
+        else:
+            d, rem = divmod(left, 86400)
+            h, rem = divmod(rem, 3600)
+            m, s = divmod(rem, 60)
+            digits = f"{d}d {h:02d}:{m:02d}:{s:02d}" if d else f"{h:02d}:{m:02d}:{s:02d}"
         matchup_w = W - 240
         _text_fit(surface, assets, f"{state.away.abbrev} @ {state.home.abbrev}", 110, matchup_w, INK, W // 2, 90, "center")
         _text(surface, assets, "PUCK DROP", 44, RED, W // 2, 175, "center")
         countdown_w = W - 480
-        _text_fit(surface, assets, f"{d}d {h:02d}:{m:02d}:{s:02d}" if d else f"{h:02d}:{m:02d}:{s:02d}", 200, countdown_w, RED, W // 2, 300, "center")
+        _text_fit(surface, assets, digits, 200, countdown_w, RED, W // 2, 300, "center")
         return
 
     flash_team = state.last_goal[0] if state.goal_flash(now_ms) else None

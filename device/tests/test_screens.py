@@ -288,6 +288,9 @@ def _screens():
         s, assets, "7K4M-9QX2", SITE, "friend@example.com", "development build")
     yield "enroll problem", lambda s: screens.draw_enroll_problem(
         s, assets, "cannot reach the service", "development build")
+    yield "cannot reach the service", lambda s: screens.draw_no_service(
+        s, assets, "development build")
+    yield "cannot draw", lambda s: screens.draw_cannot_draw(s, assets, "development build")
     yield "settings", lambda s: screens.draw_settings(
         s, assets, Settings(networks=[Network(ssid="HomeNet", signal=70, secured=True)]),
         None, "development build")

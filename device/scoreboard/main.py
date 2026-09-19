@@ -45,22 +45,31 @@ log = logging.getLogger("scoreboard")
 # So every OFF below is paired, here in one place, with the thing that ends
 # it and needs nobody to touch the panel:
 #
-#   before the countdown window  -> the window opens, or the owner chooses
-#   after the final hold         -> the owner chooses, or a new state arrives
-#   no game, past the grace      -> the owner chooses, or a state arrives
-#   inside sleep hours           -> the window ends, or a live game starts
+#   before the countdown window   -> the window opens, or the owner chooses
+#   2 h past a start with no LIVE -> a state-NAME change, a document with a
+#                                    new start, or the owner's re-send
+#   an untrusted clock, past 2 h  -> the same three, or NTP landing
+#   after the final hold          -> the owner's re-send, or a state change
+#   no game, past the grace       -> the owner chooses, or a state arrives
+#   inside sleep hours            -> the window ends, or a live game starts
 #
-# And three screens are never off at all, in or out of sleep hours, because
+# Note what is NOT on that list: "any update". changed_at moves only when the
+# state NAME changes, so a reducer republishing the same stale document does
+# not relight the panel -- which is the whole point of bounding it.
+#
+# And five screens are never off at all, in or out of sleep hours, because
 # each one is the panel asking for help it cannot get any other way: not
-# registered, the pairing code, enrollment failing, and no network.
+# registered, the pairing code, enrollment failing, no network, and cannot
+# reach the service.
 #
-# Clocks. Durations and phases are measured on time.monotonic(): the Pi has
-# no RTC, so its wall clock starts wrong and NTP may move it hours forward
-# once the network is up, and "three hours since the final" measured on
-# time.time() would expire instantly or never. Sleep hours are the one thing
-# here that is genuinely about wall-clock local time, so they take a UTC
-# datetime -- and None until the clock is known to be synchronized, which is
-# how this module says "do not trust me yet".
+# Clocks. Durations are measured on time.monotonic(): the Pi has no RTC, so
+# its wall clock starts wrong and NTP may move it hours forward once the
+# network is up, and "three hours since the final" measured on time.time()
+# would expire instantly or never. Two things here genuinely need wall-clock
+# time -- sleep hours, and both edges of the countdown window, which are
+# compared against the document's own `start` -- and both take a UTC
+# datetime that is None until the clock is known to be synchronized, which
+# is how this module says "do not trust me yet".
 # ---------------------------------------------------------------------------
 
 # What to draw. The first four all mean "draw the scoreboard, which knows
@@ -68,7 +77,6 @@ log = logging.getLogger("scoreboard")
 # tests, and anyone reading a log, can say which rule fired.
 GAME, COUNTDOWN, FINAL, NO_GAME = "game", "countdown", "final", "no-game"
 MESSAGE, OFF = "message", "off"
-DRAWS_THE_GAME = (GAME, COUNTDOWN, FINAL, NO_GAME)
 
 SELECT, REARM, IGNORE = "select", "rearm", "ignore"
 
@@ -101,10 +109,13 @@ IN_PLAY = ("LIVE",)
 STALE_AFTER_S = 2 * 60 * 60
 
 # How long the panel keeps showing something after a change the owner caused
-# or needs to see: boot, a game chosen or cleared, a game going final. Not a
-# user setting -- it is the panel saying "heard you" to somebody who has just
-# clicked something and is looking up at the panel to see whether it worked.
-# Five minutes is long enough to walk into the next room and check.
+# or needs to see: boot, a game chosen or re-sent, a game going live or
+# final. (Not "or cleared": the API rejects a gameId of 0 and parse_config
+# maps a null one to IGNORE, so a panel cannot yet be told to follow
+# nothing.) Not a user setting -- it is the panel saying "heard you" to
+# somebody who has just clicked something and is looking up at the panel to
+# see whether it worked. Five minutes is long enough to walk into the next
+# room and check.
 GRACE_S = 5 * 60
 
 # The pixel shift: a whole-frame offset that steps through a fixed ring.
@@ -156,10 +167,11 @@ class Display:
     delivered over the config topic the change is: parse it, build one of
     these, assign it. Nothing else in the loop has to learn about it.
     """
-    # How long before puck drop the countdown appears. Two hours is about
-    # when somebody starts thinking about the game; before that a selected
-    # game is a plan, not something to light a wall with.
-    countdown_lead_s: int = 2 * 60 * 60
+    # How long before puck drop the countdown appears. Twelve hours, chosen
+    # by the owner on 2026-09-19 over the two this was first built with: a
+    # game picked in the morning then spends the day on the wall counting
+    # down, which is what they wanted a panel for in the first place.
+    countdown_lead_s: int = 12 * 60 * 60
     # How long a final score stays up. Three hours covers "it ended while we
     # were out" -- a game finishing at 22:00 is still there at 01:00 --
     # without the panel still showing last night's result over breakfast.
@@ -367,7 +379,7 @@ def _minutes(hhmm: str) -> int | None:
     return h * 60 + m if 0 <= h < 24 and 0 <= m < 60 else None
 
 
-_bad_sleep: set[str] = set()   # zones and times already complained about
+_complained: set[str] = set()   # failures already written to the journal once
 
 
 def asleep(now_utc: datetime | None, sleep: Sleep | None) -> bool:
@@ -392,7 +404,14 @@ def asleep(now_utc: datetime | None, sleep: Sleep | None) -> bool:
     settings value, and a panel that stays on is a panel somebody can read a
     complaint off.
     """
-    if sleep is None or now_utc is None:
+    if sleep is None:
+        return False
+    if now_utc is None:
+        # Said once, because it is a real condition somebody may have to
+        # diagnose: the panel is awake at 3 a.m. because it does not know
+        # that it is 3 a.m.
+        _complain_once("sleep:unsynced",
+                       "sleep hours are not in effect until the clock is set")
         return False
     start, end = _minutes(sleep.start), _minutes(sleep.end)
     if start is None or end is None or start == end:
@@ -410,8 +429,8 @@ def asleep(now_utc: datetime | None, sleep: Sleep | None) -> bool:
 
 
 def _complain_once(key: str, message: str) -> None:
-    if key not in _bad_sleep:
-        _bad_sleep.add(key)
+    if key not in _complained:
+        _complained.add(key)
         log.warning("%s (%r)", message, key)
 
 
@@ -454,8 +473,27 @@ def presentation(now: float, now_utc: datetime | None, screen: str,
         held = final_seen is None or now - final_seen < display.final_hold_s
         return Presentation(FINAL, shift) if held or within_grace else Presentation(OFF, (0, 0))
     if state.state in PREGAME:
-        return Presentation(COUNTDOWN, shift) if _countdown_due(now_utc, state, display) \
-            or within_grace else Presentation(OFF, (0, 0))
+        if now_utc is None:
+            # The clock has not been set, so where we are in the window
+            # cannot be judged -- and the digits would be a lie, which is
+            # why the loop tells render.draw to print dashes instead. Lit,
+            # because a panel that has just booted should show what it has,
+            # but bounded: "not set yet" lasts for ever on a network that
+            # blocks NTP while MQTT still works, and an unbounded frozen
+            # countdown is the fault this branch exists to prevent.
+            return Presentation(COUNTDOWN, shift) if now - last_change < STALE_AFTER_S \
+                else Presentation(OFF, (0, 0))
+        left = _seconds_to_start(now_utc, state)
+        if left is None:
+            # No start, or one this panel cannot read. There is nothing to
+            # count down to, so this is not a countdown -- not even inside
+            # the grace period, which is the branch that used to route an
+            # unparseable start into the renderer and take the service down
+            # with it. What the owner gets instead is the no-game screen,
+            # which is lit, honest, and costs nothing to draw.
+            return Presentation(NO_GAME, shift) if within_grace else Presentation(OFF, (0, 0))
+        due = -STALE_AFTER_S < left <= display.countdown_lead_s
+        return Presentation(COUNTDOWN, shift) if due or within_grace else Presentation(OFF, (0, 0))
     # A state this build does not recognize. Shown, so that whatever is
     # wrong is visible to somebody who can report it, but on the same clock
     # as a game that never started: from when it arrived (which is what
@@ -463,31 +501,6 @@ def presentation(now: float, now_utc: datetime | None, screen: str,
     # STALE_AFTER_S, so being inside the grace is already covered.
     return Presentation(GAME, shift) if now - last_change < STALE_AFTER_S \
         else Presentation(OFF, (0, 0))
-
-
-def _countdown_due(now_utc: datetime | None, state: GameState, display: Display) -> bool:
-    """Is puck drop close enough -- and recent enough -- for a countdown?
-
-    The window is bounded at both ends: it opens ``countdown_lead_s`` before
-    the start and closes STALE_AFTER_S after it. The far end is the one that
-    matters for a stuck panel: a postponed or cancelled game stops producing
-    documents while its last one still says PRE, and render.draw would show
-    that as PUCK DROP 00:00:00 until something else arrived. Nothing else
-    was going to arrive.
-
-    True while the clock is unknown -- an unsynchronized clock cannot say
-    where in the window we are, and of the two ways to be wrong, a panel lit
-    when it should be dark is the one somebody can see and report.
-
-    False for a document with no start, an unreadable one, or one without a
-    time zone. There is nothing to count down to, and refusing to draw it is
-    also what keeps render.draw from parsing that same string and raising
-    inside the render loop.
-    """
-    if now_utc is None:
-        return True
-    left = _seconds_to_start(now_utc, state)
-    return left is not None and -STALE_AFTER_S < left <= display.countdown_lead_s
 
 
 def _seconds_to_start(now_utc: datetime, state: GameState) -> int | None:
@@ -510,21 +523,48 @@ def _seconds_to_start(now_utc: datetime, state: GameState) -> int | None:
     return int((start - now_utc).total_seconds())
 
 
-def config_action(game_id: int | None, following: int | None) -> str:
+def config_action(game_id: int | None, following: int | None, retain: bool = False) -> str:
     """What an admin-site config message asks of a panel already following
     ``following``.
 
     A different game is a selection. The *same* game is the only lever an
     owner has on a panel with no input device: re-choosing it on the site
-    says "put that back", and rearming the sighting gives an aged-out final
-    another ``final_hold_s`` on screen. Without this the message would be
-    dropped as a no-op, and requirement or not, "choose it again" is the
-    first thing anybody would try. ``None`` -- unreadable, or an explicit
-    null gameId -- leaves the panel showing whatever it is showing.
+    says "put that back", and rearming gives an aged-out final another
+    ``final_hold_s`` on screen. ``None`` -- unreadable, or an explicit null
+    gameId -- leaves the panel showing whatever it is showing.
+
+    ``retain`` is what keeps that lever from being pulled by accident. The
+    config topic is published retained and this panel resubscribes to it on
+    every reconnect, so the broker replays the current choice each time the
+    link comes back; read as a re-choice, that re-armed the three-hour hold
+    and lit the panel for five minutes on every reconnect -- so a panel that
+    reconnected hourly could never finish holding a final, and one that
+    flapped never went dark at all. A replay (retain=1, set only on
+    delivery-at-subscribe; see Link.route) naming the game already being
+    followed says nothing new, so it is ignored. A replay naming a
+    *different* game is still obeyed: that is the case retention exists for,
+    a panel that was unplugged when the game changed.
     """
     if game_id is None:
         return IGNORE
-    return SELECT if game_id != following else REARM
+    if game_id != following:
+        return SELECT
+    return IGNORE if retain else REARM
+
+
+# How long MQTT may be down, with the network up, before the panel says so
+# rather than quietly going dark with nothing to show. Two minutes: the
+# reconnect backoff tops out at 60 s, so a single missed attempt is normal
+# and two minutes means several have failed. Monotonic, like every other
+# duration here.
+LINK_HELP_AFTER_S = 2 * 60
+
+
+def needs_link_help(down_since: float | None, now: float,
+                    after_s: float = LINK_HELP_AFTER_S) -> bool:
+    """Has the link been down long enough to be worth a screen of its own?
+    ``down_since`` is None while it is up."""
+    return down_since is not None and now - down_since >= after_s
 
 
 def main() -> None:
@@ -550,7 +590,7 @@ def main() -> None:
                     on_state=lambda gid, b: events.put(("state", gid, b)),
                     on_today=lambda b: events.put(("today", b)),
                     on_link=lambda ok: events.put(("link", ok)),
-                    on_config=lambda b: events.put(("config", b)))
+                    on_config=lambda b, r: events.put(("config", b, r)))
     # Read before the display is opened, because placement() needs it and the
     # pairing code an unregistered panel draws is the one screen its owner
     # must be able to read. rotate_hint() opens the boot-partition file and
@@ -627,6 +667,10 @@ def main() -> None:
     today = []
     following = cfg.load_game_id() if cfg else None
     link_ok = bool(fixture)
+    # A registered panel starts with its link down -- it has not connected
+    # yet -- so the clock on "cannot reach the service" starts at boot. A
+    # desktop preview has no broker and never wants the screen.
+    link_down_since: float | None = None if link_ok else time.monotonic()
     brightness = cfg.brightness if cfg else 1.0
     if fixture:
         with open(fixture, "rb") as f:
@@ -715,11 +759,21 @@ def main() -> None:
                 if kind == "state" and item[1] == following:
                     try:
                         current = GameState.from_json(item[2])
-                    except ValueError as e:
-                        log.warning("bad state doc: %s", e)
+                    except Exception as e:
+                        # Every exception, not ValueError. The document is
+                        # network input and from_json indexes, converts and
+                        # iterates it: a missing gameId is a KeyError, a
+                        # null where a number goes is a TypeError, a JSON
+                        # array is an AttributeError. Each one used to reach
+                        # the loop, which has no handler, and take the
+                        # service down. The panel keeps showing whatever it
+                        # was showing, which is the right answer to a
+                        # message it cannot read.
+                        log.warning("ignoring an unreadable state document: %s: %s",
+                                    type(e).__name__, e)
                 elif kind == "config":
                     gid = parse_config(item[1])
-                    action = config_action(gid, following)
+                    action = config_action(gid, following, retain=item[2])
                     if action == IGNORE:
                         log.warning("ignoring unreadable config message")
                     elif action == SELECT:
@@ -729,10 +783,20 @@ def main() -> None:
                         log.info("admin site re-chose game %s; holding it again", gid)
                         final_seen, last_change = None, time.monotonic()
                 elif kind == "today":
-                    today = parse_today(item[1])
-                    pregame_from_today()
+                    # Same reasoning as the state document above, and this
+                    # one had no handler at all.
+                    try:
+                        today = parse_today(item[1])
+                    except Exception as e:
+                        log.warning("ignoring an unreadable today list: %s: %s",
+                                    type(e).__name__, e)
+                    else:
+                        pregame_from_today()
                 elif kind == "link":
                     link_ok = item[1]
+                    # First moment it went down, not the latest: the screen
+                    # is for a link that has STAYED down.
+                    link_down_since = None if link_ok else (link_down_since or time.monotonic())
                 elif kind == "select":
                     select(item[1])
                 elif kind == "brightness":
@@ -783,29 +847,54 @@ def main() -> None:
             # the scoreboard.
             showing = (screens.SETTINGS if panel is not None else
                        screens.screen_for(cfg is not None or bool(fixture),
-                                          net_ok or bool(fixture), enroll_state))
+                                          net_ok or bool(fixture), enroll_state,
+                                          needs_link_help(link_down_since, mono,
+                                                          LINK_HELP_AFTER_S)))
             now_showing = presentation(mono, now_utc, showing, current,
                                        final_seen, last_change, display)
-            if now_showing.show == OFF:
-                # Black, and that is all this change claims. Whether the HDMI
-                # output itself can be put to sleep under kmsdrm -- so the
-                # panel's own backlight goes off -- is a hardware question
-                # nobody has tested on this board; docs/hardware-checks.md
-                # carries it as a follow-up.
-                frame.fill((0, 0, 0))
-            elif panel is not None:
-                screens.draw_settings(frame, assets, panel, status, build)
-            elif showing == screens.WAITING:
-                screens.draw_waiting(frame, assets, enroll_state.display,
-                                     enroll.SITE, enroll_state.owner, build)
-            elif showing == screens.ENROLL_PROBLEM:
-                screens.draw_enroll_problem(frame, assets, enroll_state.detail, build)
-            elif showing == screens.UNREGISTERED:
-                screens.draw_unregistered(frame, assets, build)
-            elif showing == screens.OFFLINE:
-                screens.draw_offline(frame, assets, build)
-            else:
-                draw(frame, current, now_ms, assets, link_ok)
+            # The guard of last resort. Everything inside is drawing, and
+            # almost all of it draws text this panel was handed by somebody
+            # else: team abbreviations from the reducer, an enrollment
+            # detail from the API, SSIDs from whatever is on the air. A null
+            # byte in any of them is a ValueError out of pygame's font
+            # renderer, and there is no handler between here and the top of
+            # the process. A panel showing the wrong thing can be reported;
+            # a panel that has exited cannot be told from dead hardware.
+            try:
+                if now_showing.show == OFF:
+                    # Black, and that is all this change claims. Whether the
+                    # HDMI output itself can be put to sleep under kmsdrm --
+                    # so the panel's own backlight goes off -- is a hardware
+                    # question nobody has tested on this board;
+                    # docs/hardware-checks.md carries it as a follow-up.
+                    frame.fill((0, 0, 0))
+                elif panel is not None:
+                    screens.draw_settings(frame, assets, panel, status, build)
+                elif showing == screens.WAITING:
+                    screens.draw_waiting(frame, assets, enroll_state.display,
+                                         enroll.SITE, enroll_state.owner, build)
+                elif showing == screens.ENROLL_PROBLEM:
+                    screens.draw_enroll_problem(frame, assets, enroll_state.detail, build)
+                elif showing == screens.UNREGISTERED:
+                    screens.draw_unregistered(frame, assets, build)
+                elif showing == screens.OFFLINE:
+                    screens.draw_offline(frame, assets, build)
+                elif showing == screens.NO_SERVICE:
+                    screens.draw_no_service(frame, assets, build)
+                else:
+                    # NO_GAME draws the no-game screen rather than the state
+                    # behind it: it is what presentation says when the panel
+                    # is following something it cannot show, such as a game
+                    # whose start it cannot read.
+                    draw(frame, None if now_showing.show == NO_GAME else current,
+                         now_ms, assets, link_ok, clock_ok=now_utc is not None)
+            except Exception as e:
+                # Once per distinct failure, not once per frame: at 10 Hz
+                # the second kind fills the journal in an afternoon, and the
+                # journal is how a failed panel gets read.
+                _complain_once(f"draw:{type(e).__name__}:{e}",
+                               "could not paint the panel")
+                screens.draw_cannot_draw(frame, assets, build)
             # Everything drawn gets the shift, including the screens that are
             # not the scoreboard: a pairing code sits there until somebody
             # claims the panel and "No network" until somebody fixes the
