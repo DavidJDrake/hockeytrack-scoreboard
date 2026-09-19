@@ -289,17 +289,26 @@ done
 # (/dev/null is in fact the one target where the image/host distinction is
 # moot -- it is the same path either way and nothing is read through it -- but
 # resolving inside the root is what makes that a fact rather than an accident.)
-mask="$ROOT/etc/systemd/system/userconfig.service"
-[ -L "$mask" ] || fail "the first-boot wizard's unit is not masked (/etc/systemd/system/userconfig.service is not a symlink); only a mask stops it being enabled later"
-mask_target="$(readlink "$mask")"
-case "$mask_target" in
-  /*) mask_resolved="$mask_target" ;;
-  *)  mask_resolved="$(readlink -m -- "$ROOT/etc/systemd/system/$mask_target")"
-      root_resolved="$(readlink -m -- "$ROOT")"
-      mask_resolved="${mask_resolved#"$root_resolved"}" ;;
-esac
-[ "$mask_resolved" = "/dev/null" ] \
-  || fail "the first-boot wizard's unit is not masked (/etc/systemd/system/userconfig.service resolves to $(sanitize_for_log "$mask_resolved"), not /dev/null)"
+# Used here and by the network-surface rules below, which mask several more
+# units for the same reason: $1 is the unit name, $2 names the thing in the
+# failure message. Every message says "not masked", which is the phrase the
+# fixtures match on.
+assert_masked() {
+  local unit="$1" what="$2" mask mask_target mask_resolved root_resolved
+  mask="$ROOT/etc/systemd/system/$unit"
+  [ -L "$mask" ] \
+    || fail "$what is not masked (/etc/systemd/system/$unit is not a symlink); only a mask stops it being enabled later"
+  mask_target="$(readlink "$mask")"
+  case "$mask_target" in
+    /*) mask_resolved="$mask_target" ;;
+    *)  mask_resolved="$(readlink -m -- "$ROOT/etc/systemd/system/$mask_target")"
+        root_resolved="$(readlink -m -- "$ROOT")"
+        mask_resolved="${mask_resolved#"$root_resolved"}" ;;
+  esac
+  [ "$mask_resolved" = "/dev/null" ] \
+    || fail "$what is not masked (/etc/systemd/system/$unit resolves to $(sanitize_for_log "$mask_resolved"), not /dev/null)"
+}
+assert_masked userconfig.service "the first-boot wizard's unit"
 
 # An autologin would hand a shell to whoever walks up to the panel, without
 # the password that every account in the image deliberately lacks.
@@ -550,6 +559,213 @@ for path in usr/bin/rpi-connect usr/bin/rpi-connectd \
     || fail "Raspberry Pi Connect is installed (/$path exists); an appliance carries no remote-access agent"
 done
 ok "no remote-access agent"
+
+# --- Network surface (added 2026-09-19) ----------------------------------
+#
+# The panel needs DHCP, DNS, NTP and outbound TLS. It accepts no inbound
+# connection, has no login and no Bluetooth function. Everything below
+# asserts that tools/pi-gen/stage-scoreboard/05-no-listeners did its job and
+# that nothing afterwards -- a pi-gen bump, export-image's dist-upgrade, a
+# Recommends -- put any of it back. Spec 9.13 carries the reasoning and the
+# evidence for each decision; this file is the part that fails the build.
+#
+# The package rule comes first and is the same signal the cloud-init and
+# remote-access rules use: dpkg's status file, which also catches a `remove`
+# that should have been a `purge`, since that leaves a
+# "Status: deinstall ok config-files" stanza with its Package: line intact.
+# `ssh` is the metapackage; the -x anchor means it matches only that exact
+# line and not ssh-import-id or openssh-server.
+if grep_or_fail -qxE 'Package: (avahi-daemon|libnss-mdns|bluez|bluez-firmware|rpi-usb-gadget|ssh-import-id|rpi-update|openssh-server|openssh-sftp-server|openssh-client|ssh)' "$status"; then
+  fail "a package the appliance purges for network surface is installed (dpkg lists one of avahi-daemon, libnss-mdns, bluez, bluez-firmware, rpi-usb-gadget, ssh-import-id, rpi-update, openssh-server, openssh-sftp-server, openssh-client, ssh)"
+fi
+# The programs and units themselves, named by exact path rather than scanned
+# for by name -- a name scan is what once rejected OpenSSH's own manual page
+# and cost a release build (GitHub Actions run 35298398347). Only paths whose
+# owning package is unambiguous are listed: bluez-firmware's HCI blobs are
+# deliberately absent from this list, because a future firmware package could
+# legitimately ship a file of the same name, and the dpkg rule above already
+# covers it.
+for path in usr/sbin/avahi-daemon usr/lib/systemd/system/avahi-daemon.service \
+            usr/lib/systemd/system/avahi-daemon.socket etc/avahi/avahi-daemon.conf \
+            usr/libexec/bluetooth/bluetoothd usr/bin/bluetoothctl \
+            usr/lib/systemd/system/bluetooth.service \
+            usr/share/dbus-1/system-services/org.bluez.service \
+            usr/bin/rpi-usb-gadget usr/lib/systemd/system/rpi-usb-gadget-ics.service \
+            usr/bin/ssh-import-id usr/bin/ssh-import-id-gh usr/bin/ssh-import-id-lp \
+            usr/bin/rpi-update \
+            usr/sbin/sshd usr/lib/openssh/sshd-session \
+            usr/lib/systemd/system/ssh.service usr/lib/systemd/system/ssh.socket \
+            usr/bin/ssh usr/bin/ssh-keygen; do
+  [ ! -e "$ROOT/$path" ] && [ ! -L "$ROOT/$path" ] \
+    || fail "/$path is in the image; the appliance purges the package that ships it (network surface)"
+done
+
+# Nothing from the must-not-listen set may be wired into any target, through a
+# .wants, .requires or .upholds directory, in either unit tree -- the same
+# notion of "enabled" the SSH and wizard rules above use. Purging a package
+# takes its own enablement symlinks with it (deb-systemd-helper purge removes
+# the ones it created), so on a hardened image there is nothing here to find;
+# one of these names appearing means the package came back, or something
+# hand-wrote the link.
+#
+# Two names are deliberately NOT in this list. The four SSH unit names have
+# their own rule above. And sshswitch.service is enabled on every Raspberry Pi
+# OS image by raspberrypi-sys-mods, which is load-bearing and stays -- so its
+# symlink is still there on a correctly hardened image and failing on it would
+# reject a good build. The mask asserted below is what neutralizes it.
+#
+# hciuart.service is named although no installed package ships it today
+# (pi-bluetooth is not in this image): it is the unit a pi-gen bump would use
+# to attach the adapter, and naming it costs nothing.
+for units in "$ROOT/etc/systemd/system" "$ROOT/usr/lib/systemd/system"; do
+  [ -d "$units" ] || continue
+  run_find "$units" \( -path '*.wants/*' -o -path '*.requires/*' -o -path '*.upholds/*' \) \
+    \( -name 'avahi-daemon.service' -o -name 'avahi-daemon.socket' \
+       -o -name 'bluetooth.service' -o -name 'hciuart.service' \
+       -o -name 'rpi-usb-gadget-ics.service' \) -print -quit
+  [ -z "$FOUND" ] || fail "a daemon the panel must not run is enabled (${FOUND#"$ROOT"})"
+done
+
+# And the masks are asserted rather than assumed, for the reason the wizard's
+# mask is: a purge that is later undone leaves the unit unmasked and unenabled
+# -- which passes the rule above, boots perfectly, and is armed for the next
+# thing that enables it.
+assert_masked avahi-daemon.service "the mDNS responder's unit"
+assert_masked avahi-daemon.socket "the mDNS responder's socket"
+assert_masked bluetooth.service "the Bluetooth daemon's unit"
+assert_masked sshswitch.service "the boot-partition SSH switch"
+for unit in ssh.service ssh.socket sshd.service sshd.socket; do
+  assert_masked "$unit" "the SSH server's $unit"
+done
+
+# Bluetooth is off in the device tree, not merely daemonless. Without this the
+# kernel still attaches the on-board adapter over HCI UART and answers for it.
+# The line must be live: commented out, it is a note about what someone meant
+# to do. config.txt is read by the firmware, which accepts leading whitespace,
+# so the match does too.
+btcfg="$BOOT/config.txt"
+[ -f "$btcfg" ] || fail "the boot partition has no config.txt, so Bluetooth cannot be shown to be off"
+grep_or_fail -qE '^[[:space:]]*dtoverlay=disable-bt[[:space:]]*$' "$btcfg" \
+  || fail "/boot/firmware/config.txt does not carry an uncommented dtoverlay=disable-bt; the kernel would attach the on-board Bluetooth adapter"
+
+# pi-gen's stage2/02-net-tweaks writes 0 into a systemd-rfkill state file for
+# each known on-board Bluetooth address, which means "come up UNBLOCKED"
+# (systemd stores one_zero(soft) there). With the overlay above there is no
+# such device, so these files are inert -- but an inert file that says
+# "unblocked" is a trap for whoever removes the overlay later.
+rfkill_state="$ROOT/var/lib/systemd/rfkill"
+reject_symlink "$rfkill_state" "/var/lib/systemd/rfkill"
+if [ -d "$rfkill_state" ]; then
+  run_find "$rfkill_state" -maxdepth 1 -type f -name '*:bluetooth' -print
+  while IFS= read -r state; do
+    [ -n "$state" ] || continue
+    if grep_or_fail -qxE '[[:space:]]*0[[:space:]]*' "$state"; then
+      fail "${state#"$ROOT"} un-blocks the Bluetooth radio (it holds 0); the appliance's radio must come up soft-blocked"
+    fi
+  done <<<"$FOUND"
+fi
+
+# systemd-ssh-generator honours systemd.ssh_listen=<address> from the kernel
+# command line and writes an sshd-extra.socket with that ListenStream, wired
+# into sockets.target -- a listening sshd armed by editing one file on the
+# boot partition, with no package and no enablement symlink for the rules
+# above to see. Purging openssh-server is what actually defuses it (the
+# generator gives up when find_executable("sshd") fails), and this rule keeps
+# the boot partition itself honest.
+cmdline="$BOOT/cmdline.txt"
+if [ -f "$cmdline" ] && grep_or_fail -qE '(^|[[:space:]])systemd\.ssh_listen=' "$cmdline"; then
+  fail "/boot/firmware/cmdline.txt carries systemd.ssh_listen=, which makes systemd generate a listening sshd socket"
+fi
+ok "no mDNS responder, no Bluetooth stack, no SSH server, no USB-network gadget"
+
+# A rule that does not name a daemon, so that the next one to arrive is caught
+# without anybody remembering to add it here: no ENABLED socket unit may listen
+# on anything but a local socket.
+#
+# WHAT THIS CAN AND CANNOT DO, said plainly because it would otherwise read as
+# a general "nothing listens" proof, which it is not. It judges socket units.
+# It would NOT have caught avahi-daemon, the very thing this section exists to
+# remove: avahi-daemon.socket is ListenStream=/run/avahi-daemon/socket, a UNIX
+# activation socket, and the UDP 5353 bind is done by the daemon itself after
+# it starts. Nothing in a unit file describes that. The same is true of any
+# daemon that opens its own sockets -- which is most of them. This rule covers
+# exactly one shape: socket activation on a network address.
+#
+# It is safe to run against a real image because every enabled socket unit in
+# stock trixie plus Raspberry Pi OS listens on a local address. Read from the
+# debs on 2026-09-19: systemd's fourteen socket units are all AF_UNIX paths,
+# a FIFO, netlink or /dev/rfkill; udev's are /run/udev/control and netlink;
+# dbus.socket is /run/dbus/system_bus_socket. The one stock unit that would
+# fail is openssh-server's ssh.socket (ListenStream=22) -- which this image
+# purges, and which failing is the correct outcome.
+#
+# Enablement is the same notion used above: a .wants/.requires/.upholds
+# symlink in either unit tree. A socket unit placed directly in
+# /etc/systemd/system is judged too, since that overrides the packaged one.
+# Drop-ins are read as well: a Listen= line in a .d/*.conf is as live as one
+# in the unit.
+socket_listen_is_local() {
+  case "$1" in
+    /* | @* | %t/*) return 0 ;;                      # AF_UNIX path or abstract
+    127.0.0.1:* | '[::1]:'* | localhost:*) return 0 ;; # loopback only
+    *) return 1 ;;
+  esac
+}
+check_socket_unit() {
+  local unit_file="$1" name confs conf raw value units
+  name="$(basename -- "$unit_file")"
+  confs="$unit_file"
+  for units in "$ROOT/etc/systemd/system" "$ROOT/usr/lib/systemd/system"; do
+    [ -d "$units/$name.d" ] || continue
+    reject_symlink "$units/$name.d" "${units#"$ROOT"}/$name.d"
+    run_find "$units/$name.d" -maxdepth 1 -xtype f -name '*.conf' -print
+    confs="$confs
+$FOUND"
+  done
+  while IFS= read -r conf; do
+    [ -n "$conf" ] || continue
+    [ -f "$conf" ] || continue
+    if grep_line_or_fail -iE '^[[:space:]]*Listen(Stream|Datagram|SequentialPacket)[[:space:]]*=' "$conf"; then
+      while IFS= read -r raw; do
+        [ -n "$raw" ] || continue
+        value="$(printf '%s\n' "$raw" | sed -E 's/^[^=]*=[[:space:]]*//; s/[[:space:]]+$//')"
+        # An empty assignment resets the list; it listens on nothing.
+        [ -n "$value" ] || continue
+        socket_listen_is_local "$value" \
+          || fail "socket unit $name listens on '$(sanitize_for_log "$value")' (${conf#"$ROOT"}), which is not a local address; the panel accepts no inbound connection"
+      done <<<"$LINE"
+    fi
+  done <<<"$confs"
+}
+enabled_sockets=""
+for units in "$ROOT/etc/systemd/system" "$ROOT/usr/lib/systemd/system"; do
+  [ -d "$units" ] || continue
+  run_find "$units" \( -path '*.wants/*' -o -path '*.requires/*' -o -path '*.upholds/*' \) \
+    -name '*.socket' -print
+  enabled_sockets="$enabled_sockets
+$FOUND"
+done
+run_find "$ROOT/etc/systemd/system" -maxdepth 1 -xtype f -name '*.socket' -print
+enabled_sockets="$enabled_sockets
+$FOUND"
+while IFS= read -r sock; do
+  [ -n "$sock" ] || continue
+  # An enablement symlink points at the unit file; a masked one points at
+  # /dev/null and starts nothing, so it is not read as a listener.
+  if [ -L "$sock" ]; then
+    target="$(readlink "$sock")"
+    case "$target" in
+      /*) candidate="$ROOT$target" ;;
+      *) candidate="$(dirname -- "$sock")/$target" ;;
+    esac
+  else
+    candidate="$sock"
+  fi
+  [ "$(readlink -m -- "$candidate")" != "/dev/null" ] || continue
+  [ -f "$candidate" ] || continue
+  check_socket_unit "$candidate"
+done <<<"$enabled_sockets"
+ok "no enabled socket unit listens on a non-local address"
 
 cfg="$ROOT/opt/scoreboard/.venv/pyvenv.cfg"
 [ -f "$cfg" ] || fail "no virtualenv at /opt/scoreboard/.venv"

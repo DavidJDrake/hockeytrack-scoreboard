@@ -34,10 +34,12 @@ def clean_image(tmp_path: Path) -> tuple[Path, Path]:
         (units / unit).write_text("[Unit]\n")
         (wants / unit).symlink_to(f"/etc/systemd/system/{unit}")
     # Raspberry Pi OS (raspberrypi-sys-mods) ships this enabled on every
-    # image; it only turns SSH on via a boot-partition marker file, which is
-    # checked separately, so it must not itself trip the SSH-enabled check.
-    (units / "sshswitch.service").write_text("[Unit]\n")
-    (wants / "sshswitch.service").symlink_to("/etc/systemd/system/sshswitch.service")
+    # image, and raspberrypi-sys-mods stays -- so the enablement symlink is
+    # still there on the hardened image. The scoreboard stage masks the unit
+    # instead, because it reads the boot partition and would run
+    # `systemctl enable --now ssh` for anyone who puts a file named ssh on the
+    # card. Both the symlink and the mask belong in the clean fixture.
+    (wants / "sshswitch.service").symlink_to("/usr/lib/systemd/system/sshswitch.service")
     # userconf-pi is a Recommends of raspberrypi-sys-mods, so every Raspberry
     # Pi OS image carries its unit file whether the wizard is armed or not,
     # and the scoreboard stage's fix is the mask symlink beside it. Neither is
@@ -48,6 +50,8 @@ def clean_image(tmp_path: Path) -> tuple[Path, Path]:
     (lib_units / "userconfig.service").write_text(
         "[Unit]\nDescription=User configuration dialog\n[Install]\nWantedBy=multi-user.target\n")
     (units / "userconfig.service").symlink_to("/dev/null")
+    (lib_units / "sshswitch.service").write_text(
+        "[Unit]\nDescription=Turn on SSH if /boot/ssh is present\n[Install]\nWantedBy=multi-user.target\n")
     # A getty drop-in is not itself a finding: noclear.conf is the common one
     # and it logs nobody in. Only an autologin drop-in may fail the gate.
     (units / "getty@tty1.service.d").mkdir()
@@ -70,7 +74,13 @@ def clean_image(tmp_path: Path) -> tuple[Path, Path]:
     shutil.copy(REPO / "device" / "polkit" / "10-scoreboard-network.rules", rules)
     (root / "etc" / "scoreboard-build").write_text("v0.1.0 · 2026-09-16 · abc1234\n")
     (root / "etc" / "NetworkManager" / "system-connections").mkdir(parents=True)
-    (root / "etc" / "ssh").mkdir()
+    # openssh-server is purged, so it no longer owns /etc/ssh/sshd_config.d --
+    # the scoreboard stage recreates the directory because pi-gen's
+    # export-image runs rename-user afterwards, which writes into it
+    # unconditionally. Its one file is a Banner line no sshd will ever read.
+    (root / "etc" / "ssh" / "sshd_config.d").mkdir(parents=True)
+    (root / "etc" / "ssh" / "sshd_config.d" / "rename_user.conf").write_text(
+        "Banner /usr/share/userconf-pi/sshd_banner\n")
     venv = root / "opt" / "scoreboard" / ".venv"
     venv.mkdir(parents=True)
     (venv / "pyvenv.cfg").write_text("home = /usr/bin\ninclude-system-site-packages = true\nversion = 3.13.5\n")
@@ -92,18 +102,12 @@ def clean_image(tmp_path: Path) -> tuple[Path, Path]:
     (root / "home" / "pi").mkdir(parents=True)
     (root / "root").mkdir()
     boot.mkdir()
-    (boot / "config.txt").write_text("dtparam=audio=on\n")
-    # The real image ships OpenSSH's own man page for the authorized_keys
-    # file format, plus other documentation -- neither is a credential, and
-    # the run that first met a real rootfs (GitHub Actions run 35298398347)
-    # failed here because the old rule could not tell the two apart.
-    (root / "usr" / "share" / "man" / "man5").mkdir(parents=True)
-    (root / "usr" / "share" / "man" / "man5" / "authorized_keys.5.gz").write_bytes(
-        b"not really gzipped; the gate only looks at the name")
-    (root / "usr" / "share" / "doc" / "openssh-server").mkdir(parents=True)
-    (root / "usr" / "share" / "doc" / "openssh-server" / "authorized_keys.example").write_text(
-        "ssh-ed25519 AAAAexample this is documentation, not a real key\n")
+    (boot / "config.txt").write_text(
+        "dtparam=audio=on\n\n[all]\n# Set by 05-no-listeners.\ndtoverlay=disable-bt\n")
+    (boot / "cmdline.txt").write_text(
+        "console=serial0,115200 console=tty1 root=PARTUUID=abc-02 rootfstype=ext4 rootwait\n")
     _display_path(root)
+    _network_surface(root)
     return root, boot
 
 
@@ -139,6 +143,64 @@ def _display_path(root: Path) -> None:
         '{"file_format_version":"1.0.0","ICD":{"library_path":"libEGL_mesa.so.0"}}\n')
 
 
+# The units the scoreboard stage masks, and the human words the gate uses for
+# each. Kept here so a break fixture can remove any one of them by name.
+MASKED_UNITS = (
+    "avahi-daemon.service", "avahi-daemon.socket", "bluetooth.service",
+    "sshswitch.service", "ssh.service", "ssh.socket", "sshd.service", "sshd.socket",
+)
+
+# The socket units a real trixie + Raspberry Pi OS image actually has enabled,
+# with the Listen= lines the debs ship, read with dpkg-deb on 2026-09-19. Every
+# one is a local address, which is what makes the general socket rule safe to
+# run against a real image. The clean fixture carries them so that a rule which
+# rejected any of them would fail here rather than thirty-five minutes into a
+# release build.
+STOCK_SOCKETS = {
+    "dbus.socket": "[Socket]\nListenStream=/run/dbus/system_bus_socket\n",
+    "systemd-journald.socket":
+        "[Socket]\nListenDatagram=/run/systemd/journal/socket\n"
+        "ListenStream=/run/systemd/journal/stdout\n",
+    "systemd-journald-dev-log.socket": "[Socket]\nListenDatagram=/run/systemd/journal/dev-log\n",
+    "systemd-journald-audit.socket": "[Socket]\nListenNetlink=audit 1\n",
+    "systemd-udevd-control.socket": "[Socket]\nListenSequentialPacket=/run/udev/control\n",
+    "systemd-udevd-kernel.socket": "[Socket]\nListenNetlink=kobject-uevent 1\n",
+    "systemd-rfkill.socket": "[Socket]\nListenSpecial=/dev/rfkill\n",
+    "systemd-initctl.socket": "[Socket]\nListenFIFO=/run/initctl\n",
+    "systemd-creds.socket": "[Socket]\nListenStream=/run/systemd/io.systemd.Credentials\n",
+    "systemd-hostnamed.socket": "[Socket]\nListenStream=/run/systemd/io.systemd.Hostname\n",
+}
+
+
+def _network_surface(root: Path) -> None:
+    """What the hardened image looks like once 05-no-listeners has run.
+
+    No avahi, no bluez, no OpenSSH and no USB-network gadget in dpkg's status
+    or on the filesystem; the units they would have brought masked; the
+    Bluetooth rfkill state files pi-gen un-blocked put back to blocked; and
+    the stock socket units, all of which listen on local addresses only.
+    """
+    units = root / "etc" / "systemd" / "system"
+    for unit in MASKED_UNITS:
+        (units / unit).symlink_to("/dev/null")
+    # pi-gen's stage2/02-net-tweaks writes one of these per known on-board
+    # Bluetooth address, containing 0 (unblocked). The stage rewrites them.
+    rfkill = root / "var" / "lib" / "systemd" / "rfkill"
+    rfkill.mkdir(parents=True)
+    for addr in ("107d50c000.serial", "3f215040.serial", "20215040.serial",
+                 "fe215040.serial", "soc"):
+        (rfkill / f"platform-{addr}:bluetooth").write_text("1\n")
+    # A Wi-Fi state file, which do_wifi_country sets to 0 and which must not be
+    # confused with a Bluetooth one.
+    (rfkill / "platform-soc:wlan").write_text("0\n")
+    lib_units = root / "usr" / "lib" / "systemd" / "system"
+    wants = lib_units / "sockets.target.wants"
+    wants.mkdir(parents=True, exist_ok=True)
+    for name, body in STOCK_SOCKETS.items():
+        (lib_units / name).write_text(f"[Unit]\nDescription={name}\n{body}")
+        (wants / name).symlink_to(f"/usr/lib/systemd/system/{name}")
+
+
 def gate(root: Path, boot: Path):
     return subprocess.run(["bash", str(GATE), str(root), str(boot), str(REPO)],
                           capture_output=True, text=True, timeout=60)
@@ -159,6 +221,24 @@ def _write(path: Path, text: str) -> None:
 def _write_bytes(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
+
+
+def _add_package(r: Path, name: str, status: str) -> None:
+    """Record a package in dpkg's status file.
+
+    `deinstall ok config-files` is what a `remove` that should have been a
+    `purge` leaves behind, stanza and Package: line intact.
+    """
+    status_file = r / "var/lib/dpkg/status"
+    status_file.write_text(
+        status_file.read_text() + f"\nPackage: {name}\nStatus: {status}\nVersion: 1.0\n")
+
+
+def _enable_socket(r: Path, name: str, body: str) -> None:
+    """Ship a socket unit under /usr/lib and enable it, as a package would."""
+    lib_units = r / "usr/lib/systemd/system"
+    (lib_units / name).write_text(f"[Unit]\nDescription={name}\n{body}")
+    (lib_units / "sockets.target.wants" / name).symlink_to(f"/usr/lib/systemd/system/{name}")
 
 
 def _symlink_scoreboard_state_dir(r: Path, b: Path) -> None:
@@ -531,6 +611,107 @@ BREAKS = {
                       (r / ARCH_LIB / "libgbm.so.1.0.0").unlink()), "libgbm.so.1"),
     "the GBM backend missing": (
         lambda r, b: (r / ARCH_LIB / "gbm/dri_gbm.so").unlink(), "dri_gbm.so"),
+    # --- Network surface, 2026-09-19 -------------------------------------
+    # The survey that led to 05-no-listeners found avahi answering mDNS on
+    # every interface and the Bluetooth radio deliberately un-blocked, on an
+    # image that passed every rule above.
+    "avahi recorded as a package by dpkg": (
+        lambda r, b: _add_package(r, "avahi-daemon", "install ok installed"), "network surface"),
+    "avahi removed but not purged": (
+        lambda r, b: _add_package(r, "avahi-daemon", "deinstall ok config-files"), "network surface"),
+    "the mDNS NSS module recorded as a package by dpkg": (
+        lambda r, b: _add_package(r, "libnss-mdns", "install ok installed"), "network surface"),
+    "bluez recorded as a package by dpkg": (
+        lambda r, b: _add_package(r, "bluez", "install ok installed"), "network surface"),
+    "the Bluetooth firmware recorded as a package by dpkg": (
+        lambda r, b: _add_package(r, "bluez-firmware", "install ok installed"), "network surface"),
+    "the USB network gadget recorded as a package by dpkg": (
+        lambda r, b: _add_package(r, "rpi-usb-gadget", "install ok installed"), "network surface"),
+    "ssh-import-id recorded as a package by dpkg": (
+        lambda r, b: _add_package(r, "ssh-import-id", "install ok installed"), "network surface"),
+    "rpi-update recorded as a package by dpkg": (
+        lambda r, b: _add_package(r, "rpi-update", "install ok installed"), "network surface"),
+    "openssh-server recorded as a package by dpkg": (
+        lambda r, b: _add_package(r, "openssh-server", "install ok installed"), "network surface"),
+    "openssh-client recorded as a package by dpkg": (
+        lambda r, b: _add_package(r, "openssh-client", "install ok installed"), "network surface"),
+    "the ssh metapackage recorded as a package by dpkg": (
+        lambda r, b: _add_package(r, "ssh", "install ok installed"), "network surface"),
+    "the avahi daemon binary in the rootfs": (
+        lambda r, b: _write(r / "usr/sbin/avahi-daemon", "#!/bin/sh\n"), "usr/sbin/avahi-daemon"),
+    "avahi's configuration in the rootfs": (
+        lambda r, b: _write(r / "etc/avahi/avahi-daemon.conf", "[server]\n"), "etc/avahi/avahi-daemon.conf"),
+    "the Bluetooth daemon in the rootfs": (
+        lambda r, b: _write(r / "usr/libexec/bluetooth/bluetoothd", "#!/bin/sh\n"), "bluetoothd"),
+    "the Bluetooth D-Bus activation file in the rootfs": (
+        lambda r, b: _write(r / "usr/share/dbus-1/system-services/org.bluez.service", "[D-BUS Service]\n"),
+        "org.bluez.service"),
+    "the USB gadget unit in the rootfs": (
+        lambda r, b: _write(r / "usr/lib/systemd/system/rpi-usb-gadget-ics.service", "[Unit]\n"),
+        "rpi-usb-gadget-ics.service"),
+    "the ssh-import-id command in the rootfs": (
+        lambda r, b: _write(r / "usr/bin/ssh-import-id-gh", "#!/bin/sh\n"), "usr/bin/ssh-import-id-gh"),
+    "the rpi-update command in the rootfs": (
+        lambda r, b: _write(r / "usr/bin/rpi-update", "#!/bin/sh\n"), "usr/bin/rpi-update"),
+    "the sshd binary in the rootfs": (
+        lambda r, b: _write(r / "usr/sbin/sshd", "#!/bin/sh\n"), "usr/sbin/sshd"),
+    "the sshd session helper in the rootfs": (
+        lambda r, b: _write(r / "usr/lib/openssh/sshd-session", "#!/bin/sh\n"), "usr/lib/openssh/sshd-session"),
+    "ssh-keygen in the rootfs": (
+        lambda r, b: _write(r / "usr/bin/ssh-keygen", "#!/bin/sh\n"), "usr/bin/ssh-keygen"),
+    "avahi enabled through a wants directory": (
+        lambda r, b: _write(r / "etc/systemd/system/multi-user.target.wants/avahi-daemon.service", ""),
+        "must not run is enabled"),
+    "avahi's socket enabled through sockets.target": (
+        lambda r, b: _write(r / "usr/lib/systemd/system/sockets.target.wants/avahi-daemon.socket", ""),
+        "must not run is enabled"),
+    "bluetooth enabled through a requires directory": (
+        lambda r, b: _write(r / "etc/systemd/system/bluetooth.target.requires/bluetooth.service", ""),
+        "must not run is enabled"),
+    "the Bluetooth UART attach unit enabled from /usr/lib": (
+        lambda r, b: _write(r / "usr/lib/systemd/system/multi-user.target.wants/hciuart.service", ""),
+        "must not run is enabled"),
+    "the USB network gadget enabled through an upholds directory": (
+        lambda r, b: _write(r / "etc/systemd/system/multi-user.target.upholds/rpi-usb-gadget-ics.service", ""),
+        "must not run is enabled"),
+    "a mask replaced by a regular unit file": (
+        lambda r, b: ((r / "etc/systemd/system/avahi-daemon.service").unlink(),
+                      _write(r / "etc/systemd/system/avahi-daemon.service", "[Unit]\n")), "not masked"),
+    "a mask pointing at the real unit instead of /dev/null": (
+        lambda r, b: ((r / "etc/systemd/system/bluetooth.service").unlink(),
+                      (r / "etc/systemd/system/bluetooth.service").symlink_to(
+                          "/usr/lib/systemd/system/bluetooth.service")), "not masked"),
+    "Bluetooth left on in config.txt": (
+        lambda r, b: (b / "config.txt").write_text("dtparam=audio=on\n"), "disable-bt"),
+    "the Bluetooth overlay commented out": (
+        lambda r, b: (b / "config.txt").write_text("dtparam=audio=on\n#dtoverlay=disable-bt\n"), "disable-bt"),
+    "no config.txt at all": (
+        lambda r, b: (b / "config.txt").unlink(), "config.txt"),
+    "a Bluetooth rfkill state file still un-blocking the radio": (
+        lambda r, b: (r / "var/lib/systemd/rfkill/platform-fe215040.serial:bluetooth").write_text("0\n"),
+        "un-blocks the Bluetooth radio"),
+    "an sshd socket armed from the kernel command line": (
+        lambda r, b: (b / "cmdline.txt").write_text(
+            (b / "cmdline.txt").read_text().rstrip("\n") + " systemd.ssh_listen=0.0.0.0:22\n"),
+        "systemd.ssh_listen"),
+    # The general socket rule. None of these names a daemon, which is the
+    # point: it is the one rule here that would catch a listener nobody
+    # thought to add by name.
+    "an enabled socket unit listening on a bare port": (
+        lambda r, b: _enable_socket(r, "mystery.socket", "[Socket]\nListenStream=8080\n"),
+        "is not a local address"),
+    "an enabled socket unit listening on every address": (
+        lambda r, b: _enable_socket(r, "mystery.socket", "[Socket]\nListenStream=0.0.0.0:22\n"),
+        "is not a local address"),
+    "an enabled socket unit listening on every IPv6 address": (
+        lambda r, b: _enable_socket(r, "mystery.socket", "[Socket]\nListenDatagram=[::]:5353\n"),
+        "is not a local address"),
+    "a socket unit dropped straight into /etc/systemd/system": (
+        lambda r, b: _write(r / "etc/systemd/system/mystery.socket", "[Socket]\nListenStream=9000\n"),
+        "is not a local address"),
+    "a drop-in adding a network listener to a stock socket": (
+        lambda r, b: _write(r / "etc/systemd/system/dbus.socket.d/50-extra.conf",
+                            "[Socket]\nListenStream=1234\n"), "is not a local address"),
 }
 
 
@@ -543,6 +724,72 @@ def test_each_assertion_can_fail(tmp_path, name):
     assert result.returncode == 1, f"{name}: gate passed a broken image\n{result.stdout}"
     assert "image-gate: FAIL:" in result.stderr
     assert expected in result.stderr, f"{name}: {result.stderr}"
+
+
+@pytest.mark.parametrize("unit", MASKED_UNITS)
+def test_each_mask_is_asserted_on_its_own(tmp_path, unit):
+    # The mask is the control, so its absence is a finding by itself: a purge
+    # that is later undone leaves the unit present, unmasked and unenabled --
+    # which passes every other rule, boots perfectly, and is armed for the
+    # next thing that enables it.
+    root, boot = clean_image(tmp_path)
+    (root / "etc/systemd/system" / unit).unlink()
+    result = gate(root, boot)
+    assert result.returncode == 1, f"{unit}: gate passed an unmasked unit\n{result.stdout}"
+    assert "not masked" in result.stderr, result.stderr
+    assert unit in result.stderr, result.stderr
+
+
+def test_openssh_documentation_from_another_package_is_not_a_credential(tmp_path):
+    # OpenSSH is purged now, so its own manual page is gone with it -- but
+    # documentation naming authorized_keys can arrive from anywhere, and a
+    # scan that cannot tell a program from its documentation is the bug that
+    # failed a real build (GitHub Actions run 35298398347). The narrowed rule
+    # must still wave these through.
+    root, boot = clean_image(tmp_path)
+    _write_bytes(root / "usr/share/man/man5/authorized_keys.5.gz",
+                 b"not really gzipped; the gate only looks at the name")
+    _write(root / "usr/share/doc/some-package/authorized_keys.example",
+           "ssh-ed25519 AAAAexample this is documentation, not a real key\n")
+    result = gate(root, boot)
+    assert result.returncode == 0, result.stderr
+
+
+def test_a_socket_listening_only_on_loopback_passes(tmp_path):
+    # A daemon that binds 127.0.0.1 is reachable from nowhere but the panel
+    # itself, so the rule must not reject it and send someone looking for a
+    # listener that does not exist.
+    root, boot = clean_image(tmp_path)
+    _enable_socket(root, "local-only.socket", "[Socket]\nListenStream=127.0.0.1:9000\n")
+    _enable_socket(root, "local-only6.socket", "[Socket]\nListenStream=[::1]:9001\n")
+    _enable_socket(root, "runtime-path.socket", "[Socket]\nListenStream=%t/something.sock\n")
+    _enable_socket(root, "abstract.socket", "[Socket]\nListenStream=@an-abstract-name\n")
+    result = gate(root, boot)
+    assert result.returncode == 0, result.stderr
+
+
+def test_a_masked_socket_unit_is_not_read_as_a_listener(tmp_path):
+    # An enablement symlink left behind for a unit that is masked starts
+    # nothing, so the rule must resolve the mask rather than read the unit it
+    # would otherwise have pointed at. Without this, the image's own
+    # avahi-daemon.socket mask could fail the build.
+    root, boot = clean_image(tmp_path)
+    _enable_socket(root, "listening.socket", "[Socket]\nListenStream=4444\n")
+    (root / "etc/systemd/system/listening.socket").symlink_to("/dev/null")
+    (root / "usr/lib/systemd/system/sockets.target.wants/listening.socket").unlink()
+    (root / "usr/lib/systemd/system/sockets.target.wants/listening.socket").symlink_to("/dev/null")
+    result = gate(root, boot)
+    assert result.returncode == 0, result.stderr
+
+
+def test_an_empty_listen_assignment_resets_rather_than_listens(tmp_path):
+    # "ListenStream=" with no value clears the list; it is how a drop-in takes
+    # a listener away, and reading it as an address would reject the fix.
+    root, boot = clean_image(tmp_path)
+    _write(root / "etc/systemd/system/dbus.socket.d/50-reset.conf",
+           "[Socket]\nListenStream=\n")
+    result = gate(root, boot)
+    assert result.returncode == 0, result.stderr
 
 
 def test_a_directory_that_is_not_a_rootfs_is_refused(tmp_path):
