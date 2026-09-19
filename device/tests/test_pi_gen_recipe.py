@@ -270,8 +270,18 @@ GATE = REPO / "tools" / "image-gate.sh"
 WIZARD_STAGE = PIGEN / "stage-scoreboard" / "02-no-first-boot-wizard" / "00-run.sh"
 # The quoted find predicates both files use to name a getty-ish unit or its
 # drop-in directory: -name 'getty@*.service', -path '*/getty@*.service.d/*'.
+#
+# Anchored on the -name/-path that precedes them, not on the quotes alone.
+# Without that anchor any other quoted mention of one of these unit names
+# counts as a find predicate -- which it is not. The case that found it:
+# tools/image-gate.sh grew an assert_masked 'serial-getty@.service' line, and
+# this test then reported "the gate's unit set changed" for a file whose
+# autologin scan had not changed at all. (It reads the GATE and
+# 02-no-first-boot-wizard; 05-no-listeners, which does the masking, is never
+# read here.)
 UNIT_GLOB = re.compile(
-    r"'(?:\*/)?((?:serial-getty|autovt|getty)@\*?\.service(?:\.d)?|console-getty\.service(?:\.d)?)(?:/\*)?'")
+    r"-(?:name|path)\s+'(?:\*/)?"
+    r"((?:serial-getty|autovt|getty)@\*?\.service(?:\.d)?|console-getty\.service(?:\.d)?)(?:/\*)?'")
 
 
 def autologin_unit_globs(text: str) -> set[str]:
@@ -329,3 +339,126 @@ def test_the_journal_drop_in_sorts_after_the_volatile_one():
 def test_the_stage_documents_its_tmpfs_assumption():
     run = (PIGEN / "stage-scoreboard" / "01-install" / "00-run.sh").read_text()
     assert "tmpfs" in run
+
+
+LISTENERS_RUN = PIGEN / "stage-scoreboard" / "05-no-listeners" / "00-run.sh"
+
+# What the panel needs from a network is DHCP, DNS, NTP and outbound TLS. Each
+# of these answered, radiated or armed something beyond that on a real v0.1.2
+# boot or in the v0.1.3 build log. `ssh` is the metapackage, named so that
+# purging openssh-server does not leave apt to decide.
+PURGED_FOR_NETWORK_SURFACE = (
+    "avahi-daemon", "libnss-mdns", "bluez", "bluez-firmware", "rpi-usb-gadget",
+    "ssh-import-id", "rpi-update", "openssh-server", "openssh-sftp-server",
+    "openssh-client", "ssh",
+)
+MASKED_FOR_NETWORK_SURFACE = (
+    "avahi-daemon.service", "avahi-daemon.socket", "bluetooth.service",
+    "sshswitch.service", "ssh.service", "ssh.socket", "sshd.service", "sshd.socket",
+    # The template, not an instance: disable-bt turns GPIO 14/15 into a live
+    # kernel console and systemd-getty-generator puts a login prompt on it.
+    "serial-getty@.service",
+)
+
+
+def test_the_stage_purges_every_listener_package():
+    # Purge, not remove, for the same reason 03-no-remote-access gives: a
+    # removed-but-not-purged package keeps its stanza in /var/lib/dpkg/status,
+    # which is the signal tools/image-gate.sh reads.
+    run = LISTENERS_RUN.read_text()
+    assert "on_chroot" in run
+    assert "apt-get purge" in run
+    assert "DEBIAN_FRONTEND=noninteractive" in run
+    assert "apt-get remove" not in run
+    for package in PURGED_FOR_NETWORK_SURFACE:
+        assert re.search(rf"(?<![\w.+-]){re.escape(package)}(?![\w.+-])", run), \
+            f"{package} is no longer purged"
+    # pi-gen skips a sub-stage script that is not executable, silently.
+    assert os.access(LISTENERS_RUN, os.X_OK), f"{LISTENERS_RUN} must be executable or pi-gen skips it"
+
+
+def test_the_stage_masks_what_it_cannot_purge_away_for_good():
+    # A mask on a purged package is not redundant: it is what stops the unit
+    # being enabled if the package ever returns, because systemctl refuses to
+    # enable a masked unit. sshswitch.service is the one whose package stays --
+    # raspberrypi-sys-mods is load-bearing -- and it reads the boot partition.
+    run = LISTENERS_RUN.read_text()
+    assert "/dev/null" in run
+    for unit in MASKED_FOR_NETWORK_SURFACE:
+        assert unit in run, f"{unit} is no longer masked"
+
+
+def test_the_stage_and_the_gate_agree_on_the_purged_and_masked_sets():
+    # If the two drift, the stage stops removing something the gate still
+    # refuses -- which fails a release build thirty-five minutes in rather
+    # than being cleaned by the stage that exists to clean it.
+    gate = GATE.read_text()
+    for package in PURGED_FOR_NETWORK_SURFACE:
+        assert package in gate, f"the gate no longer checks {package}"
+    for unit in MASKED_FOR_NETWORK_SURFACE:
+        assert unit in gate, f"the gate no longer asserts the mask on {unit}"
+
+
+def test_the_stage_turns_the_bluetooth_radio_off_in_the_device_tree():
+    # Purging bluez stops the daemon, not the radio: the kernel attaches the
+    # adapter from the device tree over HCI UART, and pi-bluetooth (which
+    # would ship hciuart.service) is not installed, so there is no attach unit
+    # to mask. disable-bt sets the &bt node to disabled, which is the only
+    # place the radio can actually be switched off.
+    run = LISTENERS_RUN.read_text()
+    assert "dtoverlay=disable-bt" in run
+    assert "boot/firmware/config.txt" in run
+    # pi-gen's stage2/02-net-tweaks writes 0 (unblocked) into a systemd-rfkill
+    # state file per known on-board address; 1 is blocked.
+    assert ":bluetooth" in run
+    assert "echo 1 >" in run
+
+
+def test_the_wifi_firmware_is_not_what_the_stage_removes():
+    # bluez-firmware ships Bluetooth HCI patch files only. The firmware the
+    # panel cannot join a network without -- brcmfmac43455-sdio on the Pi 4,
+    # brcmfmac43436-sdio on the Zero 2 W -- is in firmware-brcm80211, and
+    # removing it would brick every panel.
+    run = LISTENERS_RUN.read_text()
+    assert "firmware-brcm80211" not in PURGED_FOR_NETWORK_SURFACE
+    assert "firmware-brcm80211" in run, "the stage no longer says which firmware must stay"
+    for load_bearing in ("firmware-brcm80211", "raspberrypi-sys-mods", "network-manager",
+                         "libbluetooth3"):
+        assert load_bearing not in PURGED_FOR_NETWORK_SURFACE
+
+
+def test_the_stage_keeps_the_serial_console_but_not_its_login_prompt():
+    # disable-bt makes the PL011 the primary UART, which makes enable_uart
+    # default to 1, which turns the console=serial0,115200 already in
+    # cmdline.txt into a live kernel console on GPIO 14/15. That console is
+    # kept on purpose -- it is the diagnosis path a panel with no login and a
+    # black screen has never had -- so the stage must NOT strip console= from
+    # cmdline.txt, and must mask the login prompt instead.
+    run = LISTENERS_RUN.read_text()
+    assert "serial-getty@.service" in run, "the serial login prompt is no longer masked"
+    assert "enable_uart" in run, "the stage no longer explains why a console appears"
+    # Option B -- dropping console=serial0,115200 -- would mean editing
+    # cmdline.txt. The stage only ever mentions that file in prose, so a
+    # redirect or a sed against it means the decision changed and the comment
+    # above it no longer describes the image.
+    code = "\n".join(l for l in run.splitlines() if not l.lstrip().startswith("#"))
+    assert "cmdline.txt" not in code, \
+        "the stage now writes cmdline.txt; the serial-console decision changed"
+
+
+def test_the_stage_reads_find_output_without_swallowing_a_failure():
+    # `while ... done < <(find ...)` hides find's exit status from `bash -e`,
+    # so a find that failed part-way would read as "nothing to rewrite" and
+    # the stage would succeed having changed nothing.
+    run = LISTENERS_RUN.read_text()
+    assert "done < <(find" not in run, "a process substitution hides find's exit status"
+    assert "$(find " in run
+
+
+def test_the_stage_recreates_the_sshd_config_directory_pi_gen_writes_into():
+    # export-image/01-user-rename runs rename-user AFTER this stage, and it
+    # unconditionally writes /etc/ssh/sshd_config.d/rename_user.conf. Purging
+    # openssh-server takes that directory away with it.
+    run = LISTENERS_RUN.read_text()
+    assert "/etc/ssh/sshd_config.d" in run
+    assert "rename-user" in run
