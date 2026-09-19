@@ -10,7 +10,8 @@ import { beginSignIn, completeSignIn, forgetSignIn, logoutUrl, mayReauth, wasSig
 import { ApiError, createApi } from "./api.js";
 import { reformat } from "./claimcode.js";
 import { SETUP_FILE_NAME, SetupFileError, countryNoteFor, regionFromLocale, setupFileFor } from "./setupfile.js";
-import { canResend, emailVerified, gameChoices, messageFor, panelTitle } from "./view.js";
+import { makeEl, panelRow } from "./panel.js";
+import { emailVerified, messageFor, panelTitle } from "./view.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -24,18 +25,7 @@ let session = null;
 // action puts each control back to what the server holds.
 let busy = false;
 
-function el(tag, props = {}, ...children) {
-  const node = document.createElement(tag);
-  for (const [key, value] of Object.entries(props)) {
-    // Refuse the markup properties outright rather than trust every caller.
-    if (/html/i.test(key)) throw new Error(`refusing to set ${key}`);
-    if (key.startsWith("on")) node.addEventListener(key.slice(2), value);
-    else if (key in node) node[key] = value;
-    else node.setAttribute(key, value);
-  }
-  node.append(...children); // strings become text nodes, never markup
-  return node;
-}
+const el = makeEl(document);
 
 const kindOf = (err) => (err instanceof ApiError ? err.kind : "failed");
 
@@ -172,81 +162,25 @@ function renderPanels(devices, games, gamesFailed) {
 }
 
 function panelItem(device, games, gamesFailed) {
-  const title = panelTitle(device);
-  const selectId = `game-${device.thingName}`;
-
-  const choices = gameChoices(device, games);
-  const rendered = choices.find((choice) => choice.selected)?.value ?? "";
-  const select = el("select", { id: selectId, disabled: gamesFailed },
-    ...choices.map((choice) =>
-      el("option", { value: choice.value, selected: choice.selected, disabled: choice.disabled }, choice.label)));
-  select.dataset.focusKey = `${device.thingName}:game`;
-  select.addEventListener("change", () => {
-    // Ignored while another action runs; put the control back so it never
-    // shows a choice that was not sent.
-    if (busy) {
-      select.value = rendered;
-      return;
-    }
-    act("setGame", () => api.setGame(device.thingName, Number(select.value)),
-      "Game set. The panel switches within a few seconds.");
-  });
-
-  // Re-send: the same call with the same gameId, which the API happily
-  // republishes (it has no "unchanged" short-circuit). The panel tells a
-  // live publish from the broker's replay on reconnect and treats only the
-  // live one as the owner asking for the game back, so this button is the
-  // only way that path is ever taken.
-  //
-  // Disabled from the device's own state, not from `busy`: act() re-renders
-  // the list while busy is still true, so a disabled attribute set from it
-  // would stick until the next render. The busy guard below is how every
-  // other control here handles it.
-  const resend = el("button", {
-    class: "btn quiet",
-    type: "button",
-    disabled: !canResend(device),
-    "aria-label": `Show the current game on ${title}`,
-    onclick: () => {
-      if (busy || !canResend(device)) return;
-      act("resend", () => api.setGame(device.thingName, device.gameId),
-        "Sent. The panel shows that game again within a few seconds.");
-    },
-  }, "Show on panel");
-  resend.dataset.focusKey = `${device.thingName}:resend`;
-
-  const nameInput = el("input", { type: "text", value: device.name ?? "", maxLength: 40, "aria-label": `Name for ${title}` });
-  nameInput.dataset.focusKey = `${device.thingName}:name`;
-  const renameButton = el("button", { class: "btn", type: "submit", "aria-label": `Rename ${title}` }, "Rename");
-  renameButton.dataset.focusKey = `${device.thingName}:rename`;
-  const renameForm = el("form", {
-    class: "row",
-    onsubmit: (event) => {
-      event.preventDefault();
-      act("rename", () => api.rename(device.thingName, nameInput.value), "Renamed.");
-    },
-  }, nameInput, renameButton);
-
-  const remove = el("button", {
-    class: "btn quiet",
-    type: "button",
-    "aria-label": `Remove ${title}`,
-    onclick: () => {
-      if (busy) return;
-      // Honest about what removal does not do: the panel keeps its certificate
-      // until it is factory reset (SCO-24 is where revocation on unbind lives).
+  // The row itself is built in panel.js, where a test can press its
+  // buttons; what each control DOES is here, because it needs act(), the
+  // api and the busy flag. Keep it that way: the moment a decision moves
+  // into the row builder it stops being testable without a browser.
+  return panelRow(el, device, games, gamesFailed, {
+    busy: () => busy,
+    setGame: (gameId) => act("setGame", () => api.setGame(device.thingName, gameId),
+      "Game set. The panel switches within a few seconds."),
+    resend: (gameId) => act("resend", () => api.setGame(device.thingName, gameId),
+      "Sent. The panel shows that game again within a few seconds."),
+    rename: (name) => act("rename", () => api.rename(device.thingName, name), "Renamed."),
+    remove: (title) => {
+      // Honest about what removal does not do: the panel keeps its
+      // certificate until it is factory reset (SCO-24 is where revocation
+      // on unbind lives).
       if (!confirm(`Remove ${title} from your account? It keeps showing its current game until it is factory reset.`)) return;
       act("unbind", () => api.unbind(device.thingName), "Removed.");
     },
-  }, "Remove");
-  remove.dataset.focusKey = `${device.thingName}:remove`;
-
-  return el("li", { class: "panel" },
-    el("h2", {}, title),
-    el("span", { class: "thing" }, device.thingName),
-    el("div", { class: "row" }, el("label", { for: selectId }, "Game"), select, resend),
-    renameForm,
-    el("div", { class: "row" }, remove));
+  });
 }
 
 function renderAdd(claims) {

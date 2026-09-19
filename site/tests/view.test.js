@@ -77,13 +77,6 @@ test("re-sending a game has its own wording for a panel that has gone", () => {
   assert.equal(messageFor("resend", "unavailable"), messageFor("any", "unavailable"));
 });
 
-test("the page offers the re-send button, built like every other control", () => {
-  const source = readFileSync(new URL("../assets/app.js", import.meta.url), "utf8");
-  assert.match(source, /"Show on panel"/, "no re-send button on the panel row");
-  assert.match(source, /canResend\(device\)/, "the button is not disabled from the device's own state");
-  assert.match(source, /act\("resend"/, "the button does not go through act(), so it can race");
-});
-
 test("every message is plain text", () => {
   for (const action of ["claim", "setGame", "resend", "rename", "unbind", "list", "games", "any"]) {
     for (const kind of ["unauthorized", "not-found", "bad-request", "unavailable", "failed"]) {

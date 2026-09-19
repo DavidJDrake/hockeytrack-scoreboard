@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-lambda-go/events"
 
@@ -37,11 +38,16 @@ func authorizer(sub string) *events.APIGatewayV2HTTPRequestContextAuthorizerDesc
 	}
 }
 
+// A clock the tests move by hand, so "chosenAt changed" is a fact about the
+// handler rather than about how fast the test ran.
+var clock = time.Date(2026, 10, 1, 18, 0, 0, 0, time.UTC)
+
 func handlerWith(t *testing.T) (*Handler, *devices.Fake, *iotpub.Fake) {
 	t.Helper()
 	st, pub := devices.NewFake(), &iotpub.Fake{}
 	_ = st.Register(context.Background(), "scoreboard-7qf2")
-	return &Handler{Store: st, Pub: pub, Tokens: idtokentest.Fake{}}, st, pub
+	return &Handler{Store: st, Pub: pub, Tokens: idtokentest.Fake{},
+		Now: func() time.Time { return clock }}, st, pub
 }
 
 func TestSettingAGamePublishesRetainedConfigToThatDevicesTopic(t *testing.T) {
@@ -68,10 +74,73 @@ func TestSettingAGamePublishesRetainedConfigToThatDevicesTopic(t *testing.T) {
 		t.Error("config was published without retain; a panel that reconnects would not get it")
 	}
 	var payload struct {
-		GameID int64 `json:"gameId"`
+		GameID   int64 `json:"gameId"`
+		ChosenAt int64 `json:"chosenAt"`
 	}
 	if err := json.Unmarshal(m.Payload, &payload); err != nil || payload.GameID != 2026020001 {
-		t.Errorf("payload = %s, want {\"gameId\":2026020001}", m.Payload)
+		t.Errorf("payload = %s, want gameId 2026020001", m.Payload)
+	}
+	// chosenAt is what lets a panel tell one press of "Show on panel" from
+	// the broker replaying the same retained message on every reconnect.
+	// Without it, a press made while the panel was offline is delivered as
+	// a replay of a message it has already ignored, and is lost -- while
+	// the site says it worked. The panel compares chosenAt values only
+	// with each other, so it has to be the server's clock, not the panel's.
+	if payload.ChosenAt != h.Now().UnixMilli() {
+		t.Errorf("chosenAt = %d, want the server clock %d", payload.ChosenAt, h.Now().UnixMilli())
+	}
+}
+
+func TestSettingTheSameGameTwicePublishesTwoDifferentChosenAts(t *testing.T) {
+	// The press that has to survive: an owner presses "Show on panel"
+	// while the panel is offline. Nothing about the message changes except
+	// this stamp, and that is the whole difference between "the owner asked
+	// for this again" and "the broker is repeating itself".
+	h, st, pub := handlerWith(t)
+	ctx := context.Background()
+	_ = st.Claim(ctx, "scoreboard-7qf2", "sub-a")
+
+	stamps := make([]int64, 0, 2)
+	for i := 0; i < 2; i++ {
+		clock = clock.Add(time.Second)
+		if _, err := h.Handle(ctx, req("PUT", "PUT /api/devices/{thing}/game", "sub-a",
+			`{"gameId":2026020001}`, map[string]string{"thing": "scoreboard-7qf2"})); err != nil {
+			t.Fatal(err)
+		}
+		var payload struct {
+			ChosenAt int64 `json:"chosenAt"`
+		}
+		if err := json.Unmarshal(pub.Messages[i].Payload, &payload); err != nil {
+			t.Fatal(err)
+		}
+		stamps = append(stamps, payload.ChosenAt)
+	}
+	if stamps[1] <= stamps[0] {
+		t.Errorf("chosenAt did not move: %d then %d", stamps[0], stamps[1])
+	}
+}
+
+func TestTheConfigPayloadStillLeadsWithGameId(t *testing.T) {
+	// v0.1.3 panels are in the field and read gameId only. An unknown key
+	// has to be something they ignore, which JSON decoding into a struct
+	// does -- this pins the shape so a future change cannot quietly turn
+	// gameId into a nested field and strand them.
+	h, st, pub := handlerWith(t)
+	ctx := context.Background()
+	_ = st.Claim(ctx, "scoreboard-7qf2", "sub-a")
+	if _, err := h.Handle(ctx, req("PUT", "PUT /api/devices/{thing}/game", "sub-a",
+		`{"gameId":2026020001}`, map[string]string{"thing": "scoreboard-7qf2"})); err != nil {
+		t.Fatal(err)
+	}
+	var flat map[string]any
+	if err := json.Unmarshal(pub.Messages[0].Payload, &flat); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := flat["gameId"].(float64); !ok {
+		t.Errorf("gameId is not a top-level number in %s", pub.Messages[0].Payload)
+	}
+	if len(flat) != 2 {
+		t.Errorf("payload has %d keys, want gameId and chosenAt: %s", len(flat), pub.Messages[0].Payload)
 	}
 }
 

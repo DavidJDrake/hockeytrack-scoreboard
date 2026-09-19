@@ -22,7 +22,7 @@ from .assets import Assets
 from .config import Config, NotProvisioned, default_config_dir, parse_rotate
 from .display import display_failure, parse_size, placement, present
 from .link import Link
-from .model import GameState, parse_today, parse_config
+from .model import GameState, parse_chosen_at, parse_today, parse_config
 from .netcfg import NetworkError, NetworkManager, Status, owner_hint, rotate_hint
 from .render import H, W, draw, shift_frame
 from .reset import factory_reset
@@ -57,10 +57,12 @@ log = logging.getLogger("scoreboard")
 # state NAME changes, so a reducer republishing the same stale document does
 # not relight the panel -- which is the whole point of bounding it.
 #
-# And five screens are never off at all, in or out of sleep hours, because
-# each one is the panel asking for help it cannot get any other way: not
-# registered, the pairing code, enrollment failing, no network, and cannot
-# reach the service.
+# Four screens are never off at all, in or out of sleep hours, because each
+# one is the panel asking for somebody to come and do something: not
+# registered, the pairing code, enrollment failing, and no network. "Cannot
+# reach the service" is deliberately NOT one of them -- nobody has to be at
+# the panel for that one, and it heals itself -- so it sleeps like the game
+# does and comes back when the window ends if it is still down.
 #
 # Clocks. Durations are measured on time.monotonic(): the Pi has no RTC, so
 # its wall clock starts wrong and NTP may move it hours forward once the
@@ -133,6 +135,13 @@ GRACE_S = 5 * 60
 # most 2 px so no single step is visible as movement.
 SHIFT_STEP_S = 7 * 60
 SHIFT_PATTERN = ((0, 0), (2, 0), (4, -2), (2, -4), (0, -2), (-2, -4), (-4, -2), (-2, 0))
+
+# The frame a panel paints when it cannot even draw the screen that says it
+# cannot draw. A flat fill needs no fonts, no metrics and no layout, which is
+# the point: it is what is left when the things that draw text are what
+# failed. Amber because it has to be visibly not a normal screen, and dim
+# because it may be up for a long time before anybody sees it.
+LAST_RESORT = (96, 48, 0)
 
 # Where systemd-timesyncd says the clock has been set from the network. The
 # image installs tzdata (2026c, from the base stage) and runs timesyncd, so
@@ -379,7 +388,13 @@ def _minutes(hhmm: str) -> int | None:
     return h * 60 + m if 0 <= h < 24 and 0 <= m < 60 else None
 
 
-_complained: set[str] = set()   # failures already written to the journal once
+# Failures already written to the journal once. Capped: this is the journal
+# that "Reading a failed panel" tells somebody to go and read, and a render
+# loop at 10 Hz can fill a persistent journal in an afternoon if a key ever
+# varies per frame. Past the cap the panel stops complaining rather than
+# stops working -- the screen still says something is wrong.
+COMPLAINTS_KEPT = 64
+_complained: set[str] = set()
 
 
 def asleep(now_utc: datetime | None, sleep: Sleep | None) -> bool:
@@ -428,10 +443,26 @@ def asleep(now_utc: datetime | None, sleep: Sleep | None) -> bool:
     return now_m >= start or now_m < end   # the window crosses midnight
 
 
-def _complain_once(key: str, message: str) -> None:
-    if key not in _complained:
+def _where(exc: BaseException) -> str:
+    """A key for one failure: its type and where it was raised.
+
+    Not its message. A message that carries a coordinate, a count or a
+    timestamp is different every frame, which turned "log once" into "log at
+    10 Hz" -- into the persistent journal, which is the one way a failed
+    panel gets read.
+    """
+    tb = exc.__traceback__
+    while tb is not None and tb.tb_next is not None:
+        tb = tb.tb_next          # the frame that actually raised
+    if tb is None:
+        return type(exc).__name__
+    return f"{type(exc).__name__}@{tb.tb_frame.f_code.co_filename}:{tb.tb_lineno}"
+
+
+def _complain_once(key: str, message: str, *args) -> None:
+    if key not in _complained and len(_complained) < COMPLAINTS_KEPT:
         _complained.add(key)
-        log.warning("%s (%r)", message, key)
+        log.warning(message + " (%s)", *args, key)
 
 
 def presentation(now: float, now_utc: datetime | None, screen: str,
@@ -460,11 +491,23 @@ def presentation(now: float, now_utc: datetime | None, screen: str,
        state for STALE_AFTER_S after it arrived.
     """
     shift = shift_at(now)
+    within_grace = now - last_change < GRACE_S
     if screen != screens.SCOREBOARD:
+        # The screens that ask for help are never off -- except this one.
+        # "Cannot reach the service" is not a request for somebody to come
+        # and do something at the panel: nobody has to, and it heals itself
+        # the moment the link returns. An ISP outage with the router still
+        # up leaves nmcli reporting a connection, so without this a panel
+        # would burn a help screen at full brightness all night, for as many
+        # nights as the outage lasts. It obeys sleep hours like the game
+        # does, and comes back by itself when the window ends if it is still
+        # down.
+        if screen == screens.NO_SERVICE and not within_grace \
+                and asleep(now_utc, display.sleep):
+            return Presentation(OFF, (0, 0))
         return Presentation(MESSAGE, shift)
     if state is not None and state.state in IN_PLAY:
         return Presentation(GAME, shift)
-    within_grace = now - last_change < GRACE_S
     if not within_grace and asleep(now_utc, display.sleep):
         return Presentation(OFF, (0, 0))
     if state is None:
@@ -523,7 +566,8 @@ def _seconds_to_start(now_utc: datetime, state: GameState) -> int | None:
     return int((start - now_utc).total_seconds())
 
 
-def config_action(game_id: int | None, following: int | None, retain: bool = False) -> str:
+def config_action(game_id: int | None, following: int | None, retain: bool = False,
+                  chosen_at: int | None = None, last_chosen_at: int | None = None) -> str:
     """What an admin-site config message asks of a panel already following
     ``following``.
 
@@ -532,6 +576,13 @@ def config_action(game_id: int | None, following: int | None, retain: bool = Fal
     says "put that back", and rearming gives an aged-out final another
     ``final_hold_s`` on screen. ``None`` -- unreadable, or an explicit null
     gameId -- leaves the panel showing whatever it is showing.
+
+    ``chosen_at`` is the server's stamp on the message and ``last_chosen_at``
+    the last one this panel acted on; both are None against an API that has
+    not been deployed yet, which is exactly the behaviour this had before
+    them. Their job is B-6: without them, a press made while the panel was
+    offline arrives on reconnect as a replay, is ignored, and is lost --
+    while the site says it worked.
 
     ``retain`` is what keeps that lever from being pulled by accident. The
     config topic is published retained and this panel resubscribes to it on
@@ -549,7 +600,16 @@ def config_action(game_id: int | None, following: int | None, retain: bool = Fal
         return IGNORE
     if game_id != following:
         return SELECT
-    return IGNORE if retain else REARM
+    if not retain:
+        return REARM
+    # A replay. Ordinarily it says nothing new -- but if it carries a
+    # chosenAt this panel has not acted on, it is the press that happened
+    # while the panel was away, arriving the only way it can. Stamps are
+    # compared with each other and never with this panel's own clock, which
+    # on a board with no RTC may be anything at all.
+    if chosen_at is not None and (last_chosen_at is None or chosen_at > last_chosen_at):
+        return REARM
+    return IGNORE
 
 
 # How long MQTT may be down, with the network up, before the panel says so
@@ -671,6 +731,14 @@ def main() -> None:
     # yet -- so the clock on "cannot reach the service" starts at boot. A
     # desktop preview has no broker and never wants the screen.
     link_down_since: float | None = None if link_ok else time.monotonic()
+    # When the last state document for the followed game arrived. Monotonic,
+    # not its own asOf: the banner it feeds has to be right on a panel whose
+    # wall clock is wrong, which is exactly the panel somebody is squinting
+    # at when a frame has gone stale.
+    state_received_at: float | None = None
+    # The newest "when the owner pressed it" stamp this panel has acted on;
+    # see config_action. In memory only, deliberately.
+    last_chosen_at: int | None = None
     brightness = cfg.brightness if cfg else 1.0
     if fixture:
         with open(fixture, "rb") as f:
@@ -759,6 +827,9 @@ def main() -> None:
                 if kind == "state" and item[1] == following:
                     try:
                         current = GameState.from_json(item[2])
+                        # When it arrived, on the monotonic clock: the
+                        # "NO LINK - N MIN OLD" banner counts from here.
+                        state_received_at = time.monotonic()
                     except Exception as e:
                         # Every exception, not ValueError. The document is
                         # network input and from_json indexes, converts and
@@ -773,7 +844,17 @@ def main() -> None:
                                     type(e).__name__, e)
                 elif kind == "config":
                     gid = parse_config(item[1])
-                    action = config_action(gid, following, retain=item[2])
+                    chosen_at = parse_chosen_at(item[1])
+                    action = config_action(gid, following, retain=item[2],
+                                           chosen_at=chosen_at,
+                                           last_chosen_at=last_chosen_at)
+                    # Remembered whatever the action was, and in memory
+                    # only: after a reboot the retained replay is a SELECT
+                    # and the boot grace covers it anyway. Remembering it
+                    # even when ignored is what keeps the NEXT replay of the
+                    # same stamp from being read as news.
+                    if chosen_at is not None:
+                        last_chosen_at = chosen_at
                     if action == IGNORE:
                         log.warning("ignoring unreadable config message")
                     elif action == SELECT:
@@ -845,11 +926,16 @@ def main() -> None:
             # keyboard, so it counts as a screen that must not switch itself
             # off mid-sentence -- presentation exempts everything that is not
             # the scoreboard.
+            # A live game keeps the panel even when the link has gone:
+            # the frozen frame and its banner say everything the help
+            # screen would, over a scoreboard that is still true as of a
+            # stated moment. See screens.screen_for.
             showing = (screens.SETTINGS if panel is not None else
                        screens.screen_for(cfg is not None or bool(fixture),
                                           net_ok or bool(fixture), enroll_state,
                                           needs_link_help(link_down_since, mono,
-                                                          LINK_HELP_AFTER_S)))
+                                                          LINK_HELP_AFTER_S),
+                                          current is not None and current.state in IN_PLAY))
             now_showing = presentation(mono, now_utc, showing, current,
                                        final_seen, last_change, display)
             # The guard of last resort. Everything inside is drawing, and
@@ -887,14 +973,29 @@ def main() -> None:
                     # is following something it cannot show, such as a game
                     # whose start it cannot read.
                     draw(frame, None if now_showing.show == NO_GAME else current,
-                         now_ms, assets, link_ok, clock_ok=now_utc is not None)
+                         now_ms, assets, link_ok, clock_ok=now_utc is not None,
+                         stale_s=None if state_received_at is None else mono - state_received_at)
             except Exception as e:
                 # Once per distinct failure, not once per frame: at 10 Hz
                 # the second kind fills the journal in an afternoon, and the
-                # journal is how a failed panel gets read.
-                _complain_once(f"draw:{type(e).__name__}:{e}",
-                               "could not paint the panel")
-                screens.draw_cannot_draw(frame, assets, build)
+                # journal is how a failed panel gets read. "Distinct" is the
+                # type and the line it came from, NOT the message -- a
+                # message carrying a coordinate or a timestamp varies every
+                # frame, which made this log every frame and remember every
+                # one of them.
+                _complain_once(_where(e), "could not paint the panel: %s: %s",
+                               type(e).__name__, e)
+                try:
+                    screens.draw_cannot_draw(frame, assets, build)
+                except Exception:
+                    # The fallback draws text, so it needs the same fonts
+                    # that may be what just failed -- and an exception in
+                    # here is the crash loop this whole guard exists to
+                    # prevent. A flat fill needs nothing but the surface,
+                    # and reads across a room as "not a normal screen".
+                    _complain_once(f"{_where(e)}|fallback",
+                                   "could not even draw the fallback screen")
+                    frame.fill(LAST_RESORT)
             # Everything drawn gets the shift, including the screens that are
             # not the scoreboard: a pairing code sits there until somebody
             # claims the panel and "No network" until somebody fixes the

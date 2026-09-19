@@ -175,9 +175,13 @@ Cost: a heartbeat every 5 s per live game ≈ 720 invocations per game-hour;
   heard them), and inside the owner's sleep hours — which a live
   game overrides, and which are not in effect until NTP has set the clock.
   The screens that ask the owner for something (not registered, pairing
-  code, enrollment failing, no network, and — for a registered panel whose
-  MQTT link has been down two minutes on a working network — cannot reach
-  the service) are never switched off. Burn-in is
+  code, enrollment failing, no network) are never switched off. A registered
+  panel whose MQTT link has been down two minutes on a working network shows
+  "cannot reach the service", which does obey sleep hours — nobody has to be
+  at the panel for it and it heals itself — and which a live game outranks:
+  a live game keeps the panel, with its clocks frozen at the last document's
+  own values and a "NO LINK - N MIN OLD" band across the bottom, rather than
+  counting down from a moment that is receding. Burn-in is
   handled by a few pixels of whole-frame shift on a slow schedule, not by
   blanking.
   **Corrected 2026-09-19**, from "screen blanks (backlight off via DPMS)

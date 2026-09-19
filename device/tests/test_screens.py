@@ -315,3 +315,52 @@ def test_no_frame_goes_dark_once_the_pixel_shift_has_moved_it(name, paint):
             shift_frame(surface, offset)
 
         assert _lit(painted) > 20, f"{name} at {offset} is a dark panel with nothing on it"
+
+
+# --------------------------------------------------------------------------
+# Message screens fit the panel
+#
+# draw_message places its lines at a fixed size and never measured them.
+# That was survivable while every line was short; "This panel is on the
+# network but cannot reach the scoreboard service." is 1092 px in Barlow
+# Condensed and considerably wider in a fallback face, and a line that
+# overflows is one somebody cannot read the end of -- on the screen whose
+# entire job is to be read.
+# --------------------------------------------------------------------------
+
+
+MESSAGE_SCREENS = [
+    ("unregistered", lambda s, a: screens.draw_unregistered(s, a, BUILD_STAMP)),
+    ("offline", lambda s, a: screens.draw_offline(s, a, BUILD_STAMP)),
+    ("cannot reach the service", lambda s, a: screens.draw_no_service(s, a, BUILD_STAMP)),
+    ("cannot draw", lambda s, a: screens.draw_cannot_draw(s, a, BUILD_STAMP)),
+    ("enroll problem", lambda s, a: screens.draw_enroll_problem(
+        s, a, "the certificate service returned 503 Service Unavailable", BUILD_STAMP)),
+    ("pairing code", lambda s, a: screens.draw_waiting(
+        s, a, "7K4M-9QX2", SITE, "jonathan.fitzwilliam-smythe@averylongdomainname.co.uk", BUILD_STAMP)),
+]
+BUILD_STAMP = "image 2026-09-20, commit abc1234"
+
+
+@pytest.mark.parametrize("name,paint", MESSAGE_SCREENS, ids=[n for n, _ in MESSAGE_SCREENS])
+def test_every_message_screen_fits_the_panel_with_a_margin(name, paint):
+    pygame.init()
+    surface = pygame.Surface((W, H))
+    paint(surface, Assets())
+    top, bottom, left, right = _content_bounds(surface)
+    assert left is not None, f"{name} painted nothing"
+    assert left >= 20, f"{name} runs into the left edge at x={left}"
+    assert right <= W - 20, f"{name} runs off the right edge at x={right}"
+    assert top >= 10 and bottom <= H - 10, f"{name} runs off the top or bottom: {top}..{bottom}"
+
+
+def test_a_line_too_long_for_the_panel_is_shrunk_rather_than_clipped():
+    # The property, tested directly rather than only through the screens
+    # that happen to exist today.
+    pygame.init()
+    surface = pygame.Surface((W, H))
+    screens.draw_message(surface, Assets(), "A heading that goes on and on and on for ever",
+                         ["A line of body text that is far too long for any panel this size to show at "
+                          "its natural size, and then keeps going well past that point"])
+    top, bottom, left, right = _content_bounds(surface)
+    assert left >= 20 and right <= W - 20, f"{left}..{right}"

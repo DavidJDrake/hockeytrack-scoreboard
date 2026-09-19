@@ -9,7 +9,7 @@ import pytest  # noqa: E402
 from scoreboard.assets import Assets  # noqa: E402
 from scoreboard.main import SHIFT_PATTERN  # noqa: E402
 from scoreboard.model import GameState  # noqa: E402
-from scoreboard.render import BG, H, W, draw, shift_frame  # noqa: E402
+from scoreboard.render import BANNER_TOP, BG, H, W, draw, shift_frame  # noqa: E402
 
 FIX = Path(__file__).parent / "fixtures"
 
@@ -226,3 +226,101 @@ def test_penalty_row_shrinks_as_time_passes():
         row = [x for x in range(0, W) if surf.get_at((x, 426))[:3] == (0x00, 0x38, 0xA8)]  # the bar sits at y 422-430
         return len(row)
     assert bar_width(s.as_of_ms) > bar_width(s.as_of_ms + 40_000) > 0
+
+
+# --------------------------------------------------------------------------
+# A live game with no link
+#
+# B-4. The owner's rule is that a live game wins, so a dropped link does not
+# take the game off the wall. What it must take away is the pretence: every
+# clock on this screen is derived as `seconds - (now - asOf)`, so a frame
+# that has stopped being updated keeps counting down from a moment that is
+# receding, runs a period to 0:00 that may still have ten minutes in it, and
+# quietly expires penalties that never ended. Freeze them at the document's
+# own numbers and say, across the bottom, how old the document is.
+# --------------------------------------------------------------------------
+
+
+def live():
+    return GameState.from_json((FIX / "state_live.json").read_bytes())
+
+
+def drawn_with(link_ok, stale_s=None, at=None, state=None):
+    state = state or live()
+    surf, assets = surface(), Spy()
+    draw(surf, state, at if at is not None else state.as_of_ms + 300_000,
+         assets, link_ok=link_ok, stale_s=stale_s)
+    return surf, assets.drawn
+
+
+def test_a_stalled_clock_freezes_instead_of_counting_down_to_a_lie():
+    # state_live.json: 872 seconds on the clock, running, as of asOf. Five
+    # minutes later with the link up that reads 9:32; with the link down it
+    # must still read what the last document actually said, 14:32.
+    _, live_drawn = drawn_with(link_ok=True)
+    assert "9:32" in live_drawn, live_drawn
+    _, stalled = drawn_with(link_ok=False, stale_s=300)
+    assert "14:32" in stalled, stalled
+    assert "9:32" not in stalled
+
+
+def test_a_stalled_penalty_does_not_expire_by_itself():
+    # The fixture's penalty has 74 seconds left. Two minutes of silence and
+    # the old code had simply dropped it off the screen -- a penalty that
+    # may well still be being served.
+    _, stalled = drawn_with(link_ok=False, stale_s=120, at=live().as_of_ms + 120_000)
+    assert any("#23" in text for text in stalled), stalled
+    assert any("1:14" in text for text in stalled), stalled
+
+
+def test_the_banner_says_how_old_the_frame_is():
+    _, stalled = drawn_with(link_ok=False, stale_s=4 * 60)
+    assert any("NO LINK" in text and "4 MIN" in text for text in stalled), stalled
+
+
+def test_a_frame_less_than_a_minute_old_does_not_say_zero_minutes():
+    _, stalled = drawn_with(link_ok=False, stale_s=20)
+    assert any("NO LINK" in text for text in stalled), stalled
+    assert not any("0 MIN" in text for text in stalled), stalled
+
+
+def test_a_working_link_draws_no_banner():
+    _, ok = drawn_with(link_ok=True)
+    assert not any("NO LINK" in text for text in ok), ok
+
+
+def test_the_banner_does_not_cover_the_score():
+    # The scores are the reason the panel is on the wall. Measured in
+    # pixels: the band the banner occupies must be below everything the
+    # score column draws.
+    surf, _ = drawn_with(link_ok=False, stale_s=600)
+    away_colour = (0x00, 0x28, 0x68)
+    lit_rows = [y for y in range(H) if any(surf.get_at((x, y))[:3] == away_colour
+                                           for x in range(0, W // 2, 4))]
+    assert lit_rows, "the away side drew nothing"
+    assert max(lit_rows) < BANNER_TOP, \
+        f"the banner at y={BANNER_TOP} covers team colour down to y={max(lit_rows)}"
+
+
+def test_the_banner_stays_inside_the_margins_the_shift_uses():
+    # Full width visually, but inset to the same 60 px the rule line uses,
+    # so a +-4 px shift can never clip it the way it would a full-bleed band.
+    surf, _ = drawn_with(link_ok=False, stale_s=600)
+    band = pygame.Rect(0, BANNER_TOP, W, H - BANNER_TOP)
+    for offset in [o for o in SHIFT_PATTERN if abs(o[0]) == 4]:
+        moved = surf.copy()
+        shift_frame(moved, offset)
+        assert pygame.image.tostring(moved.subsurface(band), "RGB") != bg_bytes(band)
+    edge = pygame.Rect(0, BANNER_TOP, 40, H - BANNER_TOP)
+    assert pygame.image.tostring(surf.subsurface(edge), "RGB") == bg_bytes(edge), \
+        "the banner runs into the margin the shift needs"
+
+
+def test_a_countdown_with_no_link_keeps_counting():
+    # Not everything freezes. A countdown is computed from the wall clock
+    # against the document's own start, so a dropped link takes nothing away
+    # from it -- and freezing it would be the lie here.
+    _, drawn = drawn_with(link_ok=False, stale_s=600,
+                          state=GameState.from_json((FIX / "state_pre.json").read_bytes()),
+                          at=1790897400000 - 3600_000)
+    assert "01:00:00" in drawn, drawn

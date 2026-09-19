@@ -12,7 +12,7 @@ from pathlib import Path
 import pygame
 
 from .assets import Assets
-from .render import W, H, BG, INK, MUTED
+from .render import W, H, BG, INK, MUTED, fit_px
 
 SCOREBOARD, UNREGISTERED, OFFLINE = "scoreboard", "unregistered", "offline"
 WAITING, ENROLL_PROBLEM, NO_SERVICE = "waiting", "enroll-problem", "no-service"
@@ -26,7 +26,7 @@ NETWORK_WINDOW = 5  # rows of the network list shown at once on the settings scr
 
 
 def screen_for(has_identity: bool, has_network: bool, enrollment=None,
-               link_down: bool = False) -> str:
+               link_down: bool = False, live_game: bool = False) -> str:
     """Which panel is showing.
 
     Identity first: a panel nobody has registered has nothing to say about
@@ -42,19 +42,23 @@ def screen_for(has_identity: bool, has_network: bool, enrollment=None,
     ``link_down`` says MQTT has been down long enough to be worth reporting
     (main.needs_link_help owns "long enough"). It sits below OFFLINE, which
     is the more specific fault and the one somebody standing there can act
-    on, and above the scoreboard -- including above a game already drawn.
-    That last part is a choice: after a couple of minutes with no updates
-    the clock on screen is wrong and still ticking, and a scoreboard that is
-    wrong is worse than one that says it cannot reach the service. The
-    existing "no link" dot is eight pixels, which settles nothing across a
-    room. Brief drops never get here; that is what the threshold is for.
-    An unregistered panel never gets here either: it has no link to lose,
-    and its own screens already say what is wrong.
+    on, and above the scoreboard -- with one exception, ``live_game``.
+
+    A live game keeps the panel, because the owner's rule is that a live
+    game wins and because the alternative throws away the one thing they
+    are watching. What makes that safe is that render.draw stops pretending
+    when the link goes: the clock and the penalty clocks freeze at the last
+    document's own values instead of counting down from them, and a banner
+    across the bottom says how old the frame is. That banner says everything
+    this screen would have said, over a scoreboard that is still true as of
+    a stated moment. Brief drops never get here at all; that is what the
+    threshold is for. An unregistered panel never gets here either: it has
+    no link to lose, and its own screens already say what is wrong.
     """
     if has_identity:
         if not has_network:
             return OFFLINE
-        return NO_SERVICE if link_down else SCOREBOARD
+        return NO_SERVICE if link_down and not live_game else SCOREBOARD
     if enrollment is None:
         return UNREGISTERED
     if not has_network:
@@ -89,14 +93,30 @@ def build_identity(path: Path = BUILD_FILE) -> str:
         return "development build"
 
 
+# How much of the panel a message screen may use across. The rest is margin:
+# a bezel eats some, overscan eats some, and a line whose end is under either
+# is a line somebody cannot read -- on the screens whose whole job is to be
+# read.
+MESSAGE_WIDTH = W - 160
+
+
 def draw_message(surface: pygame.Surface, assets: Assets, title: str, lines: list[str]) -> None:
+    """A heading and some lines, centred, each shrunk to fit the panel.
+
+    The shrinking is not decoration. These are the screens that carry the
+    longest sentences in the product ("This panel is on the network but
+    cannot reach the scoreboard service." is 1092 px in Barlow Condensed and
+    wider in a fallback face), and until this they were drawn at a fixed
+    size and blitted wherever they landed.
+    """
     surface.fill(BG)
     y = H // 2 - 120
-    heading = assets.font(96, True).render(title, True, INK)
+    heading = assets.font(fit_px(assets, title, 96, MESSAGE_WIDTH), True).render(title, True, INK)
     surface.blit(heading, heading.get_rect(midtop=(W // 2, y)))
     y += 118
     for line in lines:
-        img = assets.font(44, False).render(line, True, MUTED)
+        img = assets.font(fit_px(assets, line, 44, MESSAGE_WIDTH, bold=False, min_px=20),
+                          False).render(line, True, MUTED)
         surface.blit(img, img.get_rect(midtop=(W // 2, y)))
         y += 54
 

@@ -19,6 +19,7 @@ from scoreboard.main import (COUNTDOWN, FINAL, GAME, GRACE_S, IGNORE,
                              config_action, final_seen_at, needs_link_help,
                              presentation, shift_at)
 from scoreboard.model import GameState
+from scoreboard.render import H, W
 from scoreboard.netcfg import NetworkError, WifiSettings
 from scoreboard.settings import RESULT, Settings
 
@@ -577,6 +578,8 @@ def test_the_clock_is_read_as_synchronized_from_systemds_own_flag(tmp_path):
                                     screens.WAITING, screens.ENROLL_PROBLEM,
                                     screens.SETTINGS])
 def test_a_screen_asking_the_owner_for_something_is_never_off(screen):
+    # NO_SERVICE is deliberately not in this list: see
+    # test_the_help_screen_sleeps_like_everything_else.
     # In sleep hours, with no game, long past any grace: a panel that cannot
     # say "I have no network" is indistinguishable from a broken one, and
     # nobody can fix what the panel will not admit.
@@ -683,9 +686,15 @@ def test_the_panel_is_only_ever_dark_for_a_stated_reason():
         if result.show != OFF:
             continue
         name = case["state"].state if case["state"] is not None else None
-        assert case["screen"] == screens.SCOREBOARD, "a help screen was switched off"
         assert case["now"] - case["last_change"] >= GRACE_S, \
             "switched off inside the grace period"
+        if case["screen"] != screens.SCOREBOARD:
+            # One help screen may be dark, and only for one reason: see
+            # test_the_help_screen_sleeps_like_everything_else.
+            assert case["screen"] == screens.NO_SERVICE, "a help screen was switched off"
+            assert asleep(case["now_utc"], case["display"].sleep), \
+                "the service-unreachable screen went dark outside sleep hours"
+            continue
         assert name not in main_module.IN_PLAY, "a live game was switched off"
         assert any(why_it_could_be_dark(case).values()), f"dark for no stated reason: {case}"
     # 7 screens x 8 states x 6 clocks x 2 sightings x 2 last-changes
@@ -731,7 +740,10 @@ def test_the_shift_is_deterministic_and_bounded_and_comes_back_round():
     assert all(-4 <= dx <= 4 and -4 <= dy <= 0 for dx, dy in offsets), offsets
     assert len(set(offsets)) > 1, "a shift that never moves is not a shift"
     assert shift_at(circuit * step) == shift_at(0), "the ring does not close"
-    assert shift_at(1234.0) == shift_at(1234.0), "not a function of the clock alone"
+    # Two moments inside the same step agree; two a step apart do not. (The
+    # old line here compared shift_at(1234.0) with itself, which is a fact
+    # about `==` rather than about the shift.)
+    assert shift_at(3 * step) == shift_at(3 * step + step - 1), "the step is not a step"
     assert shift_at(0) != shift_at(step), "two clocks a step apart must differ"
 
 
@@ -878,6 +890,28 @@ def test_a_reconnect_does_not_look_like_the_owner_choosing_a_game(tmp_path, monk
         "a reconnect lit the panel for five minutes"
 
 
+def test_a_press_that_arrived_while_the_panel_was_away_reaches_it_on_reconnect(tmp_path, monkeypatch):
+    # B-6 end to end. Pass 0: the panel is following the game and holding a
+    # final; the broker's first replay carries the stamp of the press that
+    # set it. Pass 2: it reconnects and is handed a replay with a NEWER
+    # stamp -- the press that happened while it was away -- which must
+    # re-arm. Pass 3: it reconnects again and is handed that same stamp,
+    # which must not.
+    final = (FIX / "state_live.json").read_text().replace('"state":"LIVE"', '"state":"FINAL"')
+    old, pressed = 1_700_000_000_000, 1_800_000_000_000
+    passes = a_loop_that_receives(monkeypatch, tmp_path, {
+        0: [("on_state", (2026020001, final.encode())),
+            ("on_config", (b'{"gameId": 2026020001, "chosenAt": %d}' % old, True))],
+        2: [("on_config", (b'{"gameId": 2026020001, "chosenAt": %d}' % pressed, True))],
+        3: [("on_config", (b'{"gameId": 2026020001, "chosenAt": %d}' % pressed, True))],
+    }, passes=6)
+
+    assert passes[2]["final_seen"] > passes[1]["final_seen"], \
+        "the press made during the outage was lost"
+    assert passes[3]["final_seen"] == passes[2]["final_seen"], \
+        "the second reconnect re-armed on a stamp already acted on"
+
+
 def test_a_state_that_changes_restarts_the_grace_in_the_real_loop(tmp_path, monkeypatch):
     # The other half: changed_at, driven by real documents arriving rather
     # than by strings passed to it. A repeat of the same state must NOT
@@ -968,6 +1002,65 @@ def test_a_frame_that_cannot_be_drawn_shows_a_help_screen_rather_than_dying(tmp_
     assert drawn, "the panel drew nothing at all when the frame failed"
 
 
+def test_a_failure_whose_message_changes_every_frame_is_still_logged_once(tmp_path, monkeypatch, caplog):
+    # B-3. "Once per distinct failure" was keyed on the exception's text, so
+    # anything that varied per frame -- a coordinate, a timestamp, a count --
+    # logged every frame anyway, 10 lines a second into the journal that is
+    # this project's only way of reading a failed panel, and grew the set of
+    # remembered failures without limit. The key is the type and the line it
+    # was raised from, which is what "the same failure" actually means.
+    main_module._complained.clear()
+    ticks = iter(range(10_000))
+
+    def always_fails(*a, **kw):
+        raise ValueError(f"frame {next(ticks)} of {object()}")
+
+    monkeypatch.setattr(main_module, "draw", always_fails)
+    with caplog.at_level("WARNING", logger="scoreboard"):
+        a_loop_that_receives(monkeypatch, tmp_path, {
+            0: [("on_state", (2026020001, (FIX / "state_live.json").read_bytes()))],
+        }, passes=11)
+    complaints = [r for r in caplog.records if "could not paint" in r.getMessage()]
+    assert len(complaints) == 1, [r.getMessage() for r in complaints]
+    assert len(main_module._complained) == 1, main_module._complained
+
+
+def test_the_set_of_remembered_failures_cannot_grow_without_limit(tmp_path, monkeypatch):
+    # Belt and braces for the same thing: even if some future failure keys
+    # itself differently every time, the set that remembers them is capped.
+    main_module._complained.clear()
+    for i in range(main_module.COMPLAINTS_KEPT * 3):
+        main_module._complain_once(f"key-{i}", "something")
+    assert len(main_module._complained) <= main_module.COMPLAINTS_KEPT
+
+
+def test_a_panel_that_cannot_even_draw_the_help_screen_still_shows_something(tmp_path, monkeypatch):
+    # B-1. The guard's fallback draws text, so it needs the same fonts that
+    # may be what just failed -- and an exception raised inside the handler
+    # is the crash loop the guard exists to prevent. Last resort: a flat
+    # colour, which needs nothing but the surface.
+    def no_fonts_at_all(*a, **kw):
+        raise RuntimeError("the font engine is gone")
+
+    monkeypatch.setattr(main_module.screens, "draw_cannot_draw", no_fonts_at_all)
+    monkeypatch.setattr(main_module, "draw", no_fonts_at_all)
+
+    painted = []
+    real_present = main_module.present
+    monkeypatch.setattr(main_module, "present",
+                        lambda screen, frame, place: painted.append(frame.get_at((W // 2, H // 2))[:3])
+                        or real_present(screen, frame, place))
+
+    # main() must return rather than raise...
+    a_loop_that_receives(monkeypatch, tmp_path, {
+        0: [("on_state", (2026020001, (FIX / "state_live.json").read_bytes()))],
+    })
+
+    # ...and the frame it painted must not be a dead-looking one.
+    assert painted[-1] == main_module.LAST_RESORT, painted[-1]
+    assert max(main_module.LAST_RESORT) > 40, "the last-resort frame is as dark as a dead panel"
+
+
 def test_the_same_drawing_failure_is_logged_once_not_every_frame(tmp_path, monkeypatch, caplog):
     # At 10 Hz an unguarded log line fills the journal in an afternoon, and
     # the journal is how a failed panel is read (see "Reading a failed
@@ -997,6 +1090,64 @@ def test_choosing_the_game_already_on_the_panel_rearms_it():
 
 def test_an_unreadable_config_message_changes_nothing():
     assert config_action(None, following=2026020001) == IGNORE
+
+
+def test_a_press_made_while_the_panel_was_offline_is_not_lost():
+    # B-6. The lever and the outage coincide: the owner presses "Show on
+    # panel" precisely when the panel is not there to hear it. The live
+    # publish never arrives, and on reconnect the broker hands over the same
+    # payload as a replay -- which the panel ignores, correctly, because
+    # that is how it survives reconnecting. The press disappears while the
+    # site reports success. `chosenAt` is what tells the two apart: a replay
+    # carrying a stamp this panel has not acted on is news.
+    assert config_action(2026020001, following=2026020001, retain=True,
+                         chosen_at=1_800_000_000_000, last_chosen_at=1_700_000_000_000) == REARM
+
+
+def test_the_same_replay_arriving_twice_only_counts_once():
+    # Two reconnects after one press. The second must not re-arm, or a
+    # panel with a flaky link is back to being lit by its own reconnects.
+    stamp = 1_800_000_000_000
+    assert config_action(2026020001, following=2026020001, retain=True,
+                         chosen_at=stamp, last_chosen_at=stamp) == IGNORE
+
+
+def test_a_replay_with_no_stamp_is_ignored_as_before():
+    # An API that has not been deployed yet, which is the state this ships
+    # in: the panel must behave exactly as it does today.
+    assert config_action(2026020001, following=2026020001, retain=True,
+                         chosen_at=None, last_chosen_at=None) == IGNORE
+    assert config_action(2026020001, following=2026020001, retain=True,
+                         chosen_at=None, last_chosen_at=1_700_000_000_000) == IGNORE
+
+
+def test_a_live_press_needs_no_stamp():
+    # It arrives with retain=0, which already says the owner did it now.
+    assert config_action(2026020001, following=2026020001, retain=False) == REARM
+
+
+def test_an_older_stamp_is_not_news():
+    # Out-of-order delivery, or a retained message the broker held from
+    # before the last press this panel acted on.
+    assert config_action(2026020001, following=2026020001, retain=True,
+                         chosen_at=1_600_000_000_000, last_chosen_at=1_700_000_000_000) == IGNORE
+
+
+def test_a_stamp_is_read_out_of_the_config_document():
+    from scoreboard.model import parse_chosen_at
+    assert parse_chosen_at(b'{"gameId":7,"chosenAt":1800000000000}') == 1_800_000_000_000
+    assert parse_chosen_at(b'{"gameId":7}') is None          # the old format
+    assert parse_chosen_at(b'{"gameId":7,"chosenAt":"soon"}') is None
+    assert parse_chosen_at(b'{"gameId":7,"chosenAt":true}') is None
+    assert parse_chosen_at(b'not json') is None
+    assert parse_chosen_at(b'[]') is None
+
+
+def test_the_old_config_format_still_selects_a_game():
+    # v0.1.3 panels ignore chosenAt; this panel must equally not require it.
+    from scoreboard.model import parse_config
+    assert parse_config(b'{"gameId":2026020001,"chosenAt":1800000000000}') == 2026020001
+    assert parse_config(b'{"gameId":2026020001}') == 2026020001
 
 
 def test_the_brokers_replay_of_the_current_game_is_not_the_owner_choosing_it():
@@ -1070,12 +1221,47 @@ def test_a_panel_with_no_identity_yet_is_unaffected():
     assert screens.screen_for(False, True, waiting, link_down=True) == screens.WAITING
 
 
-def test_the_help_screen_is_never_switched_off():
-    # Like the other screens that ask for help: in sleep hours, with nothing
-    # due, hours after the last change.
-    result = shown(now=48 * 3600.0, now_utc=datetime(2026, 10, 2, 10, 0, tzinfo=timezone.utc),
-                   screen=screens.NO_SERVICE, display=Display(sleep=NIGHT))
-    assert result.show == MESSAGE
+def test_the_help_screen_sleeps_like_everything_else():
+    # B-2. The never-off set is for screens that need somebody to come and
+    # do something: not registered, a pairing code, enrollment failing, no
+    # network. "Cannot reach the service" is not one of those -- nobody has
+    # to be at the panel, and it heals itself when the link returns. An ISP
+    # outage with the router still up leaves nmcli reporting a connection,
+    # so without this the panel burns a help screen at full brightness all
+    # night, for as many nights as the outage lasts.
+    night = Display(sleep=NIGHT)
+    at_three_am = datetime(2026, 10, 2, 10, 0, tzinfo=timezone.utc)
+    after_breakfast = datetime(2026, 10, 2, 16, 0, tzinfo=timezone.utc)
+    assert shown(now=48 * 3600.0, now_utc=at_three_am, screen=screens.NO_SERVICE,
+                 display=night).show == OFF
+    # ...and back by itself when the window ends, if the link is still down.
+    assert shown(now=48 * 3600.0, now_utc=after_breakfast, screen=screens.NO_SERVICE,
+                 display=night).show == MESSAGE
+
+
+def test_the_help_screen_still_answers_during_the_grace_at_night():
+    # An owner who has just pressed something at 3 a.m. still gets an answer.
+    night = Display(sleep=NIGHT)
+    at_three_am = datetime(2026, 10, 2, 10, 0, tzinfo=timezone.utc)
+    assert shown(now=0.0, now_utc=at_three_am, screen=screens.NO_SERVICE,
+                 last_change=0.0, display=night).show == MESSAGE
+
+
+def test_a_live_game_keeps_the_panel_when_the_link_drops():
+    # B-4. The owner's rule is that a live game wins, and it wins over this
+    # too: a stalled game with a NO LINK banner is more use than a help
+    # screen, and the banner says exactly what the help screen would.
+    assert screens.screen_for(True, True, link_down=True, live_game=True) == screens.SCOREBOARD
+    assert screens.screen_for(True, True, link_down=True, live_game=False) == screens.NO_SERVICE
+
+
+def test_the_help_screen_stays_up_all_day_while_the_link_is_down():
+    # Outside sleep hours it does not age out: unlike a countdown or a
+    # final, there is nothing due that could expire, and the fault is still
+    # there. It ends when the link comes back, or when the night does.
+    for elapsed in (0.0, 3 * 3600.0, 48 * 3600.0):
+        assert shown(now=elapsed, now_utc=before_puck_drop(6),
+                     screen=screens.NO_SERVICE).show == MESSAGE
 
 
 def test_the_panel_says_it_cannot_reach_the_service_and_then_stops_when_it_can(tmp_path, monkeypatch):

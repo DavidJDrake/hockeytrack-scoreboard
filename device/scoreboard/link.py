@@ -17,6 +17,24 @@ log = logging.getLogger(__name__)
 TODAY = "hockeytrack/games/today"
 
 
+def _refused(reason_code) -> bool:
+    """Did this CONNACK say no?
+
+    paho's VERSION2 callbacks hand over a ReasonCode, which knows; older
+    paths and MQTT v3 brokers can hand over a plain int, where 0 is the only
+    success. Anything unrecognizable is treated as a refusal, because the
+    cost of that is a help screen the owner can act on, while the cost of
+    the opposite is a panel that never admits it is being turned away.
+    """
+    failure = getattr(reason_code, "is_failure", None)
+    if failure is not None:
+        return bool(failure)
+    try:
+        return int(reason_code) != 0
+    except (TypeError, ValueError):
+        return True
+
+
 def config_topic(thing_name: str) -> str:
     """The device's own config topic. Scoped to one thing, and the IoT policy
     pins it to that thing via iot:Connection.Thing.ThingName, so a device
@@ -57,10 +75,31 @@ class Link:
 
     # --- callbacks (paho-mqtt 2.x VERSION2 signatures) ------------------
     def _on_connect(self, client, userdata, flags, reason_code, properties=None):
+        # paho calls this for every CONNACK, including the ones that say no:
+        # a certificate the broker will not accept, a policy that does not
+        # allow this client id, a broker refusing the connection outright.
+        # Reporting those as a working link is not cosmetic -- with the
+        # reconnect backoff capped at 60 s it reset the "down since" clock
+        # every minute, so the panel being turned away, which is exactly the
+        # one that needs to say so, could never reach the "cannot reach the
+        # service" screen.
+        if _refused(reason_code):
+            log.warning("connection refused: %s", reason_code)
+            self.on_link(False)
+            return
         log.info("connected: %s", reason_code)
         client.subscribe(TODAY, qos=1)
         # Retained, so a device that was unplugged when the game changed is
-        # handed the current choice the moment it subscribes.
+        # handed the current choice the moment it subscribes -- with the
+        # RETAIN flag set, which is how main tells that replay apart from the
+        # owner choosing something just now. See route().
+        #
+        # It is also why this client keeps paho's default clean_session=True.
+        # With a persistent session the broker would queue QoS-1 publishes
+        # made while the panel was away and deliver them on reconnect as
+        # ordinary messages -- retain=0 -- and every one of those would read
+        # as the owner choosing that game again. Make the session persistent
+        # and main.config_action's fix stops working, silently.
         client.subscribe(self._config_topic, qos=1)
         if self._game is not None:
             client.subscribe(self._state_topic(self._game), qos=1)

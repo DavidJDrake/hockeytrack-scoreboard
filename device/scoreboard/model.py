@@ -161,6 +161,28 @@ def fmt_clock(seconds: int) -> str:
     return f"{seconds // 60}:{seconds % 60:02d}"
 
 
+def parse_chosen_at(payload: bytes) -> int | None:
+    """The ``chosenAt`` stamp on an admin-site config message, if it has one.
+
+    Milliseconds on the SERVER's clock, which is the only reason it is
+    useful: a panel compares two of these against each other to tell a press
+    of "Show on panel" from the broker replaying a retained message, and it
+    has no clock of its own worth comparing anything to. Absent on documents
+    from an API that has not been deployed yet, which is a normal state and
+    not a fault -- the panel falls back to the behaviour it had before.
+    """
+    try:
+        d = json.loads(payload)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(d, dict):
+        return None
+    stamp = d.get("chosenAt")
+    if isinstance(stamp, bool) or not isinstance(stamp, int):
+        return None
+    return stamp
+
+
 def parse_config(payload: bytes) -> int | None:
     """Read a game id out of an admin-site config message.
 

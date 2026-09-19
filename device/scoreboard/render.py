@@ -7,6 +7,12 @@ from .assets import Assets
 from .model import GameState, fmt_clock
 
 W, H = 1920, 480
+# Where the "NO LINK" banner's band starts. Below everything the score
+# columns draw (their lowest ink is the POWER PLAY line at y=270) and below
+# the first penalty row (its progress bar ends at y=430), so a stalled frame
+# loses nothing that matters. Inset to the same 60 px as the rule line
+# rather than bled to the edges, so the +-4 px burn-in shift cannot clip it.
+BANNER_TOP = 436
 INK = (250, 250, 250)
 MUTED = (150, 158, 168)
 BG = (10, 10, 12)
@@ -47,16 +53,24 @@ def _text(surface, assets, s, px, color, x, y, anchor="topleft", bold=True):
     return rect
 
 
-def _text_fit(surface, assets, s, max_px, max_width, color, x, y, anchor="center", bold=True, min_px=32):
-    """Draw ``s`` as large as possible up to ``max_px`` without exceeding
-    ``max_width``. Font fallbacks (a non-condensed system sans, or pygame's
-    built-in default) render noticeably wider than Barlow Condensed, so
-    fixed pixel sizes tuned for the real face can overflow into neighbouring
-    layout regions; shrinking to fit keeps the frame correct either way."""
+def fit_px(assets, s, max_px, max_width, bold=True, min_px=32):
+    """The largest size up to ``max_px`` at which ``s`` fits ``max_width``.
+
+    Font fallbacks (a non-condensed system sans, or pygame's built-in
+    default) render noticeably wider than Barlow Condensed, so fixed pixel
+    sizes tuned for the real face can overflow into a neighbouring region --
+    or off the panel. Shrinking to fit keeps the frame correct either way.
+    """
     px = max_px
     while px > min_px and assets.font(px, bold).size(s)[0] > max_width:
         px -= 4
-    return _text(surface, assets, s, px, color, x, y, anchor, bold)
+    return px
+
+
+def _text_fit(surface, assets, s, max_px, max_width, color, x, y, anchor="center", bold=True, min_px=32):
+    """Draw ``s`` as large as it fits, up to ``max_px``."""
+    return _text(surface, assets, s, fit_px(assets, s, max_px, max_width, bold, min_px),
+                 color, x, y, anchor, bold)
 
 
 def _side(surface, assets, team, x_abbrev, align, pp_here, en_here, flash):
@@ -81,11 +95,11 @@ def _side(surface, assets, team, x_abbrev, align, pp_here, en_here, flash):
     return score_rect.right if align == "left" else score_rect.left
 
 
-def _penalty_rows(surface, assets, state, now_ms, y):
+def _penalty_rows(surface, assets, state, now_ms, y, limit=2):
     pens = state.penalties_at(now_ms)
     for side in ("away", "home"):
         team = state.away if side == "away" else state.home
-        rows = [p for p in pens if p.team == team.abbrev][:2]
+        rows = [p for p in pens if p.team == team.abbrev][:limit]
         for i, p in enumerate(rows):
             ry = y + i * 52
             x0 = 60 if side == "away" else W // 2 + 60
@@ -96,13 +110,37 @@ def _penalty_rows(surface, assets, state, now_ms, y):
             _text(surface, assets, f"#{p.number}  {p.team}  {fmt_clock(p.seconds)}", 40, INK, x0, ry - 6, "topleft", bold=False)
 
 
+def _stale_banner(surface, assets, stale_s: float | None) -> None:
+    """How old this frame is, across the bottom of it.
+
+    Said in minutes, and never in zeroes: "0 MIN OLD" reads as a rounding
+    error rather than as news, so anything under a minute says so in words.
+    """
+    minutes = int((stale_s or 0) // 60)
+    age = f"{minutes} MIN OLD" if minutes else "UNDER A MINUTE OLD"
+    pygame.draw.rect(surface, RULE, (60, BANNER_TOP, W - 120, H - BANNER_TOP - 8))
+    _text_fit(surface, assets, f"NO LINK - {age}", 40, W - 160, INK,
+              W // 2, BANNER_TOP + (H - BANNER_TOP - 8) // 2, "center")
+
+
 def draw(surface: pygame.Surface, state: GameState | None, now_ms: int, assets: Assets,
-         link_ok: bool = True, clock_ok: bool = True) -> None:
+         link_ok: bool = True, clock_ok: bool = True, stale_s: float | None = None) -> None:
     """Paint one frame of the scoreboard.
 
     ``clock_ok`` is False while this panel's wall clock has not been set by
     NTP. It has no RTC, so until then ``now_ms`` may be hours out, and the
     difference between a countdown and a guess is exactly this flag.
+
+    ``link_ok`` False means no document has arrived for a while and
+    ``stale_s`` says how long (monotonic, measured by main from when the
+    last one was received -- not from its asOf, which would need a clock
+    this panel may not have). A live game stays on the wall when that
+    happens, because the owner's rule is that a live game wins, but it stops
+    pretending: every clock here is derived as `seconds - (now - asOf)`, so
+    a frame nobody is updating counts a period down to 0:00 that may still
+    have ten minutes in it and quietly expires penalties that never ended.
+    They freeze at the document's own numbers, and the banner says how old
+    those numbers are. Show what is true, say what is unknown.
     """
     surface.fill(BG)
     if state is None:
@@ -131,6 +169,12 @@ def draw(surface: pygame.Surface, state: GameState | None, now_ms: int, assets: 
         _text_fit(surface, assets, digits, 200, countdown_w, RED, W // 2, 300, "center")
         return
 
+    # The moment every derived clock is measured from. Frozen at the
+    # document's own asOf while the link is down, so clock_at and
+    # penalties_at return exactly what it said. The goal flash is
+    # deliberately left on the real clock below: it is a three-second
+    # animation, and freezing it would leave a wash on the screen for ever.
+    clock_ms = now_ms if link_ok else state.as_of_ms
     flash_team = state.last_goal[0] if state.goal_flash(now_ms) else None
     away_edge = _side(surface, assets, state.away, 60, "left", state.pp == state.away.abbrev, state.empty_net == state.away.abbrev, flash_team == state.away.abbrev)
     home_edge = _side(surface, assets, state.home, W - 60, "right", state.pp == state.home.abbrev, state.empty_net == state.home.abbrev, flash_team == state.home.abbrev)
@@ -149,9 +193,9 @@ def draw(surface: pygame.Surface, state: GameState | None, now_ms: int, assets: 
             _text_fit(surface, assets, state.period_label, 60, centre_w, MUTED, W // 2, 290, "center")
     elif state.intermission:
         _text_fit(surface, assets, "INTERMISSION", 70, centre_w, MUTED, W // 2, 110, "center")
-        _text_fit(surface, assets, fmt_clock(state.clock_at(now_ms)), 170, centre_w, INK, W // 2, 220, "center")
+        _text_fit(surface, assets, fmt_clock(state.clock_at(clock_ms)), 170, centre_w, INK, W // 2, 220, "center")
     else:
-        _text_fit(surface, assets, fmt_clock(state.clock_at(now_ms)), 220, centre_w, INK, W // 2, 150, "center")
+        _text_fit(surface, assets, fmt_clock(state.clock_at(clock_ms)), 220, centre_w, INK, W // 2, 150, "center")
         suffix = "PERIOD" if state.period_label.isdigit() else ""
         label = {"1": "1ST", "2": "2ND", "3": "3RD"}.get(state.period_label, state.period_label)
         _text_fit(surface, assets, f"{label} {suffix}".strip(), 60, centre_w, MUTED, W // 2, 300, "center")
@@ -160,7 +204,11 @@ def draw(surface: pygame.Surface, state: GameState | None, now_ms: int, assets: 
         _text_fit(surface, assets, f"GOAL  #{state.last_goal[1]}", 90, W - 240, INK, W // 2, 400, "center")
     else:
         pygame.draw.line(surface, RULE, (60, 372), (W - 60, 372), 2)
-        _penalty_rows(surface, assets, state, now_ms, 386)
+        # One penalty row a side while the link is down: the second row is
+        # drawn where the banner goes, and of the two, "this frame is eleven
+        # minutes old" is the thing somebody needs to know first.
+        _penalty_rows(surface, assets, state, clock_ms, 386, limit=2 if link_ok else 1)
 
     if not link_ok:
+        _stale_banner(surface, assets, stale_s)
         pygame.draw.circle(surface, RED, (W - 24, 24), 8)

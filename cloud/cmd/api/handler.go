@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/aws/aws-lambda-go/events"
 
@@ -22,6 +23,16 @@ type Handler struct {
 	Pub    iotpub.Publisher
 	Games  func(ctx context.Context) ([]byte, error)
 	Tokens idtoken.Tokens
+	// Now is the clock stamped onto a config message as chosenAt. Injected
+	// so a test can move it; nil means time.Now.
+	Now func() time.Time
+}
+
+func (h *Handler) now() time.Time {
+	if h.Now != nil {
+		return h.Now()
+	}
+	return time.Now()
 }
 
 type deviceView struct {
@@ -114,7 +125,24 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 		if !ok {
 			return fail(404, "no such device")
 		}
-		payload, err := json.Marshal(map[string]int64{"gameId": body.GameID})
+		// gameId stays a top-level number: panels in the field (v0.1.3)
+		// read only that key and ignore the rest, so adding to this
+		// document must never move it.
+		//
+		// chosenAt is when the owner pressed the button, on the server's
+		// clock. It exists because the panel cannot otherwise tell a press
+		// from a repetition: this topic is retained, and a panel that was
+		// offline when the button was pressed is handed the same payload on
+		// reconnect, flagged as a replay -- which it ignores, correctly,
+		// because that is how it survives reconnecting every hour. With a
+		// stamp, a replay carrying a chosenAt it has not acted on is news,
+		// and the press that happened during the outage is not lost. Panels
+		// compare these values only against each other, never against their
+		// own clocks, which on a board with no RTC may be anything at all.
+		payload, err := json.Marshal(struct {
+			GameID   int64 `json:"gameId"`
+			ChosenAt int64 `json:"chosenAt"`
+		}{body.GameID, h.now().UnixMilli()})
 		if err != nil {
 			return fail(500, "encode failed")
 		}

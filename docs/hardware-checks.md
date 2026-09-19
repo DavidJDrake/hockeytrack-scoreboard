@@ -1500,8 +1500,22 @@ anybody touching the panel:
 | The final hold has run out | the owner presses **Show on panel**, or the game's state changes |
 | No game is selected, past the grace period | the owner chooses a game |
 | A state this build does not recognize has been up for 2 h | the state changes, or the owner presses **Show on panel** |
-| The clock has never been set and 2 h have passed | NTP sets the clock, the state changes, or the owner presses **Show on panel** |
+| The clock has never been set and 2 h have passed | NTP sets the clock **and the game is then inside the 12 h window** (if it is not, the panel stays dark for the ordinary reason), the state changes, or the owner presses **Show on panel** |
 | Inside the owner's sleep hours | the window ends, or a live game starts |
+| Inside sleep hours, on "cannot reach the service" | the window ends, or the link comes back |
+
+**"Show on panel" and an offline panel.** The button re-sends the current
+game, and a panel that is connected acts on it at once. A panel that is
+*offline* when it is pressed is a different matter: the live publish never
+reaches it, and on reconnect the broker hands it the same retained payload,
+which it ignores — correctly, since that is how it survives reconnecting
+every hour. The fix is a `chosenAt` stamp on the config message: a replay
+carrying a stamp the panel has not acted on is the press that happened while
+it was away. **That needs the API deployed.** Until somebody runs `make
+build` and a Terraform apply, panels behave exactly as they do today: a press
+made while the panel is offline is lost, while the site reports success. The
+panel side works with or without the stamp, and v0.1.3 panels in the field
+ignore the new key.
 
 **What is not on that list, deliberately: "any update".** The panel notices a
 change when the state's *name* changes (PRE → LIVE → FINAL), not on every
@@ -1569,23 +1583,42 @@ Four further rules that are the panel's own, not settings:
   of this exists to prevent. A start the panel cannot *read* is treated the
   same way: dashes, never `00:00:00`, which would read as "any second now".
 - **The screens that ask for help are never off**, in or out of sleep hours:
-  not registered, the pairing code, enrollment failing, no network, and —
-  new — **cannot reach the service**. A registered panel on a working
-  network whose MQTT link has been down for more than two minutes says so,
-  and keeps saying so until the link comes back, at which point it returns
-  to normal by itself. Before this, that panel went black after the grace
-  with nothing due, which is the owner's original complaint arriving by a
-  new route, for the one fault they most need to be able to see. Precedence:
-  **below "No network"**, which is the more specific fault and the one the
-  person standing there can act on; **above the scoreboard**, including
-  above a game already on screen — after two minutes that clock is wrong and
-  still ticking, and a scoreboard that is wrong is worse than one that
-  admits it, while the existing "no link" dot is eight pixels and settles
-  nothing across a room. Brief drops never reach it; that is what the
-  two-minute threshold is for.
-  A panel that cannot say "I have no network" cannot be fixed by the person
-  standing in front of it. These screens also sit up the longest — a pairing
-  code for up to a day — so they get the burn-in shift described below.
+  not registered, the pairing code, enrollment failing, no network. Each one
+  is the panel asking somebody to come and do something, and a panel that
+  cannot say "I have no network" cannot be fixed by the person standing in
+  front of it. They also sit up the longest — a pairing code for up to a day
+  — so they get the burn-in shift described below.
+- **"Cannot reach the service" is the exception, and it sleeps.** A
+  registered panel on a working network whose MQTT link has been down for
+  more than two minutes says so, and keeps saying so until the link comes
+  back, at which point it returns to normal by itself. Before it existed,
+  that panel went black after the grace with nothing due — the owner's
+  original complaint arriving by a new route, for the one fault they most
+  need to see. But it is **not** in the never-off set above: nobody has to be
+  at the panel for it, and it heals itself, so it obeys sleep hours like the
+  game does. (An ISP outage with the router still up leaves `nmcli`
+  reporting a connection, so without that it would burn a help screen at
+  full brightness every night the outage lasted.) Precedence: **below "No
+  network"**, the more specific fault and the one the person there can act
+  on; **above the scoreboard** — except that **a live game keeps the panel**,
+  which is the next rule.
+- **A live game keeps the panel, and stops pretending.** The owner's rule is
+  that a live game wins, and it wins over the help screen too. What makes
+  that safe is that the frame stops lying when the link goes. Every clock on
+  the scoreboard is derived as `seconds − (now − asOf)`, so a frame nobody is
+  updating counts a period down to 0:00 that may still have ten minutes in
+  it, and quietly expires penalties that were never served. With no link the
+  clock and the penalty clocks **freeze** at the document's own numbers, one
+  penalty row a side is shown instead of two, and a band across the bottom
+  says **`NO LINK - N MIN OLD`**. The age is measured on the monotonic clock
+  from when the last document arrived, not from its `asOf` against the
+  panel's wall clock: this banner has to be right on a panel whose clock is
+  wrong, which is exactly the panel somebody is squinting at when a frame
+  has gone stale. The band is inset to the same 60 px as the rule line, so
+  the burn-in shift cannot clip it, and it sits below everything the score
+  columns draw. A countdown does *not* freeze — it is computed from the
+  clock against the document's own start, and a dropped link takes nothing
+  away from it.
 - **Nothing the network sends can stop the render loop.** A `start` the
   panel could not parse used to raise `ValueError` three frames below a loop
   with no handler: the service exited, systemd restarted it, and the panel
@@ -1656,8 +1689,34 @@ step the clock hours forward after boot.
    looks deliberate. If a black frame instead looks like a fault — a grey
    glow, a visible backlight — then either the display-power follow-up below
    becomes urgent, or "off" needs to become something else.
-10. **Nothing is dark that should not be.** Anything the panel does that
+10. **A live game with the link pulled.** Mid-game, pull the internet: the
+   score must stay, the clock must **stop** rather than run down, and the
+   `NO LINK - N MIN OLD` band must appear and count up. Plug it back in and
+   the game should resume by itself. Watch for the band covering anything it
+   should not on the real panel, where the frame is scaled.
+11. **"Show on panel" while the panel is unplugged.** Only once the API is
+   deployed: unplug the panel, press the button, plug it back in. The game
+   should come back on reconnect. Before deployment this is expected to do
+   nothing — worth confirming both ways round, since the difference is the
+   whole point of the `chosenAt` change.
+12. **A refused connection.** Hard to stage deliberately; if a panel is ever
+   seen reconnecting in a loop without showing "Cannot reach the service",
+   that is the `_on_connect` reason-code path failing and worth a journal
+   dump.
+13. **Nothing is dark that should not be.** Anything the panel does that
    looks dead is a finding, whether or not it matches the table above.
+
+**Finding, measured 2026-09-19: the panel is 400x1280, not 480x1920.** Read
+off the panel's own journal. The app draws a 1920x480 frame and
+`display.placement` turns and scales it to fit, so on this panel it lands as
+**1280x320** with about 40 px of unused glass on each long edge. Two things
+follow. The ±4 px burn-in shift is about **±2.7 physical pixels** — still
+more than a pixel, so it still spreads wear, but less than the drawing space
+suggests; and the layout, which was designed against 1920x480, does not fill
+this panel. Neither is being changed here (a layout change under a burn-in
+change would make both impossible to judge). Worth deciding later whether
+the frame should be authored at the panel's real aspect, or the shift scaled
+up so it is ±4 *physical* pixels.
 
 **Finding, not fixed: the second penalty row is drawn 2 px off the bottom.**
 With two penalties a side, the second row's progress bar is drawn at

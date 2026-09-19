@@ -101,3 +101,67 @@ def test_the_flag_reaches_the_callback_off_the_wire():
     link._on_message(None, None, message)
 
     assert seen == {"payload": b'{"gameId":7}', "retain": True}
+
+
+# --------------------------------------------------------------------------
+# A refused connection is not a connection
+#
+# paho calls on_connect for every CONNACK, including the ones that say no --
+# a bad certificate, a policy that does not allow this client id, a broker
+# refusing the client. The old callback subscribed and reported the link up
+# regardless. With reconnect backoff capped at 60 s that cleared
+# link_down_since every minute, so the "cannot reach the service" screen
+# could never appear for the panel that needs it most: one that is reaching
+# the broker and being turned away.
+# --------------------------------------------------------------------------
+
+
+class FakeClient:
+    def __init__(self):
+        self.subscribed = []
+
+    def subscribe(self, topic, qos=0):
+        self.subscribed.append(topic)
+
+
+def connect_with(reason_code):
+    link = Link.__new__(Link)
+    link.on_state = link.on_today = link.on_config = lambda *a: None
+    link._config_topic = config_topic("scoreboard-abc123")
+    link._game = 2026020001
+    seen = []
+    link.on_link = seen.append
+    client = FakeClient()
+    link._on_connect(client, None, {}, reason_code)
+    return seen, client.subscribed
+
+
+class ReasonCode:
+    """What paho hands the callback: something that knows whether it failed."""
+
+    def __init__(self, failed, name):
+        self.is_failure, self._name = failed, name
+
+    def __str__(self):
+        return self._name
+
+
+def test_a_successful_connack_subscribes_and_reports_the_link_up():
+    seen, subscribed = connect_with(ReasonCode(False, "Success"))
+    assert seen == [True]
+    assert len(subscribed) == 3   # today, this device's config, the game
+
+
+def test_a_refused_connack_reports_the_link_down_and_subscribes_to_nothing():
+    seen, subscribed = connect_with(ReasonCode(True, "Not authorized"))
+    assert seen == [False], "a refusal was reported as a working link"
+    assert subscribed == [], "subscribed on a connection that was refused"
+
+
+def test_an_integer_reason_code_is_read_the_same_way():
+    # paho's VERSION2 callbacks pass a ReasonCode object, but MQTT v3
+    # brokers and older paho paths can hand over a plain int, where 0 is
+    # success and anything else is a refusal.
+    assert connect_with(0)[0] == [True]
+    assert connect_with(5)[0] == [False]      # 5: not authorized
+    assert connect_with(5)[1] == []
