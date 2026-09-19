@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -138,10 +139,27 @@ def parse_wifi_file(text: str) -> WifiSettings | None:
         )
 
     country = values.get("country") or None
-    if country is not None:
-        country = country.upper()
-        if len(country) != 2 or not country.isalpha():
-            raise ValueError(f"country must be a two-letter code such as US, got {country!r}")
+    if country is None:
+        # Not optional, and not a nicety. The image ships with the Wi-Fi radio
+        # switched OFF: raspberrypi-sys-mods sets rfkill.default_state=0, and
+        # pi-gen's stage2/02-net-tweaks/01-run.sh writes
+        # /var/lib/NetworkManager/NetworkManager.state with
+        # WirelessEnabled=false whenever WPA_COUNTRY is unset -- which it is
+        # for this image and must stay so, because an image downloaded by
+        # strangers cannot know which country any of them is in. Setting the
+        # regulatory domain is what turns the radio on, so without this line
+        # the connect below cannot succeed. Say so here, where the message can
+        # explain itself, rather than let nmcli fail with something nobody
+        # could trace back to a missing line in a text file.
+        raise ValueError(
+            "there is no country= line, and the panel's Wi-Fi radio stays "
+            "switched off until it knows which country it is in. Add a line "
+            "such as country=US (a two-letter code: US, CA, GB) and restart "
+            "the panel"
+        )
+    country = country.upper()
+    if len(country) != 2 or not country.isalpha():
+        raise ValueError(f"country must be a two-letter code such as US, got {country!r}")
 
     return WifiSettings(
         ssid=ssid, psk=psk, country=country,
@@ -231,6 +249,14 @@ def split_terse(line: str) -> list[str]:
 QUERY_TIMEOUT_S = 10
 CONNECT_TIMEOUT_S = 45
 
+# How long to let a Wi-Fi interface settle after the radio is switched on,
+# before trying to connect through it. Ten cheap queries two seconds apart is
+# twenty seconds at worst, which sits inside the unit's start timeout together
+# with one CONNECT_TIMEOUT_S connect -- and scoreboard-netcfg.service runs
+# Before=scoreboard.service, so this budget is time the panel spends dark.
+WIFI_READY_TRIES = 10
+WIFI_READY_WAIT_S = 2
+
 
 def _run_nmcli(args: list[str], timeout: float = QUERY_TIMEOUT_S) -> str:
     # A list, never a string, and never shell=True: an SSID is attacker-chosen
@@ -270,11 +296,28 @@ def _run_raspi_config(args: list[str], timeout: float = QUERY_TIMEOUT_S) -> str:
 
 
 def set_country(code: str, run=None) -> None:
-    """Set the Wi-Fi regulatory domain.
+    """Set the Wi-Fi regulatory domain, which is what turns the radio ON.
 
-    Without it the radio may refuse 5 GHz channels altogether, which looks
-    exactly like "my network isn't in the list" and sends people hunting in
-    the wrong place.
+    An earlier version of this docstring said the radio "may refuse 5 GHz
+    channels" without it. That understates it by a long way: on this image the
+    whole radio is off until the country is set. raspberrypi-sys-mods boots
+    with rfkill.default_state=0 so nothing transmits before the regulatory
+    domain is known, and pi-gen's stage2/02-net-tweaks/01-run.sh additionally
+    writes /var/lib/NetworkManager/NetworkManager.state with
+    WirelessEnabled=false whenever WPA_COUNTRY is unset at build time -- which
+    it is here, deliberately (see 6.1: the image is downloaded by strangers
+    and cannot know where any of them lives).
+
+    raspi-config's do_wifi_country (20260730, read from the deb) validates the
+    code against /usr/share/zoneinfo/iso3166.tab and returns 1 on a bad one,
+    writes cfg80211.ieee80211_regdom= into cmdline.txt so it survives a
+    reboot, calls `iw reg set`, zeroes /var/lib/systemd/rfkill/*:wlan, and
+    then -- and only then -- unblocks the radio. That last step is a branch:
+    `nmcli radio wifi on` IF systemd is up, it is not in a chroot and
+    NetworkManager is already active, ELSE `rfkill unblock wifi` plus a sed of
+    NetworkManager.state. Which branch runs depends on timing we do not
+    control, so the caller says `nmcli radio wifi on` itself afterwards rather
+    than depend on it.
     """
     (run or _run_raspi_config)(["nonint", "do_wifi_country", code])
 
@@ -282,8 +325,61 @@ def set_country(code: str, run=None) -> None:
 class NetworkManager:
     """nmcli, wrapped. The runner is injected so tests never shell out."""
 
-    def __init__(self, run=None) -> None:
+    def __init__(self, run=None, run_raspi_config=None) -> None:
         self._run = run if run is not None else _run_nmcli
+        self._run_raspi_config = run_raspi_config
+
+    def set_country(self, code: str) -> None:
+        """The regulatory domain, which is the precondition for the radio.
+
+        Delegates to the module-level set_country so there is one explanation
+        of why this exists, and one place tests can replace.
+        """
+        set_country(code, run=self._run_raspi_config)
+
+    def radio_on(self) -> None:
+        """Switch the Wi-Fi radio on, whatever raspi-config just did.
+
+        raspi-config's do_wifi_country only runs `nmcli radio wifi on` when
+        NetworkManager is already active at that instant; otherwise it takes
+        `rfkill unblock wifi` and rewrites NetworkManager.state instead. Both
+        branches are meant to work, but which one runs depends on timing this
+        service does not control, and this call is idempotent, instant, and
+        available to us as root -- so it is cheaper to say it than to reason
+        about which branch upstream took.
+        """
+        self._run(["radio", "wifi", "on"])
+
+    def wait_for_wifi(self, tries: int = WIFI_READY_TRIES,
+                      wait: float = WIFI_READY_WAIT_S) -> bool:
+        """Wait for a Wi-Fi device to be usable. True if one became usable.
+
+        Switching the radio on returns immediately, but the interface then has
+        to leave rfkill and move from "unavailable" to "disconnected" before
+        nmcli will connect through it. Connecting into that window fails at
+        once -- and it is the first boot, the only boot on which the setup
+        file has anything to do, that opens the window, because that is the
+        boot where the radio was off until a moment ago.
+
+        Never raises, and never blocks longer than tries*wait: this runs
+        Before=scoreboard.service, so every second spent here is a second the
+        panel shows nothing. A false return is not fatal; the caller tries the
+        connect anyway and lets its error be the one that gets reported.
+        """
+        for attempt in range(tries):
+            try:
+                out = self._run(["-t", "-f", "DEVICE,TYPE,STATE", "device"])
+            except NetworkError:
+                return False
+            states = [f[2] for f in (split_terse(l) for l in out.splitlines())
+                      if len(f) >= 3 and f[1] == "wifi"]
+            if not states:
+                return False  # no Wi-Fi device at all; waiting cannot help
+            if any(s not in ("unavailable", "unmanaged") for s in states):
+                return True
+            if attempt + 1 < tries:
+                time.sleep(wait)
+        return False
 
     def scan(self) -> list[Network]:
         out = self._run(["-t", "-f", "SSID,SIGNAL,SECURITY", "device", "wifi", "list"])
@@ -350,14 +446,32 @@ def apply_boot_file(path: Path | None = None, nm: "NetworkManager | None" = None
     target = boot_file() if path is None else path
     try:
         text = target.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+    except FileNotFoundError:
+        # The normal state of every boot after the first, and of a card whose
+        # owner never wrote one. Not worth a warning: warning here would train
+        # whoever reads the journal to ignore the warnings that matter.
+        log.debug("no setup file at %s", target)
+        return False
+    except OSError as e:
+        # This used to return False in silence, and main() then logged nothing
+        # either, because its "applied ..." line only runs on success. A card
+        # whose file could not be read was indistinguishable in the journal
+        # from a card with no file at all.
+        log.warning("could not read %s: %s -- leaving it alone",
+                    target, e.strerror or e)
         return False
     settings = parse_wifi_file(text)
     if settings is None:
         return False
     manager = nm if nm is not None else NetworkManager()
+    # Order matters, and all three steps are the radio. The regulatory domain
+    # is what makes transmitting legal (and, on this image, possible at all);
+    # radio_on() covers whichever branch raspi-config took; and the interface
+    # then needs a moment to become usable before a connect can go through it.
     if settings.country:
-        set_country(settings.country)
+        manager.set_country(settings.country)
+    manager.radio_on()
+    manager.wait_for_wifi()
     manager.apply(settings)
     stamp = now() if now is not None else datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     try:

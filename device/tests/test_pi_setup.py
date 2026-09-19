@@ -78,6 +78,21 @@ def test_preflight_refuses_a_checkout_with_no_device_config(checkout):
     assert run(checkout, "--preflight").returncode != 0
 
 
+NETCFG_UNIT = REPO / "device" / "scoreboard-netcfg.service"
+
+
+def test_the_network_unit_states_its_own_start_budget():
+    # It is Before=scoreboard.service, so everything it does is time the panel
+    # spends showing nothing. Its worst case is now raspi-config (10 s), the
+    # settle wait for the radio (20 s) and one connect (45 s) -- 75 s, close
+    # enough to systemd's 90 s default that inheriting it silently would mean
+    # the first slow connect gets killed part-way through and the setup file
+    # is left looking as though it had been ignored.
+    fields = unit(NETCFG_UNIT.read_text())
+    assert "TimeoutStartSec" in fields, "the unit inherits DefaultTimeoutStartSec without saying so"
+    assert int(fields["TimeoutStartSec"].rstrip("s")) >= 90
+
+
 def test_appliance_unit_runs_as_its_own_account(checkout):
     done = run(checkout, "--appliance", "--print-unit")
     assert done.returncode == 0

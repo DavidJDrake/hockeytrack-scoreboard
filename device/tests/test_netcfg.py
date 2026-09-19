@@ -1,4 +1,6 @@
 import json
+import logging
+import os
 import subprocess
 import traceback
 from pathlib import Path
@@ -15,36 +17,36 @@ LINE_BOUNDARIES_FIXTURE = (Path(__file__).resolve().parents[2]
 
 
 def test_plain_file():
-    assert parse_wifi_file("ssid=HomeNet\npsk=supersecret\n") == WifiSettings(
-        ssid="HomeNet", psk="supersecret", country=None, hidden=False)
+    assert parse_wifi_file("ssid=HomeNet\npsk=supersecret\ncountry=US\n") == WifiSettings(
+        ssid="HomeNet", psk="supersecret", country="US", hidden=False)
 
 
 def test_crlf_line_endings():
     # Notepad on Windows. If this fails, most users are locked out.
-    assert parse_wifi_file("ssid=HomeNet\r\npsk=supersecret\r\n").ssid == "HomeNet"
+    assert parse_wifi_file("ssid=HomeNet\r\npsk=supersecret\r\ncountry=US\r\n").ssid == "HomeNet"
 
 
 def test_utf8_bom():
     # Notepad again: it prefixes a BOM that would otherwise become part of
     # the first key, so "ssid" would never match.
-    assert parse_wifi_file("\ufeffssid=HomeNet\npsk=supersecret\n").ssid == "HomeNet"
+    assert parse_wifi_file("\ufeffssid=HomeNet\npsk=supersecret\ncountry=US\n").ssid == "HomeNet"
 
 
 def test_whitespace_and_key_case():
-    got = parse_wifi_file("  SSID = HomeNet  \n\tPsk\t=\tsupersecret\n")
+    got = parse_wifi_file("  SSID = HomeNet  \n\tPsk\t=\tsupersecret\n country = us \n")
     assert got.ssid == "HomeNet" and got.psk == "supersecret"
 
 
 def test_comments_and_blank_lines_ignored():
-    assert parse_wifi_file("# a comment\n\nssid=HomeNet\npsk=supersecret\n").ssid == "HomeNet"
+    assert parse_wifi_file("# a comment\n\nssid=HomeNet\npsk=supersecret\ncountry=US\n").ssid == "HomeNet"
 
 
 def test_line_without_equals_is_ignored():
-    assert parse_wifi_file("nonsense\nssid=HomeNet\npsk=supersecret\n").ssid == "HomeNet"
+    assert parse_wifi_file("nonsense\nssid=HomeNet\npsk=supersecret\ncountry=US\n").ssid == "HomeNet"
 
 
 def test_password_may_contain_equals():
-    assert parse_wifi_file("ssid=HomeNet\npsk=a=b=c=dxyz\n").psk == "a=b=c=dxyz"
+    assert parse_wifi_file("ssid=HomeNet\npsk=a=b=c=dxyz\ncountry=US\n").psk == "a=b=c=dxyz"
 
 
 @pytest.mark.parametrize("text", ["", "   \n", "# only a comment\n", "psk=supersecret\n"])
@@ -53,7 +55,7 @@ def test_nothing_to_do(text):
 
 
 def test_open_network_has_no_psk():
-    assert parse_wifi_file("ssid=CoffeeShop\n").psk is None
+    assert parse_wifi_file("ssid=CoffeeShop\ncountry=US\n").psk is None
 
 
 def test_ssid_too_long():
@@ -83,15 +85,47 @@ def test_bad_country_rejected(country):
         parse_wifi_file(f"ssid=HomeNet\npsk=supersecret\ncountry={country}\n")
 
 
+def test_a_file_with_an_ssid_but_no_country_is_refused_loudly():
+    # The image ships with the Wi-Fi radio switched OFF. raspberrypi-sys-mods
+    # sets rfkill.default_state=0, and pi-gen's stage2/02-net-tweaks/01-run.sh
+    # writes /var/lib/NetworkManager/NetworkManager.state with
+    # WirelessEnabled=false whenever WPA_COUNTRY is unset -- which it is here,
+    # and must stay so, because an image cannot know where a stranger lives.
+    # Setting the country is what turns the radio on, so a file without one
+    # cannot possibly work, and must say so instead of proceeding to an nmcli
+    # call that fails for a reason nobody could guess from its message.
+    with pytest.raises(ValueError, match="country"):
+        parse_wifi_file("ssid=HomeNet\npsk=supersecret\n")
+
+
+def test_the_missing_country_message_says_what_to_add():
+    # This text is the whole diagnosis for whoever is holding the card, and it
+    # lands in the journal and nowhere else, so it has to stand on its own.
+    with pytest.raises(ValueError) as caught:
+        parse_wifi_file("ssid=HomeNet\npsk=supersecret\n")
+    message = str(caught.value)
+    assert "country=" in message
+    assert "US" in message
+    assert "off" in message
+
+
+def test_a_file_with_nothing_to_do_is_not_asked_for_a_country():
+    # "Nothing to do" comes first. A downloaded-but-unedited file, and the
+    # note consume() leaves behind, must both stay silent rather than start
+    # failing on every boot forever after.
+    assert parse_wifi_file("") is None
+    assert parse_wifi_file("# only a comment\nowner=a@b.com\n") is None
+
+
 @pytest.mark.parametrize("value,want", [("yes", True), ("true", True), ("1", True),
                                         ("no", False), ("", False)])
 def test_hidden(value, want):
-    assert parse_wifi_file(f"ssid=HomeNet\npsk=supersecret\nhidden={value}\n").hidden is want
+    assert parse_wifi_file(f"ssid=HomeNet\npsk=supersecret\ncountry=US\nhidden={value}\n").hidden is want
 
 
 def test_consume_removes_the_password(tmp_path):
     path = tmp_path / "scoreboard-wifi.txt"
-    path.write_text("ssid=HomeNet\npsk=supersecret\n")
+    path.write_text("ssid=HomeNet\npsk=supersecret\ncountry=US\n")
     consume(path, "2026-09-12 14:05 UTC")
     left = path.read_text()
     assert "supersecret" not in left
@@ -122,9 +156,13 @@ def test_applying_wifi_keeps_the_owner_line(tmp_path):
     # owner: the panel may not enroll until a later boot, and after a factory
     # reset this file is the only record of who the card belongs to.
     path = tmp_path / "scoreboard-setup.txt"
-    path.write_text("ssid=Home\npsk=password123\nowner=friend@example.com\n")
+    path.write_text("ssid=Home\npsk=password123\ncountry=US\nowner=friend@example.com\n")
 
     class FakeNM:
+        """The slice of NetworkManager that apply_boot_file drives."""
+        def set_country(self, code): self.country = code
+        def radio_on(self): self.radio_on_called = True
+        def wait_for_wifi(self): return True
         def apply(self, settings): self.applied = settings
 
     assert netcfg.apply_boot_file(path, nm=FakeNM(), now=lambda: "2026-09-13 10:00 UTC") is True
@@ -135,7 +173,7 @@ def test_applying_wifi_keeps_the_owner_line(tmp_path):
 
 def test_the_legacy_wifi_filename_is_still_read(tmp_path):
     legacy = tmp_path / "scoreboard-wifi.txt"
-    legacy.write_text("ssid=Home\n")
+    legacy.write_text("ssid=Home\ncountry=US\n")
     chosen = netcfg.boot_file(primary=tmp_path / "scoreboard-setup.txt", legacy=legacy)
     assert chosen == legacy
 
@@ -153,11 +191,15 @@ def test_a_card_with_only_the_old_filename_still_gets_its_wifi_applied(tmp_path,
     # rename, not yet booted, would otherwise read a file that is not there
     # and silently apply nothing.
     legacy = tmp_path / "scoreboard-wifi.txt"
-    legacy.write_text("ssid=Home\npsk=password123\n")
+    legacy.write_text("ssid=Home\npsk=password123\ncountry=US\n")
     monkeypatch.setattr(netcfg, "BOOT_FILE", tmp_path / "scoreboard-setup.txt")
     monkeypatch.setattr(netcfg, "LEGACY_BOOT_FILE", legacy)
 
     class FakeNM:
+        """The slice of NetworkManager that apply_boot_file drives."""
+        def set_country(self, code): self.country = code
+        def radio_on(self): self.radio_on_called = True
+        def wait_for_wifi(self): return True
         def apply(self, settings): self.applied = settings
 
     nm = FakeNM()
@@ -185,6 +227,13 @@ class FakeNmcli:
             if key in args:
                 return value
         return ""
+
+
+# Every setup file now has to carry a country=, so apply_boot_file calls
+# raspi-config as well as nmcli. A test that fakes only nmcli would shell out
+# to the real raspi-config, which is not on this machine and must never be run
+# by this suite even where it is.
+NO_RASPI_CONFIG = lambda args, timeout=None: ""
 
 
 def test_split_terse_plain():
@@ -253,9 +302,10 @@ def test_status_reports_the_active_network():
 
 def test_apply_boot_file_applies_then_consumes(tmp_path):
     path = tmp_path / "scoreboard-wifi.txt"
-    path.write_text("ssid=HomeNet\npsk=supersecret\n")
+    path.write_text("ssid=HomeNet\npsk=supersecret\ncountry=US\n")
     fake = FakeNmcli()
-    assert apply_boot_file(path, nm=NetworkManager(run=fake), now=lambda: "NOW") is True
+    nm = NetworkManager(run=fake, run_raspi_config=NO_RASPI_CONFIG)
+    assert apply_boot_file(path, nm=nm, now=lambda: "NOW") is True
     assert ["device", "wifi", "connect", "HomeNet", "password", "supersecret"] in fake.calls
     assert "supersecret" not in path.read_text()
 
@@ -270,7 +320,7 @@ def test_apply_boot_file_leaves_a_broken_file_alone(tmp_path):
     # The user's only copy of what they meant. Consuming it would destroy the
     # evidence they need to fix the typo.
     path = tmp_path / "scoreboard-wifi.txt"
-    path.write_text("ssid=HomeNet\npsk=short\n")
+    path.write_text("ssid=HomeNet\npsk=short\ncountry=US\n")
     with pytest.raises(ValueError):
         apply_boot_file(path, nm=NetworkManager(run=FakeNmcli()))
     assert "psk=short" in path.read_text()
@@ -278,11 +328,131 @@ def test_apply_boot_file_leaves_a_broken_file_alone(tmp_path):
 
 def test_apply_boot_file_leaves_the_file_when_nmcli_fails(tmp_path):
     path = tmp_path / "scoreboard-wifi.txt"
-    path.write_text("ssid=HomeNet\npsk=supersecret\n")
-    nm = NetworkManager(run=FakeNmcli(fail_on="connect"))
+    path.write_text("ssid=HomeNet\npsk=supersecret\ncountry=US\n")
+    nm = NetworkManager(run=FakeNmcli(fail_on="connect"), run_raspi_config=NO_RASPI_CONFIG)
     with pytest.raises(NetworkError):
         apply_boot_file(path, nm=nm)
     assert "psk=supersecret" in path.read_text()
+
+
+def test_the_radio_is_switched_on_before_connecting(tmp_path, monkeypatch):
+    # raspi-config's do_wifi_country only runs `nmcli radio wifi on` when
+    # `systemctl -q is-active NetworkManager` is true at that instant; its
+    # other branch takes `rfkill unblock wifi` plus a sed of NM's state file
+    # instead. Rather than depend on which branch upstream picks, netcfg says
+    # it itself. The call is idempotent and instant, and netcfg runs as root.
+    path = tmp_path / "scoreboard-setup.txt"
+    path.write_text("ssid=HomeNet\npsk=supersecret\ncountry=US\n")
+    monkeypatch.setattr(netcfg, "set_country", lambda code, run=None: None)
+    fake = FakeNmcli()
+    assert apply_boot_file(path, nm=NetworkManager(run=fake), now=lambda: "NOW") is True
+    assert ["radio", "wifi", "on"] in fake.calls
+    radio = fake.calls.index(["radio", "wifi", "on"])
+    connect = next(i for i, c in enumerate(fake.calls) if c[:3] == ["device", "wifi", "connect"])
+    assert radio < connect, "the radio was switched on after the connect was attempted"
+
+
+def test_the_country_is_set_before_the_radio_is_switched_on(tmp_path, monkeypatch):
+    # Order is the whole point: the regulatory domain is the precondition for
+    # the radio being allowed to transmit at all.
+    order = []
+    path = tmp_path / "scoreboard-setup.txt"
+    path.write_text("ssid=HomeNet\npsk=supersecret\ncountry=GB\n")
+    monkeypatch.setattr(netcfg, "set_country", lambda code, run=None: order.append(("country", code)))
+
+    class Recorder(FakeNmcli):
+        def __call__(self, args, timeout=None):
+            order.append(("nmcli", args[0]))
+            return super().__call__(args, timeout=timeout)
+
+    assert apply_boot_file(path, nm=NetworkManager(run=Recorder()), now=lambda: "NOW") is True
+    assert order[0] == ("country", "GB")
+    assert ("nmcli", "radio") in order
+    assert order.index(("country", "GB")) < order.index(("nmcli", "radio"))
+
+
+def test_it_waits_for_the_wifi_device_to_come_out_of_unavailable(tmp_path, monkeypatch):
+    # Switching the radio on returns immediately, but the interface then has
+    # to leave rfkill and move from "unavailable" to "disconnected" before
+    # nmcli will connect through it. Connecting into that window fails at
+    # once, and it is exactly the first boot -- the only boot where this file
+    # has anything to do -- that opens it.
+    path = tmp_path / "scoreboard-setup.txt"
+    path.write_text("ssid=HomeNet\npsk=supersecret\ncountry=US\n")
+    monkeypatch.setattr(netcfg, "set_country", lambda code, run=None: None)
+    monkeypatch.setattr(netcfg.time, "sleep", lambda s: None)
+    states = ["wlan0:wifi:unavailable", "wlan0:wifi:unavailable", "wlan0:wifi:disconnected"]
+
+    class Settling(FakeNmcli):
+        def __call__(self, args, timeout=None):
+            if args[:2] == ["-t", "-f"] and "STATE" in args[2]:
+                return states.pop(0) + "\n" if states else "wlan0:wifi:disconnected\n"
+            if args[:3] == ["device", "wifi", "connect"]:
+                assert not states, "connected while the device was still unavailable"
+            return super().__call__(args, timeout=timeout)
+
+    assert apply_boot_file(path, nm=NetworkManager(run=Settling()), now=lambda: "NOW") is True
+
+
+def test_waiting_for_the_radio_gives_up_rather_than_hanging_the_boot(monkeypatch):
+    # scoreboard-netcfg.service is Before=scoreboard.service, so every second
+    # spent here is a second the panel shows nothing. An interface that never
+    # becomes available must not hold the boot open indefinitely.
+    monkeypatch.setattr(netcfg.time, "sleep", lambda s: None)
+    nm = NetworkManager(run=lambda args, timeout=None: "wlan0:wifi:unavailable\n")
+    assert nm.wait_for_wifi() is False
+
+
+def test_waiting_for_the_radio_does_not_wait_when_there_is_no_wifi_device(monkeypatch):
+    # An Ethernet-only panel, or one whose adapter is unplugged. There is
+    # nothing here that waiting can change, and waiting would only delay a
+    # connect that is going to fail with a message worth reading.
+    slept = []
+    monkeypatch.setattr(netcfg.time, "sleep", slept.append)
+    nm = NetworkManager(run=lambda args, timeout=None: "eth0:ethernet:connected\n")
+    assert nm.wait_for_wifi() is False
+    assert slept == [], "waited for a Wi-Fi device that does not exist"
+
+
+def test_waiting_for_the_radio_survives_nmcli_failing(monkeypatch):
+    # A query that errors partway through the settle window is not a reason to
+    # abandon the connect -- it is a reason to try the connect anyway and let
+    # its own error be the one that gets reported.
+    monkeypatch.setattr(netcfg.time, "sleep", lambda s: None)
+
+    def boom(args, timeout=None):
+        raise NetworkError("nmcli failed")
+
+    assert NetworkManager(run=boom).wait_for_wifi() is False
+
+
+def test_a_missing_boot_file_is_not_worth_a_warning(tmp_path, caplog):
+    # The normal state of every boot after the first. Warning here would
+    # train whoever reads the journal to ignore the warnings that matter.
+    with caplog.at_level(logging.DEBUG, logger="scoreboard.netcfg"):
+        assert apply_boot_file(tmp_path / "missing.txt", nm=NetworkManager(run=FakeNmcli())) is False
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can read a mode-000 file, so the fixture proves nothing")
+def test_a_boot_file_that_cannot_be_read_is_not_silent(tmp_path, caplog):
+    # This was silent: apply_boot_file returned False on any OSError and
+    # main() then logged nothing either, because its "applied ..." line is
+    # inside the success branch. A card whose file could not be read looked
+    # exactly like a card with no file, and the journal said nothing at all.
+    path = tmp_path / "scoreboard-setup.txt"
+    path.write_text("ssid=HomeNet\npsk=supersecret\ncountry=US\n")
+    path.chmod(0o000)
+    try:
+        with caplog.at_level(logging.WARNING, logger="scoreboard.netcfg"):
+            assert apply_boot_file(path, nm=NetworkManager(run=FakeNmcli())) is False
+    finally:
+        path.chmod(0o600)
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert warnings, "an unreadable setup file left nothing in the journal"
+    said = warnings[0].getMessage()
+    assert str(path) in said
+    assert "Permission denied" in said or "EACCES" in said
 
 
 def test_run_nmcli_timeout_does_not_leak_the_password(monkeypatch):
@@ -325,14 +495,15 @@ def test_apply_boot_file_warns_but_still_succeeds_when_the_file_cannot_be_cleare
     # power cut. Silence here would mean a cleartext password stays on the
     # partition with nothing anywhere saying so.
     path = tmp_path / "scoreboard-wifi.txt"
-    path.write_text("ssid=HomeNet\npsk=supersecret\n")
+    path.write_text("ssid=HomeNet\npsk=supersecret\ncountry=US\n")
 
     def consume_that_fails(_path, _when, _owner=None):
         raise OSError("Read-only file system")
 
     monkeypatch.setattr(netcfg, "consume", consume_that_fails)
     with caplog.at_level("WARNING"):
-        assert apply_boot_file(path, nm=NetworkManager(run=FakeNmcli())) is True
+        assert apply_boot_file(
+            path, nm=NetworkManager(run=FakeNmcli(), run_raspi_config=NO_RASPI_CONFIG)) is True
     assert "still on the boot partition" in caplog.text
 
 
@@ -401,6 +572,20 @@ def test_the_setup_file_the_website_writes_is_read_the_way_it_meant():
     # Downloaded and never edited, it must leave the network alone rather than
     # fail -- ssid= with nothing after it is "nothing to do".
     assert netcfg.parse_wifi_file(text) is None
+    # The website has to ask for a country, because the panel's Wi-Fi radio
+    # stays switched off until one is set. A file without this line produces a
+    # panel that silently never joins a network, which is what v0.1.1 did.
+    assert "country=" in text, \
+        "the website stopped asking for a country; panels set up from this file would stay offline"
+    # And once somebody fills the file in, the panel must accept exactly what
+    # the website laid out. The two halves agreeing on the key names is the
+    # whole reason this fixture is shared.
+    filled = (text.replace("ssid=\n", "ssid=HomeNet\n")
+                  .replace("psk=\n", "psk=supersecret\n")
+                  .replace("country=\n", "country=US\n"))
+    settings = netcfg.parse_wifi_file(filled)
+    assert settings is not None
+    assert (settings.ssid, settings.psk, settings.country) == ("HomeNet", "supersecret", "US")
 
 
 def test_the_website_knows_every_character_the_panel_breaks_lines_on():

@@ -15,10 +15,19 @@ Type=oneshot
 RemainAfterExit=no
 WorkingDirectory=/opt/scoreboard
 ExecStart=/opt/scoreboard/.venv/bin/python -m scoreboard.netcfg
-# Runs as root: it writes a NetworkManager system connection and rewrites a
-# file on the boot partition. It is a few seconds at boot, not a resident
-# service, and it exits 0 even when the file is wrong so a typo cannot stop
-# the panel starting.
+# Runs as root: it writes a NetworkManager system connection, sets the Wi-Fi
+# regulatory domain through raspi-config, and rewrites a file on the boot
+# partition. It is seconds at boot, not a resident service, and it exits 0
+# even when the file is wrong so a typo cannot stop the panel starting.
+#
+# Stated rather than inherited, because this unit is Before=scoreboard.service
+# and so every second it takes is a second the panel shows nothing. The worst
+# case is raspi-config setting the regulatory domain (10 s), waiting for the
+# radio to become usable afterwards (20 s), and one connect (45 s). 75 s is
+# close enough to systemd's 90 s default that inheriting it would mean the
+# first slow connect gets killed part-way through, leaving the setup file
+# looking as though it had been ignored.
+TimeoutStartSec=120
 
 [Install]
 WantedBy=multi-user.target
