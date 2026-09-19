@@ -370,15 +370,24 @@ from scoreboard.netcfg import (NetworkManager, NetworkError, Network, Status,
 
 
 class FakeNmcli:
-    """Stands in for nmcli. Records calls; returns canned output per subcommand."""
+    """Stands in for nmcli. Records calls; returns canned output per subcommand.
+
+    It records ``timeout=`` as well as argv, and that is not bookkeeping. This
+    fake ignored the timeout entirely for one round, so it could not tell a
+    call that was bounded from one that was not -- which is precisely how
+    ``status(timeout=None)`` reached the render loop with no bound at all.
+    A fake that drops the argument under test cannot fail the test.
+    """
 
     def __init__(self, outputs=None, fail_on=None):
         self.outputs = outputs or {}
         self.fail_on = fail_on
         self.calls = []
+        self.timeouts = []
 
     def __call__(self, args, timeout=None):
         self.calls.append(list(args))
+        self.timeouts.append(timeout)
         if self.fail_on is not None and self.fail_on in args:
             raise NetworkError("nmcli said no")
         for key, value in self.outputs.items():
@@ -456,6 +465,71 @@ def test_status_reports_the_active_network():
                       "show": "192.168.1.20/24\n"})
     got = NetworkManager(run=fake).status()
     assert got == Status(online=True, ssid="HomeNet", ip="192.168.1.20")
+
+
+def status_fake():
+    return FakeNmcli({"general": "connected\n",
+                      "wifi": "no:Neighbour\nyes:HomeNet\n",
+                      "show": "192.168.1.20/24\n"})
+
+
+def test_the_render_loops_own_status_call_is_bounded():
+    # The call main.py makes: nm.status(), no arguments, on every pass of the
+    # render loop where MQTT is not connected -- which is every first boot --
+    # and BEFORE the pass's screens.draw_*. It took `timeout: float | None =
+    # None` for one round and handed that straight to subprocess.run, which
+    # waits forever. scoreboard.service has Restart=always but no
+    # WatchdogSec, so a render loop blocked in there is never recovered: the
+    # panel is black and stays black.
+    #
+    # The assertion is on the value the runner RECEIVED. "It does not hang"
+    # is not testable in a unit test and "it passes something" is what the
+    # old fake could see; the number is the only honest check.
+    fake = status_fake()
+    NetworkManager(run=fake).status()
+    assert fake.timeouts, "status() made no calls"
+    assert all(t == netcfg.QUERY_TIMEOUT_S for t in fake.timeouts), \
+        f"the render loop's status() granted {fake.timeouts}, not {netcfg.QUERY_TIMEOUT_S}s a query"
+    assert None not in fake.timeouts, "a query was left unbounded"
+
+
+def test_every_query_status_makes_is_bounded_not_just_the_first():
+    # Three nmcli calls, not one. Bounding only the first would leave the
+    # other two able to hang the same render loop.
+    fake = status_fake()
+    NetworkManager(run=fake).status()
+    assert len(fake.timeouts) == 3, f"status() made {len(fake.timeouts)} calls, expected 3"
+
+
+def test_the_boot_paths_verification_still_gets_its_own_shorter_timeout():
+    # joined() must keep passing VERIFY_TIMEOUT_S rather than inheriting the
+    # render loop's default: it runs with the budget already spent, and the
+    # absolute ceiling is sized on three queries of two seconds.
+    fake = status_fake()
+    assert NetworkManager(run=fake).joined("HomeNet") is True
+    assert fake.timeouts, "joined() made no calls"
+    assert all(t == netcfg.VERIFY_TIMEOUT_S for t in fake.timeouts), \
+        f"joined() granted {fake.timeouts}, not {netcfg.VERIFY_TIMEOUT_S}s a query"
+
+
+def test_a_runner_handed_no_timeout_still_bounds_the_call(monkeypatch):
+    # The other half of the same defect. A default only defends the callers
+    # that omit the argument; _run_nmcli also has to defend the ones that
+    # pass None explicitly, because that is what reaches subprocess.run and
+    # subprocess.run(timeout=None) blocks until the child exits.
+    seen = {}
+
+    class Done:
+        returncode, stdout, stderr = 0, "", ""
+
+    def capture(argv, **kwargs):
+        seen.update(kwargs)
+        return Done()
+
+    monkeypatch.setattr(netcfg.subprocess, "run", capture)
+    netcfg._run_nmcli(["-t", "-f", "STATE", "general"], timeout=None)
+    assert seen["timeout"] == netcfg.QUERY_TIMEOUT_S, \
+        f"an explicit None became timeout={seen['timeout']!r}"
 
 
 def test_apply_boot_file_applies_then_consumes(tmp_path):
@@ -1221,7 +1295,11 @@ def test_connecting_gets_a_longer_timeout_than_a_query():
     manager.apply(WifiSettings(ssid="HomeNet", psk="supersecret"))
     manager.scan()
     assert seen["connect"] == netcfg.CONNECT_TIMEOUT_S
-    assert seen["-t"] is None  # scan leaves the runner's own default in place
+    # The scan names its cap rather than leaving it to the runner's default.
+    # It used to pass None, which read as "the default" and is not: None is
+    # what reaches subprocess.run, and subprocess.run(timeout=None) waits
+    # forever. Every call off the boot path now says its own number.
+    assert seen["-t"] == netcfg.QUERY_TIMEOUT_S
     assert netcfg.CONNECT_TIMEOUT_S > netcfg.QUERY_TIMEOUT_S
 
 

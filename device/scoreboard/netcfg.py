@@ -694,6 +694,18 @@ DECODE = {"encoding": "utf-8", "errors": "replace"}
 def _run_nmcli(args: list[str], timeout: float | None = QUERY_TIMEOUT_S) -> str:
     # A list, never a string, and never shell=True: an SSID is attacker-chosen
     # text from the air, and a password is whatever the user typed.
+    #
+    # None means "the default", NOT "wait forever". subprocess.run(timeout=None)
+    # blocks until the child exits, and no caller here wants that: every one is
+    # either on a boot deadline or on a render loop. The coercion is here
+    # rather than only in the signature because passing the parameter through
+    # is how the bug arrives -- status() took ``timeout: float | None = None``
+    # and handed that straight down, which overrode this function's own default
+    # and left the render loop's network poll unbounded, with the panel's first
+    # paint queued behind it. A default value only defends the callers that
+    # omit the argument; this also defends the ones that pass it.
+    if timeout is None:
+        timeout = QUERY_TIMEOUT_S
     timed_out = False
     try:
         result = subprocess.run(["nmcli", *args], capture_output=True, timeout=timeout,
@@ -923,8 +935,22 @@ class NetworkManager:
             if own.expired():
                 return False
 
-    def scan(self) -> list[Network]:
-        out = self._run(["-t", "-f", "SSID,SIGNAL,SECURITY", "device", "wifi", "list"])
+    def scan(self, timeout: float = QUERY_TIMEOUT_S) -> list[Network]:
+        # The settings screen's scan, not the boot path's: it is off the
+        # budget because the render loop, not apply_boot_file, is what calls
+        # it. The cap is named here rather than left to the runner's own
+        # default for the same reason status() names one -- a bound a caller
+        # can see is a bound, and this call is between a keypress and a frame.
+        # It omits --rescan no deliberately -- a person has just asked to see
+        # the networks, so nmcli's own scan-and-wait is what they want -- and
+        # that wait can be up to 15 s (devices.c:3554-3576), which a 10 s cap
+        # clips. That is the existing behavior, written down rather than
+        # changed here: the clipped call raises, the settings screen says it
+        # could not scan, and the person presses the key again. Raising the
+        # cap to 16 s would be the honest fix and belongs with a look at what
+        # a 16 s freeze does to the render loop, not in this round.
+        out = self._run(["-t", "-f", "SSID,SIGNAL,SECURITY", "device", "wifi", "list"],
+                        timeout=timeout)
         best: dict[str, Network] = {}
         for line in out.splitlines():
             fields = split_terse(line)
@@ -1241,12 +1267,22 @@ class NetworkManager:
                 # By UUID: a connection name can contain anything at all.
                 self._run(["connection", "delete", "uuid", fields[0]])
 
-    def status(self, timeout: float | None = None) -> Status:
+    def status(self, timeout: float = QUERY_TIMEOUT_S) -> Status:
         """What this panel is connected to, if anything.
 
-        ``timeout`` is passed through so the boot path can ask this question
-        inside its deadline; the render loop leaves it alone and gets the
-        runner's own default.
+        ``timeout`` bounds EACH of the three queries below. The default is
+        QUERY_TIMEOUT_S, spelled out here rather than left to the runner: this
+        parameter was ``float | None = None`` for one round, and passing None
+        down does not mean "use the runner's default" -- it reaches
+        ``subprocess.run(timeout=None)``, which waits forever. That mattered
+        because main.py's render loop calls this with no argument, before the
+        first ``screens.draw_*``, on every pass where MQTT is not connected --
+        which is every first boot. scoreboard.service has Restart=always but
+        no WatchdogSec, so a render loop blocked in here is never recovered:
+        the panel stays black for good.
+
+        The boot path passes a smaller number (see joined()); the render loop
+        gets 10 s per query by default.
         """
         online = self._run(["-t", "-f", "STATE", "general"],
                            timeout=timeout).strip() == "connected"
