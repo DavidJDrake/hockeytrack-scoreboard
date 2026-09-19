@@ -43,6 +43,13 @@ def _refused(reason_code) -> bool:
     socket, which fires _on_disconnect and reports the link down through the
     ordinary path, and subscribing on a connection that is about to close
     does no harm.
+
+    What it does cost, stated rather than left to be discovered: in that same
+    hypothetical case on_link(True) would fire on every refused attempt,
+    resetting main's "down since" clock, so "cannot reach the service" would
+    never appear -- B-5's original symptom, accepted here over a panel that
+    can never subscribe to anything at all, and logged loudly every time so
+    that the journal says which of the two is happening.
     """
     failure = getattr(reason_code, "is_failure", None)
     if failure is not None:

@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -942,6 +943,13 @@ def a_loop_that_receives(monkeypatch, tmp_path, script, game_id=2026020001, pass
     through a stand-in Link at the top of that pass -- so the message
     scripted for pass n is drained by pass n, and the returned row n is what
     presentation() saw once it had been acted on. Returns one row per pass.
+
+    One entry is not a callback: ``("jump", (seconds,))`` moves the panel's
+    monotonic clock forward before that pass, which is how a test says "and
+    then eleven minutes went by" without waiting for them. It has to be the
+    real clock rather than a value passed in, because the loop reads
+    time.monotonic() in six places and the point of these tests is what the
+    loop does with it.
     """
     (tmp_path / "device.json").write_text(json.dumps(
         {"endpoint": "localhost", "thingName": "scoreboard-test"}))
@@ -986,11 +994,17 @@ def a_loop_that_receives(monkeypatch, tmp_path, script, game_id=2026020001, pass
                         lambda *a: seen.append(a) or real(*a))
 
     passed = {"n": 0}
+    ahead = {"s": 0.0}
+    real_monotonic = time.monotonic
+    monkeypatch.setattr(time, "monotonic", lambda: real_monotonic() + ahead["s"])
 
     def fake_get(*a, **k):
         n = passed["n"]
         passed["n"] += 1
         for name, args in script.get(n, []):
+            if name == "jump":
+                ahead["s"] += args[0]
+                continue
             hooks[name](*args)
         return [] if n < passes else [pygame.event.Event(pygame.QUIT)]
 
@@ -1085,6 +1099,82 @@ def test_a_config_message_the_panel_could_not_read_leaves_the_stamp_alone(tmp_pa
         "a config message it could not read re-armed the hold"
     assert passes[4]["final_seen"] > passes[2]["final_seen"], \
         "the press after a malformed publish was swallowed"
+
+
+LIVE_DOC = (FIX / "state_live.json").read_bytes()
+
+
+def test_a_retained_replay_does_not_make_an_old_document_fresh(tmp_path, monkeypatch):
+    # R-1, and it is N-2 arriving through a different door. The loop stamped
+    # an arrival time on every document it accepted, with no comparison to
+    # the one already on screen -- so arrival stood in for recency, and the
+    # broker replaying the retained state document on reconnect (which is
+    # what it does on EVERY reconnect) reset the age to zero. The band
+    # vanished, the clock unfroze and ran from an eleven-minute-old asOf,
+    # and the sleep-hours exemption came back, all from a document that said
+    # nothing new. Byte-identical is the exact shape of a replay.
+    passes = a_loop_that_receives(monkeypatch, tmp_path, {
+        0: [("on_state", (2026020001, LIVE_DOC))],
+        2: [("jump", (11 * 60,))],
+        3: [("on_state", (2026020001, LIVE_DOC))],
+    }, passes=6)
+
+    assert passes[2]["state_age"] >= 11 * 60, passes[2]["state_age"]
+    assert passes[3]["state_age"] >= 11 * 60, \
+        "a replay of the same document reset its age"
+    assert not live_and_fresh(passes[3]["state"], passes[3]["state_age"]), \
+        "a replay made an eleven-minute-old frame count as a live game again"
+
+
+def test_a_reconnect_loop_never_adds_up_to_a_fresh_document(tmp_path, monkeypatch):
+    # The failure this actually prevents. paho resets its backoff on every
+    # successful CONNACK, so a panel flapping against a silent cloud can be
+    # handed the same retained document every second -- and with arrival as
+    # the measure it would have been "fresh" for ever, and beaten sleep
+    # hours all night on a game that ended before midnight.
+    monkeypatch.setattr(main_module, "STALE_FRAME_S", 2.0)
+    script = {0: [("on_state", (2026020001, LIVE_DOC))]}
+    for n in range(1, 6):
+        script[n] = [("jump", (1.0,)), ("on_state", (2026020001, LIVE_DOC))]
+    passes = a_loop_that_receives(monkeypatch, tmp_path, script, passes=6)
+
+    ages = [p["state_age"] for p in passes]
+    assert ages == sorted(ages), f"the age went backwards: {ages}"
+    assert ages[-1] >= 5.0, ages
+    assert not live_and_fresh(passes[-1]["state"], ages[-1]), \
+        "five replays in five seconds added up to a fresh document"
+
+
+def test_a_document_that_says_something_new_is_a_new_document(tmp_path, monkeypatch):
+    # The other half, and the reason the comparison is the raw payload and
+    # not asOf: HockeyTrack's reducer only ever moves asOf on the clock
+    # heartbeat, so a `play` fold republishes a changed score under an
+    # UNCHANGED asOf. That document is news, and must re-stamp.
+    scored = LIVE_DOC.replace(b'"abbrev":"NYR","score":1', b'"abbrev":"NYR","score":2')
+    assert scored != LIVE_DOC
+    assert b'"asOf":1791135723123' in scored, "the asOf must be untouched for this test"
+    passes = a_loop_that_receives(monkeypatch, tmp_path, {
+        0: [("on_state", (2026020001, LIVE_DOC))],
+        2: [("jump", (11 * 60,))],
+        3: [("on_state", (2026020001, scored))],
+    }, passes=6)
+
+    assert passes[2]["state_age"] >= 11 * 60
+    assert passes[3]["state_age"] < 1.0, \
+        "a document carrying a new score was treated as a replay"
+    assert passes[3]["state"].home.score == 2
+    assert live_and_fresh(passes[3]["state"], passes[3]["state_age"])
+
+
+def test_the_first_document_for_a_game_is_always_news(tmp_path, monkeypatch):
+    # Nothing held, so nothing to compare against: the first document after
+    # boot must stamp, however long the panel has been sitting there.
+    passes = a_loop_that_receives(monkeypatch, tmp_path, {
+        1: [("jump", (11 * 60,))],
+        2: [("on_state", (2026020001, LIVE_DOC))],
+    }, passes=6)
+    assert passes[1]["state"] is None and passes[1]["state_age"] is None
+    assert passes[2]["state_age"] < 1.0, "the first document arrived stale"
 
 
 def test_a_state_that_changes_restarts_the_grace_in_the_real_loop(tmp_path, monkeypatch):

@@ -816,11 +816,25 @@ def main() -> None:
     # yet -- so the clock on "cannot reach the service" starts at boot. A
     # desktop preview has no broker and never wants the screen.
     link_down_since: float | None = None if link_ok else time.monotonic()
-    # When the last state document for the followed game arrived. Monotonic,
-    # not its own asOf: the banner it feeds has to be right on a panel whose
-    # wall clock is wrong, which is exactly the panel somebody is squinting
-    # at when a frame has gone stale.
+    # When the document on screen arrived, and the raw bytes of it.
+    #
+    # Monotonic, not its own asOf: the band it feeds has to be right on a
+    # panel whose wall clock is wrong, which is exactly the panel somebody is
+    # squinting at when a frame has gone stale.
+    #
+    # The bytes are kept so that "arrived" can mean "said something new".
+    # The state topic is published retained and this panel resubscribes on
+    # every reconnect, so the broker hands it the same document again each
+    # time the link comes back; stamping that as an arrival made an
+    # eleven-minute-old frame read as fresh -- band gone, clock running
+    # again from a receding asOf, sleep-hours exemption back -- and a panel
+    # flapping against a silent cloud (paho resets its backoff on every
+    # successful CONNACK) would have stayed "fresh" indefinitely. Raw bytes
+    # rather than asOf because HockeyTrack's reducer only ever moves asOf on
+    # the clock heartbeat: a `play` fold republishes a changed score under
+    # an unchanged asOf, and that is news.
     state_received_at: float | None = None
+    state_raw: bytes | None = None
     # The newest "when the owner pressed it" stamp this panel has acted on;
     # see config_action. In memory only, deliberately.
     last_chosen_at: int | None = None
@@ -832,11 +846,13 @@ def main() -> None:
         state_received_at = time.monotonic()
 
     def select(game_id):
-        nonlocal following, current, last_change, state_received_at
-        # The arrival time belongs to the document that has just been thrown
-        # away, not to whatever arrives for the new game.
+        nonlocal following, current, last_change, state_received_at, state_raw
+        # The arrival time and the bytes belong to the document that has just
+        # been thrown away, not to whatever arrives for the new game -- and
+        # clearing them is what makes the new game's first document news
+        # even if it is somehow identical to the old game's.
         following, current, last_change = game_id, None, time.monotonic()
-        state_received_at = None
+        state_received_at, state_raw = None, None
         if cfg:
             cfg.save_game_id(game_id)
         if link:
@@ -846,11 +862,25 @@ def main() -> None:
 
     def pregame_from_today():
         # Until the reducer has seen the game, show a countdown from the day list.
-        nonlocal current
+        nonlocal current, state_received_at, state_raw
         if current is None or (current.state == "PRE" and not current.start):
             for g in today:
                 if g.game_id == following:
                     current = GameState.pregame(g)
+                    # R-4: this is the one write to `current` whose document
+                    # did not come off the state topic, so it is the one that
+                    # could leave a frame on screen with no arrival time.
+                    # Stamped anyway, and truthfully: the today list IS a
+                    # document, it did just arrive, and this is the moment
+                    # the panel learned of this game. The bytes are cleared
+                    # rather than kept, because what is on screen is no
+                    # longer the state payload they name. Nothing reads
+                    # either value for a PRE today -- render returns before
+                    # the freeze and presentation's pre-game branch never
+                    # consults the age -- so this maintains the invariant
+                    # "every document on screen has an arrival time" rather
+                    # than changing any behaviour.
+                    state_received_at, state_raw = time.monotonic(), None
 
     def on_a():
         ids = [g.game_id for g in today]
@@ -916,10 +946,17 @@ def main() -> None:
                 if kind == "state" and item[1] == following:
                     try:
                         current = GameState.from_json(item[2])
-                        # When it arrived, on the monotonic clock: the
-                        # "NO UPDATES - N MIN OLD" band, the freeze and the
-                        # freshness test all count from here.
-                        state_received_at = time.monotonic()
+                        # Stamped only if this document SAYS something the
+                        # one on screen did not. The band, the freeze and
+                        # the freshness test all count from here, and all
+                        # three are about recency; a broker replaying the
+                        # retained document on reconnect is not recency,
+                        # however recently it arrived (R-1). Nothing held
+                        # means nothing to compare with, so the first
+                        # document for a game always counts.
+                        if state_raw != item[2]:
+                            state_received_at = time.monotonic()
+                            state_raw = item[2]
                     except Exception as e:
                         # Every exception, not ValueError. The document is
                         # network input and from_json indexes, converts and

@@ -10,13 +10,24 @@ W, H = 1920, 480
 
 # When a document that is supposed to be arriving has stopped arriving.
 #
-# The cloud reducer republishes a live game's clock heartbeat about every
-# five seconds, all the way through intermissions (the nhl.game.clock fold in
-# cloud/internal/reduce/reduce.go always reports changed), so half a minute
-# is six missed heartbeats: far above ordinary jitter, a retry or two, and a
-# broker hiccup, and far below the two minutes the old rule waited -- two
-# minutes of a period clock counting down from a moment that is receding is
-# two minutes of the panel making up a hockey game.
+# Where the five seconds comes from, since it is the whole justification for
+# this number. The producer is in the owner's OTHER repository, HockeyTrack:
+# `internal/poller/poller.go` sets `LiveInterval: 5 * time.Second` and
+# publishes one clock event per poll while the game is live --
+# `if IsLiveState(pbp.GameState) { d.Pub.Publish(ctx, events.DTClock,
+# BuildClockEvent(pbp, d.Now())) }` -- conditioned on the game being live and
+# NOT on the clock running, so stoppages, the gap between periods and whole
+# intermissions all heartbeat at the poll rate. On a fetch error it sleeps
+# min(LiveInterval*2, 30s) = 10 s before retrying. This repository's end
+# agrees: the nhl.game.clock fold in cloud/internal/reduce/reduce.go always
+# reports changed, so every one of those events reaches the panel.
+#
+# So half a minute is six missed beats of a real cadence -- far above
+# ordinary jitter, a retry or two and a broker hiccup, and far below the two
+# minutes the old rule waited, which was two minutes of a period clock
+# counting down from a moment that is receding: two minutes of the panel
+# making up a hockey game. A gap longer than this means something upstream
+# has genuinely stopped.
 #
 # It is one number for three jobs, which is the point: it decides when the
 # frame freezes, when the banner appears, and (in main) when a LIVE document

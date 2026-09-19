@@ -1633,10 +1633,34 @@ Four further rules that are the panel's own, not settings:
   | 30 s to **2 h** | frozen at the document's own numbers, **`NO LINK - N MIN OLD`** (socket down) or **`NO UPDATES - N MIN OLD`** (socket up, nothing arriving) in the gutter above the rule line, both penalty rows kept. It **keeps the screen**, including over "cannot reach the service" — but it no longer beats sleep hours, so the overnight case is dark |
   | past **2 h** | nothing due: off — or "cannot reach the service" if the link has been down long enough to have earned it, which itself obeys sleep hours |
 
-  Thirty seconds is six missed heartbeats — well above jitter, a retry or a
-  broker hiccup, and far below the two minutes the old rule waited, which was
-  two minutes of the panel making up a hockey game. Two hours is the same
-  bound that already means "too long to be real" everywhere else here.
+  **Where the five seconds comes from** — the producer is in the owner's
+  *other* repository, HockeyTrack, which is why it is written down here.
+  `internal/poller/poller.go` sets `LiveInterval: 5 * time.Second` and
+  publishes one clock event per poll while the game is live
+  (`if IsLiveState(pbp.GameState) { d.Pub.Publish(ctx, events.DTClock,
+  BuildClockEvent(pbp, d.Now())) }`). It is conditioned on the game being
+  live and **not** on the clock running, so stoppages, the gap between
+  periods and whole intermissions all heartbeat at the poll rate; on a fetch
+  error the poller sleeps `min(LiveInterval*2, 30s)` = 10 s before retrying.
+  This repository's end agrees: the `nhl.game.clock` fold in
+  `cloud/internal/reduce/reduce.go` always reports changed, so every one of
+  those events is republished to the panel. Thirty seconds is therefore six
+  missed beats of a real cadence — well above jitter, a retry or a broker
+  hiccup, and far below the two minutes the old rule waited, which was two
+  minutes of the panel making up a hockey game. A gap longer than that means
+  something upstream has genuinely stopped. Two hours is the same bound that
+  already means "too long to be real" everywhere else here.
+
+  **A replay is not an arrival.** The state topic is retained too, so the
+  broker hands the panel the same document again on every reconnect. The age
+  is re-stamped only when the document's raw bytes *differ* from the one on
+  screen — not when its `asOf` differs, because the reducer only ever moves
+  `asOf` on the clock heartbeat and a `play` fold republishes a changed score
+  under an unchanged one. Without that, a reconnect wiped the band, unfroze
+  the clock against an eleven-minute-old `asOf` and handed back the
+  sleep-hours exemption; and a panel flapping against a silent cloud (paho
+  resets its backoff on every successful CONNACK) would have counted as
+  "fresh" indefinitely.
 
   **Why two thresholds and not one** (ruling, 2026-09-19). They answer
   different questions. *May the panel claim a game is happening, at 3 a.m.,
@@ -1781,16 +1805,17 @@ step the clock hours forward after boot.
    expected to be gone by **two hours** after the last document, leaving a
    dark panel or the help screen. A mid-game frame still lit at breakfast is
    a regression of N-1.
-12. **How long the retained state document takes to arrive after a
-   reconnect.** The gap between "the link is up" and "the frame is true
-   again" — `Link._on_connect` reports up right after issuing SUBSCRIBE, and
-   the band and the freeze deliberately wait for the document rather than
-   the socket. Time it with a stopwatch against the band disappearing, and
-   read `journalctl -u scoreboard` for the "connected:" line beside it. If
-   it is routinely more than a few seconds, the 30-second threshold is worth
-   revisiting; if it is longer than 30 s, a reconnect will briefly show the
-   band over a frame that is about to be replaced, which is honest but worth
-   knowing.
+12. **Confirm the heartbeat cadence and the reconnect gap over a full
+   game.** Both numbers are known from the source (see the display rules
+   above: `LiveInterval` is 5 s and the heartbeat is unconditional on the
+   clock), so this is a confirmation, not an open question. Log the real
+   inter-document gap across a whole game, intermissions included — the
+   longest gap should stay well under 30 s — and separately time how long
+   the retained state document takes to land after a reconnect, since
+   `Link._on_connect` reports the link up right after issuing SUBSCRIBE and
+   the band deliberately waits for the document rather than the socket.
+   `journalctl -u scoreboard` has the "connected:" lines to measure
+   against.
 13. **"Show on panel" while the panel is unplugged.** Only once the API is
    deployed: unplug the panel, press the button, plug it back in. The game
    should come back on reconnect. Before deployment this is expected to do
@@ -1801,7 +1826,11 @@ step the clock hours forward after boot.
    that is the `_on_connect` reason-code path failing and worth a journal
    dump. A panel that connects but never shows a game is the other side of
    the same path: `journalctl -u scoreboard | grep "cannot tell whether"`
-   says the reason code had a shape this build could not read.
+   says the reason code had a shape this build could not read. Note the
+   accepted trade in that (hypothetical, future-paho) case: reporting the
+   link up on each refused attempt resets the "down since" clock, so the
+   help screen would never appear — the original B-5 symptom, chosen over a
+   panel that can never subscribe, and logged loudly every time.
 15. **Nothing is dark that should not be.** Anything the panel does that
    looks dead is a finding, whether or not it matches the table above.
 
