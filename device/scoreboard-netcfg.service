@@ -37,12 +37,12 @@ ExecStart=/opt/scoreboard/.venv/bin/python -m scoreboard.netcfg
 #     regulatory_domain -> iw reg get           RASPI_TIMEOUT_S   (10 s)
 #   radio_on      -> nmcli radio wifi on        FAST_TIMEOUT_S      5 s
 #   wait_for_wifi -> device-state queries+naps  WIFI_READY_S       10 s
-#   wait_for_ssid -> rescans, list polls, naps  SCAN_BUDGET_S      12 s
+#   wait_for_ssid -> rescans, list polls, naps  SCAN_BUDGET_S      15 s
 #                                        ---------------------------------
-#                                        before the first connect   37 s
+#                                        before the first connect   40 s
 #   the first connect                           CONNECT_TIMEOUT_S  45 s
 #                                        BOOT_BUDGET_S             ----
-#                                                                  82 s
+#                                                                  85 s
 #
 # Every call on the path is on that table, which was the fault THREE times
 # over: radio_on() and the rescans were missing from it, so the pre-connect
@@ -52,7 +52,7 @@ ExecStart=/opt/scoreboard/.venv/bin/python -m scoreboard.netcfg
 # happens to equal RASPI_TIMEOUT_S. It is now drawn from the budget like
 # everything else. The instant calls now have a 5 s cap of their own
 # rather than the 10 s hung-binary default, the rescans live inside
-# wait_for_ssid's budget, and 37 + 45 = 82 exactly -- so even when every
+# wait_for_ssid's budget, and 40 + 45 = 85 exactly -- so even when every
 # earlier step runs to its cap the FIRST CONNECT IS STILL GRANTED A FULL 45 s.
 # The retries have no such arithmetic guarantee, so MIN_CONNECT_S enforces the
 # same idea for them: an attempt that cannot be given 20 s is not made, and
@@ -64,24 +64,33 @@ ExecStart=/opt/scoreboard/.venv/bin/python -m scoreboard.netcfg
 # honestly that version could reach about 195 s -- past this very timeout, so
 # systemd would have killed the unit rather than the budget stopping it.
 # device/tests/test_netcfg.py now runs the whole path with every call hanging
-# to its kill and measures 82.0 s exactly.
+# to its kill and measures 85.0 s exactly.
+#
+# It also briefly said 82 s, with SCAN_BUDGET_S cut to 12 to reach it. The
+# scan wait is sized on the only hardware evidence there is -- two journals
+# bounding the first completed scan at 5.82 s -- and losing the first scan is
+# the race that actually failed on a Pi 4, twice. So the wait keeps its 15 s
+# and this total carries the three seconds instead.
 #
 # One call is allowed past the deadline: joined(), which asks NetworkManager
 # whether a timed-out connect actually worked. It has to be asked even when
 # the clock has run out, because answering "no" without asking would report
 # failure for a panel that is online, skip consume(), and leave the cleartext
-# Wi-Fi password on the boot partition for good. It is bounded -- three
-# queries at VERIFY_TIMEOUT_S, and at most one such check can happen after
-# the deadline -- so the ABSOLUTE ceiling is 82 + 6 = 88 s.
+# Wi-Fi password on the boot partition for good. It is bounded by a budget of
+# its own -- VERIFY_OVERRUN_S, shared by status()'s queries -- and at most one
+# such check can happen after the deadline, so the ABSOLUTE ceiling is
+# 85 + 6 = 91 s.
 #
-# 88 s is still inside the "up to a minute and a half" that the download page
-# and the setup steps promise an owner watching a dark panel.
+# 91 s is past the "up to a minute and a half" the pages used to promise, by
+# one second. They now say "up to two minutes", which is the honest figure
+# anyway: 90 s only ever covered this service, and the owner goes on watching
+# a dark panel until scoreboard.service has started and painted a frame.
 #
 # Two headrooms, and BOTH are stated here so neither can be read as a
 # correction of the other. They are measurements of different things:
 #
-#   120 - 82 s (the enforced soft budget)  = 38 s of headroom
-#   120 - 88 s (the absolute ceiling)      = 32 s above it
+#   120 - 85 s (the enforced soft budget)  = 35 s of headroom
+#   120 - 91 s (the absolute ceiling)      = 29 s above it
 #
 # The spec quoted the first and this file quoted the second, which read as a
 # contradiction about one TimeoutStartSec. The number that has to clear

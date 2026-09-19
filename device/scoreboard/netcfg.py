@@ -418,12 +418,16 @@ VERIFY_OVERRUN_S = STATUS_QUERIES * VERIFY_TIMEOUT_S
 #     regulatory_domain -> iw reg get           RASPI_TIMEOUT_S   (10 s)
 #   radio_on    -> nmcli radio wifi on          FAST_TIMEOUT_S      5 s
 #   wait_for_wifi (device-state queries + naps) WIFI_READY_S       10 s
-#   wait_for_ssid (rescans + list polls + naps) SCAN_BUDGET_S      12 s
+#   wait_for_ssid (rescans + list polls + naps) SCAN_BUDGET_S      15 s
 #                                                                  ----
-#                                        before the first connect  37 s
+#                                        before the first connect  40 s
 #   the first connect                           CONNECT_TIMEOUT_S  45 s
 #                                                                  ----
-#                                        BOOT_BUDGET_S             82 s
+#                                        BOOT_BUDGET_S             85 s
+#
+#   joined(), once, past the deadline            VERIFY_OVERRUN_S   6 s
+#                                                                  ----
+#                                        ABSOLUTE_CEILING_S        91 s
 #
 # The first row is an either/or, never both: apply_boot_file takes exactly one
 # of those two branches. The iw call was off this table for a round and
@@ -431,29 +435,44 @@ VERIFY_OVERRUN_S = STATUS_QUERIES * VERIFY_TIMEOUT_S
 # RASPI_TIMEOUT_S -- an arithmetic coincidence rather than a construction, and
 # the third time a call on this path had been left off the table it bounds.
 #
-# The sum is exact on purpose: 37 + 45 = 82, so even when every earlier step
+# The sum is exact on purpose: 40 + 45 = 85, so even when every earlier step
 # runs to its cap the first connect is still granted a full CONNECT_TIMEOUT_S.
 # That is arranged, not asserted -- and MIN_CONNECT_S below enforces the same
 # thing for the retries, which have no such arithmetic guarantee.
+#
+# It read 37 + 45 = 82 for one round, with SCAN_BUDGET_S cut from 15 to 12 to
+# get there. The cut went the wrong way: the scan wait is sized on the only
+# hardware evidence there is (two journals bounding the first completed scan
+# at 5.82 s), and the race with that first scan is what actually failed on a
+# Pi 4, twice. So the evidence keeps its 2.5x margin and the TOTAL moves
+# instead -- 85 s rather than 82, with the first connect's 45 s untouched
+# because that guarantee is the point of the arithmetic.
 #
 # The rescans are inside SCAN_BUDGET_S rather than beside it: wait_for_ssid
 # asks for the scan itself, at the start and again every SCAN_REISSUE_S, all
 # from its own sub-budget. A hidden network skips both that wait and its
 # rescans (see join), so its path is shorter, not longer.
 #
-# 82 s is inside the "up to a minute and a half" the download page and the
-# setup steps promise an owner watching a dark panel, and leaves 38 s of
-# headroom under the unit's TimeoutStartSec=120 for systemd's own overhead.
-BOOT_BUDGET_S = 82
+# 85 s leaves 35 s of headroom under the unit's TimeoutStartSec=120; the
+# absolute ceiling below leaves 29 s. Both numbers are stated in the unit
+# file too, because quoting one of them there and the other in the spec is
+# how they came to look like a contradiction.
+BOOT_BUDGET_S = 85
 
 # The number to compare TimeoutStartSec against, and the one the site's
 # promise has to cover. BOOT_BUDGET_S is the soft budget -- what every step
 # draws from -- and joined() is allowed VERIFY_OVERRUN_S past it, once (see
-# VERIFY_TIMEOUT_S above). Named rather than written out in each of the four
-# places that quote it, because the two numbers were drifting apart already:
-# the spec's "38 s of headroom" was measured from the soft budget and the
-# unit's "32 s" from this one, and read side by side they looked like a
-# contradiction rather than two true statements about different numbers.
+# VERIFY_TIMEOUT_S above). Named rather than written out in each of the places
+# that quote it, because the two numbers were drifting apart already: the
+# spec's "38 s of headroom" was measured from the soft budget and the unit's
+# "32 s" from this one, and read side by side they looked like a contradiction
+# rather than two true statements about different numbers.
+#
+# 91 s is over the "up to a minute and a half" both site pages used to
+# promise, by one second, and the pages now say "up to two minutes" instead.
+# That is the honest figure in any case: 90 s only ever covered THIS service,
+# and the owner is watching a dark panel until scoreboard.service has started,
+# initialized SDL and painted a frame after it.
 ABSOLUTE_CEILING_S = BOOT_BUDGET_S + VERIFY_OVERRUN_S
 
 # How long to let a Wi-Fi interface settle after the radio is switched on,
@@ -488,7 +507,16 @@ WIFI_READY_POLL_S = 2
 # a pending action is exactly what delays "manager: startup complete" -- so
 # startup complete cannot be logged mid-scan. It came 5.82 s and 5.81 s after
 # wlan0 reached "disconnected" on the two boots, which therefore bounds when
-# the first scan had finished. Twelve seconds is a little over twice that.
+# the first scan had finished. Fifteen seconds is two and a half times that.
+#
+# It was cut to twelve for one round, to buy back three seconds of boot
+# budget, and the test guarding it was relaxed from 2.5x to 2x in the same
+# commit to keep it green. That is the wrong way round: the guard exists
+# because the only hardware evidence is two journals, and a margin chosen to
+# fit an unrelated total is not a margin. The race with the first scan is the
+# exact thing that failed on real hardware, twice. Fifteen is restored, the
+# guard with it, and BOOT_BUDGET_S absorbs the three seconds rather than the
+# evidence doing it.
 #
 # SCAN_REISSUE_S is what stops the rest of the wait polling a frozen list. One
 # scan at the start and nothing after it is one look stretched out, not a
@@ -497,7 +525,7 @@ WIFI_READY_POLL_S = 2
 # _scan_kickoff() and returns no error, so re-asking costs one D-Bus round
 # trip -- and it is also what lets a refused first rescan (the device not yet
 # ready) heal inside the same attempt instead of wasting it.
-SCAN_BUDGET_S = 12
+SCAN_BUDGET_S = 15
 SSID_POLL_S = 2
 SCAN_REISSUE_S = 6
 

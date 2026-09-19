@@ -1529,12 +1529,15 @@ def test_a_slow_scan_query_does_not_throw_away_the_rest_of_the_budget(clock):
 
 
 def test_every_scan_query_is_capped_by_what_is_left_of_the_budget(clock):
+    # Named from the constant rather than typed in: the literal 12.0 here
+    # outlived SCAN_BUDGET_S being 12, and a test whose budget no longer
+    # matches the code's is testing something nobody asked for.
     air = Air(clock=clock, slow=True)
-    budget = netcfg.Budget(12.0, clock=clock)
+    budget = netcfg.Budget(netcfg.SCAN_BUDGET_S, clock=clock)
     NetworkManager(run=air).wait_for_ssid("ExampleNet", budget=budget, clock=clock)
     assert air.list_timeouts, "no list query was made"
-    assert sum(air.list_timeouts) <= 12.0 + netcfg.QUERY_TIMEOUT_S, \
-        f"the polls were granted {air.list_timeouts}s against a 12s budget"
+    assert sum(air.list_timeouts) <= netcfg.SCAN_BUDGET_S + netcfg.QUERY_TIMEOUT_S, \
+        f"the polls were granted {air.list_timeouts}s against a {netcfg.SCAN_BUDGET_S}s budget"
     assert all(t <= netcfg.QUERY_TIMEOUT_S for t in air.list_timeouts)
 
 
@@ -1588,11 +1591,26 @@ def test_the_whole_boot_path_is_bounded_when_every_call_runs_to_its_timeout(tmp_
         f"only {spent:.2f}s of the {netcfg.BOOT_BUDGET_S}s budget was reachable"
 
 
+# What site/index.html and site/download/index.html promise an owner watching
+# a dark panel: "up to two minutes". It used to be "up to a minute and a half",
+# which the absolute ceiling now exceeds by a second -- and which only ever
+# covered THIS service anyway, with scoreboard.service's own start, SDL init
+# and first paint still to come after it. site/tests/pages.test.js guards the
+# wording; this guards the number behind it.
+SITE_DARK_WINDOW_S = 120
+
+
 def test_the_enforced_budget_fits_the_unit_and_the_site(clock):
     # One number now, enforced by construction rather than added up from
     # intentions: BOOT_BUDGET_S covers raspi-config and every nmcli call.
-    assert netcfg.BOOT_BUDGET_S <= 90, \
-        f"a first boot can be dark for {netcfg.BOOT_BUDGET_S}s; the site promises 90"
+    #
+    # The comparison is against the ABSOLUTE ceiling, not the soft budget.
+    # What an owner experiences is the longest this unit can take, and
+    # joined()'s deliberate overrun is part of that.
+    assert netcfg.ABSOLUTE_CEILING_S <= SITE_DARK_WINDOW_S, \
+        (f"a first boot can be dark for {netcfg.ABSOLUTE_CEILING_S}s before this "
+         f"service even exits; the pages promise {SITE_DARK_WINDOW_S}")
+    assert netcfg.BOOT_BUDGET_S < netcfg.ABSOLUTE_CEILING_S
     # And the parts have to fit inside it, or a step is dead code.
     # Every call on the path, named -- the composition is checked in full by
     # test_the_budget_table_names_every_call_on_the_path.
@@ -1607,7 +1625,14 @@ def test_the_scan_budget_clears_a_hard_upper_bound_on_the_first_scan():
     # action delays "manager: startup complete". So startup complete cannot be
     # logged mid-scan, and the journals' 5.82 s and 5.81 s are a hard upper
     # bound on the first scan finishing, not merely the nearest marker.
-    assert netcfg.SCAN_BUDGET_S >= 2 * 5.82, \
+    #
+    # Back to 2.5x. It was relaxed to 2x in the same commit that cut
+    # SCAN_BUDGET_S from 15 to 12 -- the guard moved to fit the number instead
+    # of the number answering to the guard. Two journals are the only evidence
+    # there is for this figure, and losing the race with the first scan is the
+    # thing that actually failed on a Pi 4, twice; a margin chosen to balance
+    # an unrelated total is not a margin.
+    assert netcfg.SCAN_BUDGET_S >= 2.5 * 5.82, \
         f"SCAN_BUDGET_S={netcfg.SCAN_BUDGET_S}s leaves no room over a 5.82s bound"
 
 
@@ -1811,8 +1836,13 @@ def test_the_first_connect_is_guaranteed_a_full_association_even_at_the_worst(cl
         f"the first connect was granted {air.connect_timeouts[0]}s, not a full association"
     # The figure this guarantees, stated rather than left to the reader: with
     # raspi-config, radio_on, the device wait and the scan wait all running to
-    # their caps, 82 - 37 is exactly 45.
+    # their caps, 85 - 40 is exactly 45.
     assert netcfg.CONNECT_TIMEOUT_S == 45
+    before_connect = (netcfg.RASPI_TIMEOUT_S + netcfg.FAST_TIMEOUT_S
+                      + netcfg.WIFI_READY_S + netcfg.SCAN_BUDGET_S)
+    assert netcfg.BOOT_BUDGET_S - before_connect == netcfg.CONNECT_TIMEOUT_S, \
+        (f"{before_connect}s before the connect leaves "
+         f"{netcfg.BOOT_BUDGET_S - before_connect}s, not a full association")
 
 
 def test_a_connect_too_short_to_succeed_is_not_attempted(clock):
