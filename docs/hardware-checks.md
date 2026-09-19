@@ -513,21 +513,49 @@ remaining)`, and every loop re-checks the deadline **after** a call returns,
 because the call is where the time goes. A call therefore cannot finish past
 the deadline, and the ceiling is the constant:
 
-| step | cap |
-|---|---|
-| `raspi-config` setting the regulatory domain | 10 s |
-| waiting for the Wi-Fi device (was 10 × 2 s, then 6 × 2 s) | 12 s |
-| waiting for the network to appear in a scan (new) | 15 s |
-| one full connect | 45 s |
-| **`BOOT_BUDGET_S`, enforced** | **82 s** |
+**Corrected again on the re-review:** enforcing the *total* was not enough,
+because the *composition* still left two calls out — `radio_on()` and
+`rescan()`, one capped `nmcli` call each. The real pre-connect path was
+10 + 10 + 12 + 10 + 15 = **57 s**, not 37, and the first connect was measured
+being granted **32 s and 27 s** while the table claimed it got 45. Fixed by
+putting every call on the table and giving the instant ones a cap of their
+own: `radio wifi on`, `device wifi rescan`, the device-state query and the
+list query are each one round trip to a daemon on this machine, so they get
+`FAST_TIMEOUT_S = 5 s` rather than the 10 s hung-binary default. The rescans
+now live *inside* `wait_for_ssid`'s budget rather than beside it.
 
-Retries and their back-offs are not extra time: they happen only after a
-connect that failed instantly, so they spend the connect budget the first
-attempt did not. 82 s leaves 38 s of headroom under `TimeoutStartSec=120` for
-systemd's own overhead, and fits the "up to a minute and a half" both site
-pages promise. `device/tests/test_netcfg.py` runs the whole path with every
-call hanging to its kill and asserts the wall clock, so a changed constant
-fails a test rather than a panel.
+| step | call | cap |
+|---|---|---|
+| `set_country` | `raspi-config nonint do_wifi_country` | `RASPI_TIMEOUT_S` 10 s |
+| `radio_on` | `nmcli radio wifi on` | `FAST_TIMEOUT_S` 5 s |
+| `wait_for_wifi` | `nmcli -t -f DEVICE,TYPE,STATE device` ×N + naps | `WIFI_READY_S` 10 s |
+| `wait_for_ssid` | `nmcli device wifi rescan` ×N + `… wifi list --rescan no` ×N + naps | `SCAN_BUDGET_S` 12 s |
+| | **before the first connect** | **37 s** |
+| `apply` | `nmcli -w … device wifi connect` | `CONNECT_TIMEOUT_S` 45 s |
+| | **`BOOT_BUDGET_S`, enforced** | **82 s** |
+
+**37 + 45 = 82 exactly, and that is the point.** Even when every earlier step
+runs to its cap, the first connect is still granted a full 45 s — arranged by
+the arithmetic, not asserted about it. Driving the whole path with every call
+hanging to its kill measures **82.0 s** and a first-connect grant of **45 s**.
+
+The retries have no such guarantee, so the same idea is enforced for them by
+`MIN_CONNECT_S = 20 s`: an attempt that cannot be granted at least that is
+**not made**, and the journal says the budget ran out. An attempt shorter than
+that cannot associate and get a DHCP lease — it gets killed part-way through
+and returns a failure the retry logic then misreads, which is how a 0.3 s
+connect came back as "failed, and not in a way a retry addresses".
+
+One call is allowed past the deadline, deliberately: `joined()`, which asks
+NetworkManager whether a timed-out connect actually worked. It must be asked
+even when the clock has run out — answering "no" without asking is exactly the
+bug it exists to prevent. It is bounded at three queries of
+`VERIFY_TIMEOUT_S = 2 s`, and at most one such check can happen after the
+deadline because `join()` breaks on an expired budget before another connect,
+so the **absolute ceiling is 82 + 6 = 88 s**.
+
+88 s still fits the "up to a minute and a half" both site pages promise, and
+leaves 32 s under `TimeoutStartSec=120` for systemd's own overhead.
 
 **Where the scan number comes from, strengthened.** NetworkManager logs no
 scan at info level, so the only marker available is `manager: startup
@@ -551,14 +579,22 @@ the scan budget never actually spent waiting — which is v0.1.2's failure
 again by a different route. With `--rescan no` the cutoff is `G_MININT64`
 (`devices.c:3465`), the wait is zero, and the call returns whatever
 NetworkManager has right now, which is what lets the deadline be ours and be
-real. We ask for the scan once, explicitly, and poll for its results. A poll
-that errors no longer ends the wait either: it sleeps and looks again until
-the deadline, because a transient query failure is not an answer about the
-network.
+real. A poll that errors no longer ends the wait either: it sleeps and looks
+again until the deadline, because a transient query failure is not an answer
+about the network.
 
-**Fixed** in `device/scoreboard/netcfg.py`: `join()` rescans, waits for the
-SSID, connects, and on "not found" rescans, backs off and retries — but never
-on a secrets failure, which NetworkManager reports differently ("Error:
+**And the scan is re-requested, not asked for once.** One request at the start
+and nothing after it is a single look stretched over twelve seconds: if that
+scan's results lack the SSID, no later poll can differ until another scan
+runs. `wait_for_ssid` now asks again every `SCAN_REISSUE_S = 6 s` while the
+name stays unseen, and logs each request. NetworkManager absorbs a redundant
+request inside `_scan_kickoff()` and returns no error, so re-asking costs one
+D-Bus round trip. It also makes a refused first rescan — the device not being
+ready yet — heal inside the same attempt instead of wasting it.
+
+**Fixed** in `device/scoreboard/netcfg.py`: `join()` waits for the SSID (which
+asks for the scans), connects, and on "not found" backs off and retries — but
+never on a secrets failure, which NetworkManager reports differently ("Error:
 Connection activation failed: Secrets were required, but not provided.", and
 the `802.1X supplicant …` family, from `src/libnmc-base/nm-client-utils.c`).
 Retrying a wrong password joins nothing and costs another stretch of dark
@@ -587,6 +623,24 @@ is not up, or the interface has not reached `disconnected`. It stays
 non-fatal, and it is now logged at **INFO** rather than debug: it cannot be
 found out any other way once a panel is in the field.
 
+**A connect that times out is not a connect that failed, and believing it was
+dangerous.** `nmcli device wifi connect` sets its own wait to 90 s when none
+is given (`devices.c:3678-3679`), so any shorter subprocess timeout always
+SIGKILLed the client part-way through: the journal got our words ("nmcli timed
+out") instead of nmcli's ("Error: Timeout %d sec expired.", `devices.c:2069`).
+Worse, **killing the client does not cancel NetworkManager's activation**,
+which carries on in the daemon. So a clipped connect could leave the panel
+*online* while `netcfg` reported failure — which skips `consume()` and leaves
+the cleartext Wi-Fi password on the boot partition permanently, on a working
+panel nobody would think to check.
+
+Both halves fixed. `apply()` passes `-w` a couple of seconds under the granted
+cap, so nmcli reports in its own words and exits cleanly. And after any
+timeout-class failure `join()` asks `status()` what actually happened: if the
+panel is on the requested SSID, that is a success — logged as one, and the
+file is consumed. A status check that cannot be obtained, or that reports a
+different network, is not a success. There are tests for all three.
+
 **Hidden networks: the docs used to say this worked, and it did not.** A
 hidden SSID never appears in `device wifi list`, so it is not waited for by
 name — that part was right. The rest was not. nmcli's `hidden yes` calls the
@@ -601,8 +655,18 @@ What makes it able to work is the back-off. The SSID nmcli passed **is**
 tracked as a pending explicit probe (`_scan_request_ssids_track`, `:315`) and
 goes into the next scan's probe list
 (`_scan_request_ssids_build_hidden`, `:1604`), so the attempt after a pause is
-the one that can find the AP. Each hidden attempt now waits
-`RETRY_BACKOFF_S` inside the same deadline.
+the one that can find the AP.
+
+Two details from the same source shape how. `_scan_request_ssids_fetch`
+(`:292-312`) **destroys** the tracked-SSID hash and drains the list as it
+builds that scan, so a queued SSID is probed on exactly **one** scan per
+`apply()` and then forgotten. So the back-off has to cover a whole probe scan
+*and* its results becoming readable — `HIDDEN_BACKOFF_S = 10 s`, about two of
+the measured ~5.8 s scans, rather than the 5 s a visible network gets. And a
+generic `rescan()` before a hidden `apply()` is actively unhelpful: it starts
+a scan *without* the directed probe in it and pushes nmcli's own request
+behind it, so `join()` now skips the rescan and the wait entirely for a hidden
+network.
 
 The more robust alternative, if that proves not to be enough: create the
 profile explicitly (`nmcli connection add type wifi … 802-11-wireless.hidden
@@ -632,19 +696,48 @@ A successful first boot should read:
     INFO:scoreboard.netcfg:+2.21s wifi device ready
     INFO:scoreboard.netcfg:+2.28s rescan requested
     INFO:scoreboard.netcfg:+6.31s 'YourNetwork' seen in a scan after 3 poll(s)
-    INFO:scoreboard.netcfg:+6.31s connect attempt 1 of 3
+    INFO:scoreboard.netcfg:+6.31s connect attempt 1 of 3, with 45s for it
     INFO:scoreboard.netcfg:+9.87s connected to 'YourNetwork' on attempt 1
     INFO:scoreboard.netcfg:+9.87s network phase done
 
-and a failing one says exactly which step ran long:
+The budget running out is now distinct from the attempts running out, and
+each reports the number of connects **actually made** — `giving up after 3`
+was being printed after exactly one connect, with nothing to say the deadline
+was why:
 
-    INFO:scoreboard.netcfg:+2.28s rescan refused (…) -- NetworkManager only refuses this when the device is not ready (radio off, no supplicant, or not yet disconnected)
-    INFO:scoreboard.netcfg:+17.3s 'YourNetwork' not seen after 8 poll(s); trying the connect anyway so nmcli can say why
-    INFO:scoreboard.netcfg:+17.3s connect attempt 1 of 3
-    INFO:scoreboard.netcfg:+17.4s attempt 1 failed: the network was not found (…)
-    INFO:scoreboard.netcfg:+17.4s waiting 5s before attempt 2, so a rescan or a directed probe can land
-    …
-    INFO:scoreboard.netcfg:+52.9s giving up after 3 attempt(s)
+    INFO:scoreboard.netcfg:+2.28s rescan requested
+    INFO:scoreboard.netcfg:+14.3s 'YourNetwork' not seen after 6 poll(s); trying the connect anyway so nmcli can say why
+    INFO:scoreboard.netcfg:+14.3s connect attempt 1 of 3, with 45s for it
+    INFO:scoreboard.netcfg:+14.4s attempt 1 failed: the network was not found (Error: No network with SSID 'YourNetwork' found.)
+    INFO:scoreboard.netcfg:+14.4s waiting 5s before attempt 2, so a rescan can land
+    INFO:scoreboard.netcfg:+19.4s rescan requested
+    INFO:scoreboard.netcfg:+31.4s 'YourNetwork' not seen after 6 poll(s); trying the connect anyway so nmcli can say why
+    INFO:scoreboard.netcfg:+31.4s connect attempt 2 of 3, with 45s for it
+    INFO:scoreboard.netcfg:+31.5s attempt 2 failed: the network was not found (…)
+    INFO:scoreboard.netcfg:+31.5s waiting 5s before attempt 3, so a rescan can land
+    INFO:scoreboard.netcfg:+48.5s 'YourNetwork' not seen after 6 poll(s); trying the connect anyway so nmcli can say why
+    INFO:scoreboard.netcfg:+48.5s connect attempt 3 of 3, with 33s for it
+    INFO:scoreboard.netcfg:+48.6s attempt 3 failed: the network was not found (…)
+    INFO:scoreboard.netcfg:+48.6s giving up after 3 connect attempt(s)
+
+…against the budget-exhausted shape, where a connect ran long enough that no
+further attempt could be given `MIN_CONNECT_S`:
+
+    INFO:scoreboard.netcfg:+37.0s connect attempt 1 of 3, with 45s for it
+    INFO:scoreboard.netcfg:+82.0s attempt 1 ran out of time; asking NetworkManager what actually happened
+    INFO:scoreboard.netcfg:+82.0s attempt 1 timed out and the panel is not on 'YourNetwork'
+    INFO:scoreboard.netcfg:+82.0s the 82s budget ran out after 1 connect attempt(s)
+
+a wrong password, which is never retried:
+
+    INFO:scoreboard.netcfg:+14.3s attempt 1 failed on the password, which no retry can fix: Error: Connection activation failed: Secrets were required, but not provided.
+
+and the one that used to strand the password on the card — a connect whose
+client was killed while NetworkManager went on and finished the job:
+
+    INFO:scoreboard.netcfg:+51.4s attempt 1 ran out of time; asking NetworkManager what actually happened
+    INFO:scoreboard.netcfg:+51.6s NetworkManager finished the job anyway: connected to 'YourNetwork'
+    INFO:scoreboard.netcfg:+51.6s network phase done
 
 One read of `journalctl -u scoreboard-netcfg` should now say where every
 second went, which is what the first light could not.

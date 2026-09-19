@@ -30,30 +30,48 @@ ExecStart=/opt/scoreboard/.venv/bin/python -m scoreboard.netcfg
 # deadline after a call returns rather than only before one. So the ceiling is
 # the number, by construction:
 #
-#   raspi-config setting the regulatory domain  QUERY_TIMEOUT_S    10 s
-#   waiting for the Wi-Fi device to be usable   WIFI_READY_S       12 s
-#   waiting for the network to be scanned       SCAN_BUDGET_S      15 s
-#   one full connect                            CONNECT_TIMEOUT_S  45 s
-#                                 BOOT_BUDGET_S                    ----
+#   set_country   -> raspi-config               RASPI_TIMEOUT_S    10 s
+#   radio_on      -> nmcli radio wifi on        FAST_TIMEOUT_S      5 s
+#   wait_for_wifi -> device-state queries+naps  WIFI_READY_S       10 s
+#   wait_for_ssid -> rescans, list polls, naps  SCAN_BUDGET_S      12 s
+#                                        ---------------------------------
+#                                        before the first connect   37 s
+#   the first connect                           CONNECT_TIMEOUT_S  45 s
+#                                        BOOT_BUDGET_S             ----
 #                                                                  82 s
 #
-# Retries and their back-offs are not extra time: they only happen after a
-# connect that failed instantly, so they spend what the first attempt did not.
+# Every call on the path is on that table, which was the fault twice over:
+# radio_on() and the rescans were missing from it, so the pre-connect path was
+# really 57 s and the first connect was measured getting 32 s and 27 s while
+# the table claimed 45. The instant calls now have a 5 s cap of their own
+# rather than the 10 s hung-binary default, the rescans live inside
+# wait_for_ssid's budget, and 37 + 45 = 82 exactly -- so even when every
+# earlier step runs to its cap the FIRST CONNECT IS STILL GRANTED A FULL 45 s.
+# The retries have no such arithmetic guarantee, so MIN_CONNECT_S enforces the
+# same idea for them: an attempt that cannot be given 20 s is not made, and
+# the journal says the budget ran out.
 #
-# This briefly said "87 s", and that was an intention rather than a bound. It
-# left out radio_on() and the rescans -- a capped nmcli call each -- and it
-# counted the device wait as six two-second sleeps when each of those six
-# iterations first ran a query that could take QUERY_TIMEOUT_S on its own.
-# Worked through honestly that version could reach about 195 s: past this very
-# timeout, so systemd would have killed the unit rather than the budget
-# stopping it. device/tests/test_netcfg.py now runs the whole path with every
-# call hanging to its kill and asserts the wall clock.
+# This briefly said "87 s", and that was an intention rather than a bound: it
+# also counted the device wait as six two-second sleeps when each of those six
+# iterations first ran a query that could take 10 s on its own. Worked through
+# honestly that version could reach about 195 s -- past this very timeout, so
+# systemd would have killed the unit rather than the budget stopping it.
+# device/tests/test_netcfg.py now runs the whole path with every call hanging
+# to its kill and measures 82.0 s exactly.
 #
-# 82 s is inside the "up to a minute and a half" that the download page and
-# the setup steps promise an owner watching a dark panel.
+# One call is allowed past the deadline: joined(), which asks NetworkManager
+# whether a timed-out connect actually worked. It has to be asked even when
+# the clock has run out, because answering "no" without asking would report
+# failure for a panel that is online, skip consume(), and leave the cleartext
+# Wi-Fi password on the boot partition for good. It is bounded -- three
+# queries at VERIFY_TIMEOUT_S, and at most one such check can happen after
+# the deadline -- so the ABSOLUTE ceiling is 82 + 6 = 88 s.
 #
-# 120 s rather than 90 leaves 38 s above the enforced budget for systemd's own
-# overhead, and keeps a slow connect from being killed part-way through, which
+# 88 s is still inside the "up to a minute and a half" that the download page
+# and the setup steps promise an owner watching a dark panel.
+#
+# 120 s rather than 90 leaves 32 s above even that absolute ceiling for
+# systemd's own overhead, and keeps a slow connect from being killed part-way through, which
 # would leave the setup file looking as though it had been ignored.
 # device/tests/test_pi_setup.py asserts that headroom.
 TimeoutStartSec=120

@@ -338,6 +338,47 @@ def split_terse(line: str) -> list[str]:
 QUERY_TIMEOUT_S = 10
 CONNECT_TIMEOUT_S = 45
 
+# The calls on the boot path that are ONE round trip to a daemon on this
+# machine, and cannot legitimately take longer:
+#
+#   nmcli radio wifi on                         a property set
+#   nmcli device wifi rescan                    returns after _scan_kickoff()
+#   nmcli -t -f DEVICE,TYPE,STATE device        a read of cached state
+#   nmcli -t -f SSID device wifi list --rescan no   likewise (see RESCAN_NO)
+#
+# They had QUERY_TIMEOUT_S, and that is not a detail: with 10 s each, the
+# sequential worst path before the first connect came to 57 s rather than 37,
+# and the first connect was measured being granted 32 s and 27 s while the
+# budget table claimed it got 45. Five seconds is still twenty-five times a
+# local D-Bus round trip; it exists to bound a hung binary, not to allow for
+# slow work, because none of these do any.
+#
+# raspi-config is the opposite case and keeps its own: do_wifi_country edits
+# cmdline.txt, runs `iw reg set` and makes an nmcli call of its own, so it is
+# the one step on this path that can honestly take seconds.
+FAST_TIMEOUT_S = 5
+RASPI_TIMEOUT_S = 10
+
+# The one call allowed to run after the deadline, and the only one.
+#
+# joined() asks NetworkManager whether a timed-out connect actually worked,
+# and that question is worth answering even when the budget is spent: the
+# alternative is reporting failure for a panel that is online, which skips
+# consume() and leaves the cleartext Wi-Fi password on the boot partition for
+# good. Refusing to ask because the clock ran out would reintroduce exactly
+# the bug the check exists to prevent.
+#
+# Bounded rather than open-ended. status() makes three queries, so one check
+# costs at most 3 x VERIFY_TIMEOUT_S = 6 s -- and at most ONE check can happen
+# with the budget already spent, because join()'s next iteration breaks on
+# budget.expired() before reaching another connect. So the absolute ceiling is
+# BOOT_BUDGET_S + 6 s = 88 s, still inside the "minute and a half" the site
+# promises and 32 s inside the unit's TimeoutStartSec. Two seconds is ample:
+# a panel that IS connected answers this instantly, and the timeout is only
+# there for a wedged nmcli.
+VERIFY_TIMEOUT_S = 2
+VERIFY_OVERRUN_S = 3 * VERIFY_TIMEOUT_S
+
 # --- The budget -----------------------------------------------------------
 #
 # ONE enforced deadline for the whole boot path, not a column of intentions
@@ -345,39 +386,48 @@ CONNECT_TIMEOUT_S = 45
 # Before=scoreboard.service, so every second here is a second the panel shows
 # nothing.
 #
-# The first version of this was an arithmetic claim -- "10 + 12 + 20 + 45 =
-# 87 s" -- and it was not a bound. It left out radio_on() and the rescans (a
-# capped nmcli call each), and it counted the device wait as 6 x 2 s of
-# sleeping while each of those six iterations first ran a query that could
-# itself take QUERY_TIMEOUT_S. Worked through honestly the true ceiling was
-# around 195 s: past the unit's TimeoutStartSec=120, so systemd would have
-# killed the unit rather than the budget stopping it.
+# It has been wrong twice, in the same way both times: by leaving calls off
+# the table. The first version was "10 + 12 + 20 + 45 = 87 s" and was not a
+# ceiling at all -- it omitted radio_on() and the rescans, and counted the
+# device wait as six two-second sleeps when each of those six iterations first
+# ran a query that could take QUERY_TIMEOUT_S on its own, for an honest
+# ceiling near 195 s. The second version enforced its total but still left
+# radio_on() and rescan() out of the COMPOSITION, so the claim that the first
+# connect always got CONNECT_TIMEOUT_S was false.
 #
-# So the number is enforced rather than asserted. Budget below is a single
-# monotonic deadline, created once in apply_boot_file and threaded through
-# every step. Each nmcli call is given timeout=min(its own cap, time
-# remaining), and every loop re-checks the deadline AFTER a call returns,
-# because the call is where the time goes. A call can therefore never finish
-# past the deadline, and the ceiling is BOOT_BUDGET_S by construction.
+# So: enforced, and with every call on the path named below.
 #
-# 82 s, chosen so the sequential worst path fits exactly:
+# Budget is a single monotonic deadline created once in apply_boot_file and
+# threaded through every step. Sub-budgets take it as a parent, so a child's
+# remaining() is never more than its parent's and a nap inside a loop cannot
+# overshoot the global deadline. Each nmcli call gets timeout=allow(its own
+# cap), which is min(cap, time remaining), and every loop re-checks the
+# deadline AFTER a call returns, because the call is where the time goes. A
+# call therefore cannot finish past the deadline.
 #
-#   raspi-config setting the regulatory domain  QUERY_TIMEOUT_S    10 s
-#   waiting for the Wi-Fi device                WIFI_READY_S       12 s
-#   waiting for the network to be scanned       SCAN_BUDGET_S      15 s
-#   one full connect                            CONNECT_TIMEOUT_S  45 s
+#   set_country -> raspi-config                 RASPI_TIMEOUT_S    10 s
+#   radio_on    -> nmcli radio wifi on          FAST_TIMEOUT_S      5 s
+#   wait_for_wifi (device-state queries + naps) WIFI_READY_S       10 s
+#   wait_for_ssid (rescans + list polls + naps) SCAN_BUDGET_S      12 s
 #                                                                  ----
-#                                                                  82 s
+#                                        before the first connect  37 s
+#   the first connect                           CONNECT_TIMEOUT_S  45 s
+#                                                                  ----
+#                                        BOOT_BUDGET_S             82 s
 #
-# Retries and their back-offs are not extra time: they happen only when a
-# connect failed instantly, which is the only failure worth retrying, so they
-# spend the connect budget the first attempt did not. Either way everything
-# is inside the 82 s, and device/tests/test_netcfg.py runs the whole path
-# with every call hanging to its kill and asserts the wall clock.
+# The sum is exact on purpose: 37 + 45 = 82, so even when every earlier step
+# runs to its cap the first connect is still granted a full CONNECT_TIMEOUT_S.
+# That is arranged, not asserted -- and MIN_CONNECT_S below enforces the same
+# thing for the retries, which have no such arithmetic guarantee.
+#
+# The rescans are inside SCAN_BUDGET_S rather than beside it: wait_for_ssid
+# asks for the scan itself, at the start and again every SCAN_REISSUE_S, all
+# from its own sub-budget. A hidden network skips both that wait and its
+# rescans (see join), so its path is shorter, not longer.
 #
 # 82 s is inside the "up to a minute and a half" the download page and the
 # setup steps promise an owner watching a dark panel, and leaves 38 s of
-# headroom under TimeoutStartSec=120 for systemd's own overhead.
+# headroom under the unit's TimeoutStartSec=120 for systemd's own overhead.
 BOOT_BUDGET_S = 82
 
 # How long to let a Wi-Fi interface settle after the radio is switched on,
@@ -385,17 +435,19 @@ BOOT_BUDGET_S = 82
 #
 # A wall-clock cap, not a count of attempts. It was "6 tries, 2 s apart", and
 # the docstring claimed it "never blocks longer than tries*wait" -- false,
-# because each iteration runs a query first, so six tries was really up to
-# ~70 s. Twelve seconds is still eighty times what the two v0.1.2 boots
-# needed: NetworkManager logged "Wi-Fi now enabled by radio killswitch" at
-# 14.584 s and wlan0 went "unavailable -> disconnected" at 14.736 s, 152 ms
-# later; on the second boot the device was ready 266 ms after the service
-# started.
-WIFI_READY_S = 12
+# because each iteration runs a query first. Ten seconds is still forty times
+# what the two v0.1.2 boots needed: NetworkManager logged "Wi-Fi now enabled
+# by radio killswitch" at 14.584 s and wlan0 went "unavailable ->
+# disconnected" at 14.736 s, 152 ms later; on the second boot the device was
+# ready 266 ms after the service started.
+WIFI_READY_S = 10
 WIFI_READY_POLL_S = 2
 
 # How long to wait for the target network to turn up in NetworkManager's scan
-# list before connecting, shared across every attempt, and how often to look.
+# list before connecting, and how often to look. A fresh sub-budget per
+# attempt -- it used to say "shared across every attempt", and that stopped
+# being true when the retries got their own waits; the sharing that matters is
+# the parent deadline, which bounds all of them together.
 #
 # This is the v0.1.2 defect. wait_for_wifi() waits for the DEVICE; it does not
 # wait for the NETWORK, and `nmcli device wifi connect <ssid>` fails at once
@@ -410,9 +462,18 @@ WIFI_READY_POLL_S = 2
 # a pending action is exactly what delays "manager: startup complete" -- so
 # startup complete cannot be logged mid-scan. It came 5.82 s and 5.81 s after
 # wlan0 reached "disconnected" on the two boots, which therefore bounds when
-# the first scan had finished. Fifteen seconds is two and a half times that.
-SCAN_BUDGET_S = 15
+# the first scan had finished. Twelve seconds is a little over twice that.
+#
+# SCAN_REISSUE_S is what stops the rest of the wait polling a frozen list. One
+# scan at the start and nothing after it is one look stretched out, not a
+# wait: if that scan's results lack the SSID, no later poll can differ until
+# another scan runs. NetworkManager absorbs a redundant request inside
+# _scan_kickoff() and returns no error, so re-asking costs one D-Bus round
+# trip -- and it is also what lets a refused first rescan (the device not yet
+# ready) heal inside the same attempt instead of wasting it.
+SCAN_BUDGET_S = 12
 SSID_POLL_S = 2
+SCAN_REISSUE_S = 6
 
 # The polls pass --rescan no, and that is load-bearing.
 #
@@ -421,43 +482,54 @@ SSID_POLL_S = 2
 # than the device's last_scan -- which it is on the boot path, where nothing
 # has scanned yet and last_scan is -1 -- nmcli requests a scan and BLOCKS on
 # notify::last-scan for up to 15 s (devices.c:3554-3576). A 15 s-capable call
-# under a 10 s kill would burn the whole poll budget on one query and then
-# look like a failure.
+# under a 5 s kill would burn the whole poll budget on one query and then look
+# like a failure.
 #
 # --rescan no takes the other branch: the cutoff becomes G_MININT64
 # (devices.c:3465), which is <= any last_scan, so timeout_msec is 0 and the
-# call returns with whatever NetworkManager currently has. The waiting is
-# then ours, on our own clock, which is the only way the deadline can be
-# enforced. We ask for the scan explicitly once, with `device wifi rescan`,
-# and poll for its results.
+# call returns with whatever NetworkManager currently has. The waiting is then
+# ours, on our own clock, which is the only way the deadline can be enforced.
+# We ask for the scan explicitly instead, and poll for its results.
 #
 # The cost of choosing this way: after a scan lands, --rescan auto would have
 # served its cached results for 30 s anyway, so leaning on it would not even
 # have given fresher answers than polling does.
 RESCAN_NO = ["--rescan", "no"]
 
-# How long every connect attempt may take between them, how many there may
-# be, and how long to wait between them.
+# How many connect attempts there may be, how long to wait between them, and
+# the shortest attempt worth making.
 #
-# The connect budget is shared because the failure worth retrying is the one
-# nmcli reports instantly, so a retry costs almost none of it. A connect that
-# really did run for CONNECT_TIMEOUT_S was associating, not failing to find
-# the network, and there is nothing to retry.
+# MIN_CONNECT_S is the floor, and it is enforced rather than assumed. An
+# attempt granted less than this cannot associate and get a DHCP lease; it
+# gets killed part-way through, and the failure it returns is then read by the
+# retry logic as though it meant something about the network. Below the floor
+# the attempt is simply not made and the code says the budget ran out, which
+# is both true and actionable. The first connect is guaranteed a full
+# CONNECT_TIMEOUT_S by the arithmetic above; the floor is what protects the
+# retries, which have no such guarantee.
 #
 # The back-off is what makes the retries mean anything. Without it, once the
-# scan deadline has passed, attempts 2 and 3 complete in milliseconds and
-# nothing has had time to change between them -- CONNECT_ATTEMPTS = 3 was
-# effectively 1. Five seconds is the order of the 5.82 s scan bound above:
-# long enough for a rescan's results, or a hidden network's directed probe,
-# to land. It is spent inside the same deadline as everything else.
-CONNECT_BUDGET_S = 45
+# scan deadline had passed, attempts 2 and 3 completed in milliseconds and
+# nothing had time to change between them. RETRY_BACKOFF_S is the order of the
+# 5.82 s scan bound: long enough for a fresh scan's results to land.
+#
+# HIDDEN_BACKOFF_S is longer, and for a specific reason.
+# _scan_request_ssids_fetch (nm-device-wifi.c:292-312) destroys the tracked-
+# SSID hash and drains the list, so an SSID queued by nmcli's `hidden yes` is
+# probed on exactly ONE scan and then forgotten. A hidden attempt therefore
+# gets one directed probe per apply(), and the next attempt has to wait for
+# that probe's scan to finish AND for its results to be readable -- about two
+# scan lengths.
 CONNECT_ATTEMPTS = 3
+MIN_CONNECT_S = 20
 RETRY_BACKOFF_S = 5
+HIDDEN_BACKOFF_S = 10
 
-# How nmcli says "that network is not here" as against "that password is
-# wrong". Both come back as text on stderr, which _run_nmcli turns into a
-# NetworkError, and the locale is forced to C.UTF-8 with LANGUAGE cleared
-# (see UTF8_LOCALE_ENV) so these strings are the untranslated English ones.
+# How nmcli says "that network is not here", "that password is wrong", and "I
+# gave up waiting". All three come back as text on stderr, which _run_nmcli
+# turns into a NetworkError, and the locale is forced to C.UTF-8 with LANGUAGE
+# cleared (see UTF8_LOCALE_ENV) so these strings are the untranslated English
+# ones.
 #
 # Not found, two forms, and the second was missed the first time round:
 #
@@ -481,68 +553,15 @@ RETRY_BACKOFF_S = 5
 # supplicant ..." family, which is what a wrong WPA-PSK comes back as too.
 # Never retried: it cannot start working, and each retry is another stretch of
 # dark panel for somebody who has already mistyped their password once.
+#
+# Timeout: either nmcli's own ("Error: Timeout %d sec expired.",
+# devices.c:2069) or ours, when the subprocess was killed at its cap. This one
+# is not a verdict at all, and treating it as one is dangerous -- see
+# join(), which asks NetworkManager what actually happened before believing it.
 NOT_FOUND_MARKERS = ("no network with ssid", "no access point with bssid",
                      "wi-fi network could not be found")
 SECRETS_MARKERS = ("secrets were required", "no valid secrets", "802.1x supplicant")
-
-
-def _say(message: str, *args) -> None:
-    """A milestone with no budget to stamp it -- the settings screen's path."""
-    log.info(message, *args)
-
-
-def _tighter(a: "Budget", b: "Budget | None") -> "Budget":
-    """Whichever of two budgets runs out first."""
-    if b is None:
-        return a
-    return a if a.remaining() <= b.remaining() else b
-
-
-class Budget:
-    """One monotonic deadline that every step of the boot path draws from.
-
-    Created once, in apply_boot_file, and passed down. Callers ask for
-    ``allow(cap)`` to size an nmcli timeout and ``nap(seconds)`` to sleep
-    without overshooting, and re-check ``expired()`` after every call rather
-    than only before one -- the call is where the time goes.
-
-    It also carries the elapsed clock used for the milestone logging, so the
-    journal's "+12.34s" and the deadline are the same clock and cannot
-    disagree about how long something took.
-    """
-
-    def __init__(self, seconds: float = BOOT_BUDGET_S, clock=None) -> None:
-        self._clock = clock if clock is not None else time.monotonic
-        self.started = self._clock()
-        self.ends = self.started + seconds
-
-    def elapsed(self) -> float:
-        return self._clock() - self.started
-
-    def remaining(self) -> float:
-        return self.ends - self._clock()
-
-    def expired(self) -> bool:
-        return self.remaining() <= 0
-
-    def allow(self, cap: float) -> float:
-        """The timeout for one call: its own cap, or what is left if less."""
-        return max(0.0, min(cap, self.remaining()))
-
-    def nap(self, seconds: float) -> None:
-        """Sleep, but never past the deadline."""
-        rest = min(seconds, self.remaining())
-        if rest > 0:
-            time.sleep(rest)
-
-    def say(self, message: str, *args) -> None:
-        """A milestone in the journal, stamped with elapsed seconds.
-
-        The next boot has to be a measurement rather than another inference:
-        one read of `journalctl -u scoreboard-netcfg` should say where every
-        second went. Never interpolate the password into one of these.
-        """
-        log.info("+%.2fs " + message, self.elapsed(), *args)
+TIMEOUT_MARKERS = ("nmcli timed out", "sec expired", "timeout expired")
 
 
 def is_network_not_found(message: str) -> bool:
@@ -555,6 +574,92 @@ def is_secrets_problem(message: str) -> bool:
     """Did the connect fail over the password rather than the airwaves?"""
     low = message.lower()
     return any(marker in low for marker in SECRETS_MARKERS)
+
+
+def is_timeout_problem(message: str) -> bool:
+    """Did the connect run out of time rather than come back with a verdict?
+
+    Distinct from the other two because it says nothing about whether the
+    join worked: killing the nmcli client does not cancel NetworkManager's
+    activation, which carries on in the daemon.
+    """
+    low = message.lower()
+    return any(marker in low for marker in TIMEOUT_MARKERS)
+
+
+def _say(message: str, *args) -> None:
+    """A milestone with no budget to stamp it -- the settings screen's path."""
+    log.info(message, *args)
+
+
+class Budget:
+    """One monotonic deadline that every step of the boot path draws from.
+
+    Created once, in apply_boot_file, and passed down. A loop that wants a cap
+    of its own makes a child with ``parent=``: a child's ``remaining()`` is
+    never more than its parent's, so every ``allow()``, ``nap()`` and
+    ``expired()`` inside the loop is bounded by the global deadline as well as
+    by the loop's own. That is what stops a two-second poll nap from stepping
+    past the end of the boot budget -- which it could when the child only knew
+    about itself.
+
+    Callers ask for ``allow(cap)`` to size an nmcli timeout and ``nap(seconds)``
+    to sleep without overshooting, and re-check ``expired()`` after every call
+    rather than only before one: the call is where the time goes.
+
+    It also carries the elapsed clock used for the milestone logging, taken
+    from the root so every line is stamped from the start of the whole phase,
+    and the journal and the deadline cannot disagree about how long something
+    took.
+    """
+
+    def __init__(self, seconds: float = BOOT_BUDGET_S, clock=None,
+                 parent: "Budget | None" = None) -> None:
+        if clock is None:
+            clock = parent._clock if parent is not None else time.monotonic
+        self._clock = clock
+        self._parent = parent
+        self.seconds = seconds
+        self.started = self._clock()
+        self.ends = self.started + seconds
+
+    def root(self) -> "Budget":
+        node = self
+        while node._parent is not None:
+            node = node._parent
+        return node
+
+    def elapsed(self) -> float:
+        return self._clock() - self.started
+
+    def remaining(self) -> float:
+        mine = self.ends - self._clock()
+        if self._parent is None:
+            return mine
+        return min(mine, self._parent.remaining())
+
+    def expired(self) -> bool:
+        return self.remaining() <= 0
+
+    def allow(self, cap: float) -> float:
+        """The timeout for one call: its own cap, or what is left if less."""
+        return max(0.0, min(cap, self.remaining()))
+
+    def nap(self, seconds: float) -> None:
+        """Sleep, but never past this deadline or any above it."""
+        rest = min(seconds, self.remaining())
+        if rest > 0:
+            time.sleep(rest)
+
+    def say(self, message: str, *args) -> None:
+        """A milestone in the journal, stamped with elapsed seconds.
+
+        The next boot has to be a measurement rather than another inference:
+        one read of `journalctl -u scoreboard-netcfg` should say where every
+        second went. Never interpolate the password into one of these.
+        """
+        log.info("+%.2fs " + message, self.root().elapsed(), *args)
+
 
 
 # nmcli translates device and connection STATE even under -t, and
@@ -586,7 +691,7 @@ UTF8_LOCALE_ENV = {**os.environ, "LC_ALL": "C.UTF-8", "LANG": "C.UTF-8", "LANGUA
 DECODE = {"encoding": "utf-8", "errors": "replace"}
 
 
-def _run_nmcli(args: list[str], timeout: float = QUERY_TIMEOUT_S) -> str:
+def _run_nmcli(args: list[str], timeout: float | None = QUERY_TIMEOUT_S) -> str:
     # A list, never a string, and never shell=True: an SSID is attacker-chosen
     # text from the air, and a password is whatever the user typed.
     timed_out = False
@@ -700,7 +805,7 @@ def regulatory_domain(run_iw=None) -> str | None:
     return None
 
 
-def set_country(code: str, run=None, timeout: float = QUERY_TIMEOUT_S) -> None:
+def set_country(code: str, run=None, timeout: float = RASPI_TIMEOUT_S) -> None:
     """Set the Wi-Fi regulatory domain, which is what turns the radio ON.
 
     An earlier version of this docstring said the radio "may refuse 5 GHz
@@ -746,7 +851,7 @@ class NetworkManager:
         ceiling that leaves it out is not a ceiling.
         """
         set_country(code, run=self._run_raspi_config,
-                    timeout=budget.allow(QUERY_TIMEOUT_S) if budget else QUERY_TIMEOUT_S)
+                    timeout=budget.allow(RASPI_TIMEOUT_S) if budget else RASPI_TIMEOUT_S)
 
     def radio_on(self, budget: "Budget | None" = None) -> None:
         """Switch the Wi-Fi radio on, whatever raspi-config just did.
@@ -759,12 +864,13 @@ class NetworkManager:
         available to us as root -- so it is cheaper to say it than to reason
         about which branch upstream took.
 
-        It draws from the budget like everything else. It is one cheap call,
-        but "one cheap call" is what QUERY_TIMEOUT_S exists to bound, and a
-        ceiling that leaves calls out is not a ceiling.
+        It draws from the budget like everything else, at FAST_TIMEOUT_S:
+        setting a property on a local daemon cannot honestly take longer, and
+        a ceiling that leaves calls out is not a ceiling -- this one was off
+        the table twice.
         """
         self._run(["radio", "wifi", "on"],
-                  timeout=budget.allow(QUERY_TIMEOUT_S) if budget else QUERY_TIMEOUT_S)
+                  timeout=budget.allow(FAST_TIMEOUT_S) if budget else FAST_TIMEOUT_S)
 
     def wait_for_wifi(self, budget: "Budget | None" = None,
                       seconds: float = WIFI_READY_S,
@@ -795,12 +901,11 @@ class NetworkManager:
         Never raises. A false return is not fatal; the caller goes on and lets
         the connect's own error be the one that gets reported.
         """
-        own = Budget(seconds, clock=clock)
+        own = Budget(seconds, clock=clock, parent=budget)
         while True:
-            cap = min(own.allow(QUERY_TIMEOUT_S),
-                      budget.allow(QUERY_TIMEOUT_S) if budget else QUERY_TIMEOUT_S)
             try:
-                out = self._run(["-t", "-f", "DEVICE,TYPE,STATE", "device"], timeout=cap)
+                out = self._run(["-t", "-f", "DEVICE,TYPE,STATE", "device"],
+                                timeout=own.allow(FAST_TIMEOUT_S))
             except NetworkError:
                 return False
             states = [f[2] for f in (split_terse(l) for l in out.splitlines())
@@ -810,10 +915,12 @@ class NetworkManager:
             if any(s not in ("unavailable", "unmanaged") for s in states):
                 return True
             # After the call, not before it: the query is where the time went.
-            if own.expired() or (budget is not None and budget.expired()):
+            # own.expired() covers the parent too, because a child's remaining
+            # is never more than its parent's.
+            if own.expired():
                 return False
             own.nap(poll)
-            if budget is not None and budget.expired():
+            if own.expired():
                 return False
 
     def scan(self) -> list[Network]:
@@ -854,7 +961,7 @@ class NetworkManager:
         """
         try:
             self._run(["device", "wifi", "rescan"],
-                      timeout=budget.allow(QUERY_TIMEOUT_S) if budget else QUERY_TIMEOUT_S)
+                      timeout=budget.allow(FAST_TIMEOUT_S) if budget else FAST_TIMEOUT_S)
             return True
         except NetworkError as e:
             (budget.say if budget else _say)(
@@ -871,7 +978,7 @@ class NetworkManager:
         for up to 15 s waiting on notify::last-scan (devices.c:3463 sets the
         cutoff to now - 30 s; :3554-3576 turns a cutoff newer than last_scan
         into a 15 s wait, and last_scan is -1 when nothing has scanned yet).
-        A 15 s-capable call under a 10 s kill would spend the whole poll
+        A 15 s-capable call under a 5 s kill would spend the whole poll
         budget on one query and then look like a failure. With ``--rescan
         no`` the cutoff is G_MININT64 (devices.c:3465), the wait is zero, and
         the call returns whatever NetworkManager has right now -- which is
@@ -885,7 +992,7 @@ class NetworkManager:
         why join() does not wait for one.
         """
         out = self._run(["-t", "-f", "SSID", "device", "wifi", "list", *RESCAN_NO],
-                        timeout=budget.allow(QUERY_TIMEOUT_S) if budget else QUERY_TIMEOUT_S)
+                        timeout=budget.allow(FAST_TIMEOUT_S) if budget else FAST_TIMEOUT_S)
         found: set[str] = set()
         for line in out.splitlines():
             fields = split_terse(line)
@@ -896,14 +1003,23 @@ class NetworkManager:
     def wait_for_ssid(self, ssid: str, budget: "Budget | None" = None,
                       seconds: float = SCAN_BUDGET_S, poll: float = SSID_POLL_S,
                       clock=None) -> tuple[bool, int]:
-        """Wait for one network to appear in the scan list.
+        """Ask for a scan and wait for one network to appear in its results.
 
         Returns (seen, polls) so the journal can say how many looks it took,
         which is the difference between "the scan was slow" and "the network
         is not there".
 
-        A wall-clock deadline rather than a count of attempts, re-checked
-        after every query returns and not only before one.
+        The scan is requested here rather than by the caller, and re-requested
+        every SCAN_REISSUE_S while the SSID stays unseen. One request at the
+        start and nothing after it is not a wait -- it is a single look
+        stretched over twelve seconds, because no poll can return anything new
+        until another scan runs. Re-asking also lets a refusal heal: a rescan
+        is refused only when the device is not ready (see rescan), and the
+        wait is long enough to outlive that.
+
+        A wall-clock deadline rather than a count of attempts, on a child of
+        the caller's budget so that neither a query nor a nap can step past
+        the global deadline, and re-checked after every query returns.
 
         **A query that fails does not end the wait.** It used to: the first
         poll erroring returned False at once, join() then fired every connect
@@ -914,28 +1030,74 @@ class NetworkManager:
         reported" belongs to the connect, which is the call whose failure means
         something; it does not belong to a poll.
         """
-        own = Budget(seconds, clock=clock)
+        own = Budget(seconds, clock=clock, parent=budget)
+        speak = budget or own
         polls = 0
+        asked_at = None
         while True:
+            if asked_at is None or own.elapsed() - asked_at >= SCAN_REISSUE_S:
+                asked_at = own.elapsed()
+                if self.rescan(budget=own, clock=clock):
+                    speak.say("rescan requested")
             try:
                 polls += 1
-                if ssid in self.visible_ssids(budget=_tighter(own, budget)):
+                if ssid in self.visible_ssids(budget=own):
                     return True, polls
             except NetworkError as e:
                 log.debug("could not read the scan list: %s", e)
-            if own.expired() or (budget is not None and budget.expired()):
+            if own.expired():
                 return False, polls
             own.nap(poll)
-            if budget is not None and budget.expired():
+            if own.expired():
                 return False, polls
 
     def apply(self, settings: WifiSettings, timeout: float = CONNECT_TIMEOUT_S) -> None:
-        args = ["device", "wifi", "connect", settings.ssid]
+        """One `nmcli device wifi connect`.
+
+        ``-w`` is not decoration. `nmcli device wifi connect` sets its own
+        wait to 90 s when none is given (devices.c:3678-3679), so any shorter
+        subprocess timeout SIGKILLs the client part-way through and the
+        journal gets our words ("nmcli timed out") instead of nmcli's
+        ("Error: Timeout %d sec expired.", devices.c:2069). Telling nmcli a
+        second or two less than it is actually given lets it report in its
+        own terms and exit cleanly.
+
+        It does NOT make a clipped connect safe -- killing the client does not
+        cancel NetworkManager's activation, which carries on in the daemon.
+        join() is where that is handled.
+        """
+        wait = max(1, int(timeout) - 2)
+        args = ["-w", str(wait), "device", "wifi", "connect", settings.ssid]
         if settings.psk:
             args += ["password", settings.psk]
         if settings.hidden:
             args += ["hidden", "yes"]
         self._run(args, timeout=timeout)
+
+    def joined(self, ssid: str) -> bool:
+        """Is this panel actually on that network right now?
+
+        Asked after a connect that timed out, because a timeout is not a
+        verdict: the nmcli client was killed, NetworkManager was not, and the
+        activation it started carries on without it. Believing the timeout
+        would mean reporting failure for a panel that is online -- and, worse,
+        skipping consume(), which leaves the cleartext Wi-Fi password on the
+        boot partition permanently.
+
+        Any failure here is False rather than an exception: this is a second
+        opinion, and one that cannot be obtained is not a success.
+
+        It uses VERIFY_TIMEOUT_S outright rather than drawing from the budget,
+        because a spent budget is precisely when this matters most and a
+        timeout of zero would answer "no" without asking. See VERIFY_OVERRUN_S
+        for why that is bounded and what it costs.
+        """
+        try:
+            now = self.status(timeout=VERIFY_TIMEOUT_S)
+        except NetworkError as e:
+            log.debug("could not check whether the join worked: %s", e)
+            return False
+        return bool(now.online) and now.ssid == ssid
 
     def join(self, settings: WifiSettings, budget: "Budget | None" = None,
              clock=None) -> None:
@@ -947,22 +1109,34 @@ class NetworkManager:
         list scanned a moment earlier -- and wrong at boot, where the radio
         came up seconds ago and nothing has scanned yet.
 
-        Per attempt: ask for a scan, wait for the name to appear (unless the
-        network is hidden and so cannot appear), connect. If nmcli says the
-        network is not there -- in either of its two forms, see
-        NOT_FOUND_MARKERS -- back off and go round again. Never for a secrets
-        failure, and never past the budget.
+        Per attempt: wait for the name to appear (which asks for the scans),
+        then connect. If nmcli says the network is not there -- in either of
+        its two forms, see NOT_FOUND_MARKERS -- back off and go round again.
+        Never for a secrets failure. Never for an attempt too short to
+        succeed: MIN_CONNECT_S is a floor, and an attempt below it is not made
+        at all, because a connect that gets killed part-way through comes back
+        with a failure the retry logic would then misread.
 
-        **Hidden networks get the back-off instead of the wait.** nmcli's
-        `hidden yes` asks NetworkManager for a directed scan for that exact
-        SSID and then looks for the AP immediately (devices.c:3878-3900);
-        NetworkManager returns as soon as it has kicked the scan off
-        (nm-device-wifi.c:1516-1518, dbus_request_scan_cb). So the first
-        attempt ALWAYS reports not-found -- which is why the docs used to
-        claim this worked and it did not. The SSID is tracked as a pending
-        explicit probe (_scan_request_ssids_track, :315) and goes into the
-        next scan's probe list (_scan_request_ssids_build_hidden, :1604), so
-        it is the attempt AFTER a back-off that can succeed.
+        A timeout is not a failure until NetworkManager says so. See apply()
+        and joined(): the client can be killed while the daemon goes on and
+        finishes the job, and reporting failure for a panel that is in fact
+        online would also strand the cleartext password on the boot partition.
+
+        **Hidden networks get the back-off instead of the wait, and no
+        rescan.** nmcli's `hidden yes` asks NetworkManager for a directed scan
+        for that exact SSID and then looks for the AP immediately
+        (devices.c:3878-3900); NetworkManager returns as soon as it has kicked
+        the scan off (nm-device-wifi.c:1516-1518), so the first attempt always
+        reports not-found. The SSID is tracked as a pending explicit probe
+        (_scan_request_ssids_track, :315) and goes into the next scan's probe
+        list -- but _scan_request_ssids_fetch (:292-312) destroys the hash and
+        drains the list as it builds that scan, so the SSID is probed on
+        exactly ONE scan per apply() and then forgotten. Two consequences:
+        asking for a generic rescan first would only start a scan WITHOUT the
+        directed probe in it and push nmcli's own request behind it, so we do
+        not; and the back-off has to cover a whole probe scan plus its results
+        becoming readable, which is why HIDDEN_BACKOFF_S is about two scan
+        lengths rather than one.
 
         The alternative, if this turns out not to be enough on real hardware:
         create the profile explicitly (`nmcli connection add type wifi ...
@@ -976,20 +1150,23 @@ class NetworkManager:
         reports nmcli's own words rather than a summary of them.
         """
         budget = budget if budget is not None else Budget(BOOT_BUDGET_S, clock=clock)
-        connect_left = float(CONNECT_BUDGET_S)
+        back_off = HIDDEN_BACKOFF_S if settings.hidden else RETRY_BACKOFF_S
         last: NetworkError | None = None
+        made = 0
+        out_of_time = False
 
         for attempt in range(1, CONNECT_ATTEMPTS + 1):
             if attempt > 1:
                 if budget.expired():
+                    out_of_time = True
                     break
-                budget.say("waiting %.0fs before attempt %d, so a rescan or a "
-                           "directed probe can land", RETRY_BACKOFF_S, attempt)
-                budget.nap(RETRY_BACKOFF_S)
+                budget.say("waiting %.0fs before attempt %d, so a %s can land",
+                           back_off, attempt,
+                           "directed probe" if settings.hidden else "rescan")
+                budget.nap(back_off)
             if budget.expired():
+                out_of_time = True
                 break
-            if self.rescan(budget=budget, clock=clock):
-                budget.say("rescan requested")
             if not settings.hidden:
                 seen, polls = self.wait_for_ssid(
                     settings.ssid, budget=budget, clock=clock)
@@ -1002,32 +1179,59 @@ class NetworkManager:
                 budget.say("%r is marked hidden: no scan list can show it, so "
                            "nmcli's own directed probe is what has to find it",
                            settings.ssid)
-            cap = min(connect_left, budget.allow(CONNECT_TIMEOUT_S))
-            if cap <= 0:
+            cap = budget.allow(CONNECT_TIMEOUT_S)
+            if cap < MIN_CONNECT_S:
+                # Not "no time left" -- not ENOUGH time left. An attempt this
+                # short would be killed part-way through association and come
+                # back as a failure that means nothing.
+                out_of_time = True
                 break
-            budget.say("connect attempt %d of %d", attempt, CONNECT_ATTEMPTS)
-            started = budget.elapsed()
+            budget.say("connect attempt %d of %d, with %.0fs for it",
+                       attempt, CONNECT_ATTEMPTS, cap)
+            made += 1
             try:
                 self.apply(settings, timeout=cap)
                 budget.say("connected to %r on attempt %d", settings.ssid, attempt)
                 return
             except NetworkError as e:
-                connect_left -= budget.elapsed() - started
                 last = e
-                if is_secrets_problem(str(e)):
+                if is_timeout_problem(str(e)):
+                    # The client was killed; the daemon was not. Ask.
+                    budget.say("attempt %d ran out of time; asking NetworkManager "
+                               "what actually happened", attempt)
+                    if self.joined(settings.ssid):
+                        budget.say("NetworkManager finished the job anyway: "
+                                   "connected to %r", settings.ssid)
+                        return
+                    budget.say("attempt %d timed out and the panel is not on %r",
+                               attempt, settings.ssid)
+                elif is_secrets_problem(str(e)):
                     budget.say("attempt %d failed on the password, which no retry "
                                "can fix: %s", attempt, e)
                     raise
-                if not is_network_not_found(str(e)):
+                elif not is_network_not_found(str(e)):
                     budget.say("attempt %d failed, and not in a way a retry "
                                "addresses: %s", attempt, e)
                     raise
-                budget.say("attempt %d failed: the network was not found (%s)",
-                           attempt, e)
+                else:
+                    budget.say("attempt %d failed: the network was not found (%s)",
+                               attempt, e)
 
+        if out_of_time:
+            if made == 0:
+                budget.say("the %ds budget ran out before any connect could be "
+                           "attempted", int(budget.seconds))
+            else:
+                budget.say("the %ds budget ran out after %d connect attempt(s)",
+                           int(budget.seconds), made)
+        elif last is not None:
+            budget.say("giving up after %d connect attempt(s)", made)
         if last is not None:
-            budget.say("giving up after %d attempt(s)", CONNECT_ATTEMPTS)
             raise last
+        if out_of_time:
+            raise NetworkError(
+                f"the {int(budget.seconds)}s budget ran out before this panel "
+                f"could try to join {settings.ssid!r}")
 
     def forget_all(self) -> None:
         out = self._run(["-t", "-f", "UUID,TYPE", "connection", "show"])
@@ -1037,16 +1241,25 @@ class NetworkManager:
                 # By UUID: a connection name can contain anything at all.
                 self._run(["connection", "delete", "uuid", fields[0]])
 
-    def status(self) -> Status:
-        online = self._run(["-t", "-f", "STATE", "general"]).strip() == "connected"
+    def status(self, timeout: float | None = None) -> Status:
+        """What this panel is connected to, if anything.
+
+        ``timeout`` is passed through so the boot path can ask this question
+        inside its deadline; the render loop leaves it alone and gets the
+        runner's own default.
+        """
+        online = self._run(["-t", "-f", "STATE", "general"],
+                           timeout=timeout).strip() == "connected"
         ssid = None
-        for line in self._run(["-t", "-f", "ACTIVE,SSID", "device", "wifi"]).splitlines():
+        for line in self._run(["-t", "-f", "ACTIVE,SSID", "device", "wifi"],
+                              timeout=timeout).splitlines():
             fields = split_terse(line)
             if len(fields) >= 2 and fields[0] == "yes":
                 ssid = fields[1]
                 break
         ip = None
-        for line in self._run(["-t", "-f", "IP4.ADDRESS", "device", "show"]).splitlines():
+        for line in self._run(["-t", "-f", "IP4.ADDRESS", "device", "show"],
+                              timeout=timeout).splitlines():
             fields = split_terse(line)
             value = fields[-1] if fields else ""
             if value:
