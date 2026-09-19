@@ -131,6 +131,28 @@ Check specifically that an SSID containing a colon appears intact — that is
 what `split_terse` exists for, and it is the one case a fake `nmcli` can only
 approximate.
 
+**2026-09-18 — this check has a precondition nothing on the panel can
+satisfy.** The image ships with the Wi-Fi radio switched off until the
+regulatory domain is set (see the H8 note below for the evidence). Until then
+`nmcli device wifi list` returns nothing, so the settings screen's list is
+empty — and it is empty in exactly the way "there are no networks here" is,
+with nothing to say why.
+
+There is no way to set a country from the settings screen: `device/scoreboard/
+settings.py` and `screens.py` contain no country concept at all, and
+`main.py` never calls `set_country`. The only thing that sets it is
+`scoreboard-netcfg` reading a `country=` line from the boot partition, which
+now cannot be missing — `parse_wifi_file` refuses a file without one.
+
+So today the on-screen path works **only after** a setup file with a country
+has been applied at least once; `raspi-config` writes
+`cfg80211.ieee80211_regdom=` into `cmdline.txt`, so it then persists across
+reboots and the radio stays on. A panel that has never had a setup file has an
+on-screen Wi-Fi chooser that cannot find anything. Deliberately not fixed in
+this branch (it is UI work, not a fix): run H3 on a panel that has applied a
+setup file first, and treat "empty list on a never-configured panel" as known
+rather than as a failure of the scan.
+
 ## H4 — Imager customisation on a custom image
 
 Open Raspberry Pi Imager, choose "Use custom", select the built `.img.xz`.
@@ -285,7 +307,11 @@ lists exactly this as untestable in CI.
    is one the panel reads.
 1. Flash a card. Copy the file downloaded in step 0 onto the boot partition
    as `scoreboard-setup.txt`, and fill in `ssid=` and `psk=` for the network
-   the panel will join. `owner=` is already set, to the signed-in owner's
+   the panel will join. **Check `country=` as well** — the site prefills it
+   from the browser's locale, which is the language you read in, not
+   necessarily where the panel will live. The panel's Wi-Fi radio stays
+   switched off until it is right, and the panel refuses the file outright if
+   the line is blank. `owner=` is already set, to the signed-in owner's
    address — leave it as the site wrote it.
 2. Boot with the panel connected. Within about a minute it should show
    **Add this panel at scoreboard.davidjdrake.com**, a code in the form
@@ -317,6 +343,40 @@ lists exactly this as untestable in CI.
    responses: if it does not, the browser reports the call as unreachable
    rather than unauthorized, and re-auth does not fire the way it does for a
    client-side token expiry.
+
+**2026-09-18 — why two boots never consumed the setup file.** On both v0.1.1
+boots the card's `scoreboard-setup.txt` came back unmodified, password still
+in it. `scoreboard-netcfg` had in fact run — it is `WantedBy=multi-user.target`,
+enabled by symlink, runs as root, has no `Condition…`, and nothing about the
+display failure could stop it. It could not have worked:
+
+- `raspberrypi-sys-mods` boots with `rfkill.default_state=0`, so nothing
+  transmits until the WLAN regulatory domain is known.
+- pi-gen's `stage2/02-net-tweaks/01-run.sh` at the pinned commit writes
+  `/var/lib/NetworkManager/NetworkManager.state` containing
+  `WirelessEnabled=false` whenever `WPA_COUNTRY` is unset at build time. It is
+  unset for this image and must stay so: the image is downloaded by strangers
+  and cannot know where any of them lives. (`network-manager` is installed by
+  that sub-stage's own `00-packages`, which pi-gen runs before `01-run.sh`, so
+  the directory exists and the `elif` branch is the one that fires.)
+- `netcfg.apply_boot_file` called `set_country` **only** when the file had a
+  `country=` line, and `site/assets/setupfile.js` wrote only `ssid=`, `psk=`
+  and `owner=`. So every panel set up from the site's own file left the radio
+  switched off, `nmcli` failed, and the file was correctly left in place for
+  its owner to fix — which is precisely the symptom observed.
+
+`set_country`'s docstring said the radio "may refuse 5 GHz channels" without a
+country. That understated it: the whole radio is off.
+
+Fixed together for the next image: the site writes a `country=` line and
+prefills it from the browser's locale region; the panel refuses a file that
+has an `ssid` but no `country`, with a message naming the line to add; and
+`netcfg` now says `nmcli radio wifi on` itself and waits for the interface to
+become usable before connecting. `raspi-config`'s `do_wifi_country`
+(20260730, read from the deb) does unblock the radio, but by one of two
+branches — `nmcli radio wifi on` if NetworkManager is already active, else
+`rfkill unblock wifi` plus a `sed` of `NetworkManager.state` — and which one
+runs depends on timing this service does not control.
 
 **The one to watch:** step 5 is the first time `Dynamo.ByCodeHash` runs against
 real DynamoDB. It has no test coverage and neither alarm would catch an

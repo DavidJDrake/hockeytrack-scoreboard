@@ -9,6 +9,11 @@
 ssid=
 psk=
 
+# The two-letter code for the country the panel will be used in -- US,
+# CA, GB and so on. The panel's Wi-Fi stays switched off until this is
+# filled in, so check it even if there is already something here.
+country=
+
 # This line ties the panel to your account, so the code it shows can be
 # claimed by you and nobody else. Leave it exactly as it is.
 owner=friend@example.com

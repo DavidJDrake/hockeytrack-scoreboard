@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { MAX_OWNER_BYTES, SETUP_FILE_NAME, SetupFileError, setupFileFor } from "../assets/setupfile.js";
+import { MAX_OWNER_BYTES, SETUP_FILE_NAME, SetupFileError, regionFromLocale, setupFileFor } from "../assets/setupfile.js";
 
 const fixture = readFileSync(new URL("./fixtures/scoreboard-setup.txt", import.meta.url), "utf8");
 
@@ -17,6 +17,82 @@ test("the file carries no Wi-Fi details, only empty lines to fill in", () => {
   const text = setupFileFor("friend@example.com");
   assert.match(text, /^ssid=$/m);
   assert.match(text, /^psk=$/m);
+});
+
+test("the file asks for a country, because without one the panel's radio stays off", () => {
+  // The image ships with Wi-Fi switched off until the regulatory domain is
+  // set (rfkill.default_state=0, plus NetworkManager.state WirelessEnabled=
+  // false written by pi-gen when WPA_COUNTRY is unset -- and it is unset,
+  // because the image cannot know where whoever downloads it lives). Every
+  // panel set up from a file without this line never joins a network at all.
+  const text = setupFileFor("friend@example.com");
+  assert.match(text, /^country=/m);
+});
+
+test("the country is left blank when the browser's locale does not name one", () => {
+  assert.match(setupFileFor("friend@example.com"), /^country=$/m);
+  assert.match(setupFileFor("friend@example.com", null), /^country=$/m);
+  assert.match(setupFileFor("friend@example.com", undefined), /^country=$/m);
+});
+
+test("the country is prefilled when the browser's locale names one", () => {
+  assert.match(setupFileFor("friend@example.com", "US"), /^country=US$/m);
+  assert.match(setupFileFor("friend@example.com", "GB"), /^country=GB$/m);
+});
+
+test("a prefilled country is upper-cased, the way the panel stores it", () => {
+  assert.match(setupFileFor("friend@example.com", "gb"), /^country=GB$/m);
+});
+
+test("anything that is not two ASCII letters leaves the country blank", () => {
+  // The value comes from the browser, so it is checked rather than trusted.
+  // Blank is always safe: the panel then refuses the file and says what to
+  // add, which is a better outcome than writing something it cannot use.
+  for (const bad of ["USA", "U", "U5", "12", "", "  ", "Ü", "us-CA", "ÜS"]) {
+    assert.match(setupFileFor("friend@example.com", bad), /^country=$/m,
+      `${JSON.stringify(bad)} reached the file`);
+  }
+});
+
+test("a line break cannot ride into the file on the country", () => {
+  // The same injection the owner line is guarded against, by the same
+  // standard: a country that could add lines of its own could add an ssid=.
+  for (const bad of ["US\nssid=evil", "US\rpsk=evil", "\nssid=evil", "US x"]) {
+    const text = setupFileFor("friend@example.com", bad);
+    assert.match(text, /^country=$/m);
+    assert.ok(!text.includes("evil"), `${JSON.stringify(bad)} added a line`);
+  }
+});
+
+test("the owner line still says to leave it alone, and comes last", () => {
+  // Adding a field above it must not have moved it or reworded it.
+  const text = setupFileFor("friend@example.com");
+  assert.match(text, /Leave it exactly as it is\.\nowner=friend@example\.com/);
+  assert.ok(text.indexOf("country=") < text.indexOf("owner="), "the order changed");
+});
+
+test("regionFromLocale takes the region out of a browser locale", () => {
+  assert.equal(regionFromLocale("en-US"), "US");
+  assert.equal(regionFromLocale("en-GB"), "GB");
+  assert.equal(regionFromLocale("fr-CA"), "CA");
+  assert.equal(regionFromLocale("zh-Hans-CN"), "CN");
+  assert.equal(regionFromLocale("de-CH-1901"), "CH");
+  assert.equal(regionFromLocale("en_US"), "US");
+  assert.equal(regionFromLocale("fr-fr"), "FR");
+});
+
+test("regionFromLocale gives nothing rather than a guess", () => {
+  // es-419 is Latin America: a real region, but a UN M49 number, not a code
+  // the panel can use. A language with no region is the common case.
+  for (const locale of ["en", "es-419", "", null, undefined, 42, "x", "----"]) {
+    assert.equal(regionFromLocale(locale), null, `${JSON.stringify(locale)} produced a region`);
+  }
+});
+
+test("regionFromLocale never returns the language as if it were a region", () => {
+  // "en" alone must not become country=EN. The first subtag is the language.
+  assert.equal(regionFromLocale("en"), null);
+  assert.equal(regionFromLocale("de"), null);
 });
 
 test("a line break in the address is refused, so it cannot add lines of its own", () => {

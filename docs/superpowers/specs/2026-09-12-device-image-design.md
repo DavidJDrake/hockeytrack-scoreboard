@@ -165,9 +165,37 @@ separate rendering path.
 
 `/boot/firmware/scoreboard-wifi.txt`, read on **every** boot by a root oneshot
 ordered before the main service. Format is `key=value` lines: `ssid`, `psk`,
-optional `country`, optional `hidden`.
+**required `country`**, optional `hidden`.
 
-Three requirements that are not incidental:
+**`country` is required** (changed 2026-09-18; it was optional, and that is why
+no panel ever joined a network — `docs/hardware-checks.md`, H8). It is not a
+nicety about 5 GHz channels. The image ships with the Wi-Fi radio switched
+**off**: `raspberrypi-sys-mods` boots with `rfkill.default_state=0` so nothing
+transmits before the regulatory domain is known, and pi-gen's
+`stage2/02-net-tweaks/01-run.sh` additionally writes
+`/var/lib/NetworkManager/NetworkManager.state` with `WirelessEnabled=false`
+whenever `WPA_COUNTRY` is unset at build time — which it is here, and must stay
+so, because §6.1's whole posture is that an image downloaded by strangers
+cannot know where any of them lives. Setting the country is what turns the
+radio on. So `parse_wifi_file` refuses a file that has an `ssid` and no
+`country`, naming the line to add, rather than proceeding to an `nmcli` call
+that cannot succeed and whose error nobody could trace back to a missing line
+in a text file. The site writes the line and prefills it from the browser's
+locale region, which is a starting point rather than an answer — the file's own
+comment asks the reader to check it.
+
+Applying the file is therefore four steps, in order: set the regulatory domain
+through `raspi-config`; say `nmcli radio wifi on`; wait, bounded, for the
+interface to leave `unavailable`; then connect. The explicit radio-on is there
+because `raspi-config`'s `do_wifi_country` unblocks the radio by one of two
+branches — `nmcli radio wifi on` when NetworkManager is already active, else
+`rfkill unblock wifi` plus a `sed` of `NetworkManager.state` — and which one
+runs depends on timing this service does not control. The wait is there because
+switching a radio on returns before the interface can carry a connection, and
+the boot where this file has something to do is exactly the boot where the
+radio was off a moment ago.
+
+Three further requirements that are not incidental:
 
 - **The parser tolerates CRLF line endings and a UTF-8 BOM.** The people
   editing this file are by definition on Windows or macOS, in Notepad or

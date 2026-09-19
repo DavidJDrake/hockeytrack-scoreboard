@@ -8,7 +8,7 @@
 // api.js, setupfile.js or view.js; this file only wires them up.
 import { beginSignIn, completeSignIn, forgetSignIn, logoutUrl, mayReauth, wasSignedIn } from "./auth.js";
 import { ApiError, createApi } from "./api.js";
-import { SETUP_FILE_NAME, SetupFileError, setupFileFor } from "./setupfile.js";
+import { SETUP_FILE_NAME, SetupFileError, regionFromLocale, setupFileFor } from "./setupfile.js";
 import { emailVerified, gameChoices, messageFor, panelTitle } from "./view.js";
 
 const $ = (id) => document.getElementById(id);
@@ -238,7 +238,12 @@ function renderAdd(claims) {
   if (!emailVerified(claims)) return refuse("Verify your email address before setting up a panel.");
   let text;
   try {
-    text = setupFileFor(claims.email);
+    // The country line decides whether the panel's Wi-Fi radio comes on at
+    // all, so it is prefilled from the browser's own locale when that names a
+    // region. It is a starting point, not an answer -- the comment above the
+    // line asks the reader to check it, because a browser's locale is the
+    // language someone reads in, not necessarily where the panel will live.
+    text = setupFileFor(claims.email, regionFromLocale(navigator.language));
   } catch (err) {
     if (!(err instanceof SetupFileError)) throw err;
     return refuse("Your email address cannot be written into a setup file.");
