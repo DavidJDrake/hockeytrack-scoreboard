@@ -242,6 +242,11 @@ def main() -> None:
     build = screens.build_identity()
     nm = NetworkManager()
     net_ok = False
+    # 0.0 means "poll on the first pass", which is what we want -- but the
+    # poll is at the BOTTOM of the loop, after the frame has been flipped, so
+    # the first pass paints with net_ok still False rather than waiting on
+    # nmcli to tell it otherwise. One frame of a panel that says OFFLINE is a
+    # far better first boot than up to 30 s of a panel that says nothing.
     last_net_check = 0.0
     NET_POLL_S = 10
 
@@ -368,18 +373,6 @@ def main() -> None:
                         pygame.quit()
                         sys.exit(0)
             now_ms = int(time.time() * 1000)
-            # While MQTT is connected there is demonstrably a network, so the
-            # scoreboard path costs no nmcli calls at all. Only a panel that
-            # isn't working asks the radio, and then only every 10 seconds.
-            if link_ok:
-                net_ok, last_net_check = True, time.time()
-            elif time.time() - last_net_check >= NET_POLL_S:
-                last_net_check = time.time()
-                try:
-                    net_ok = nm.status().online
-                except Exception as e:  # nmcli absent on a desktop, or failing
-                    log.debug("network status unavailable: %s", e)
-                    net_ok = False
             if panel is not None and panel.pending is not None:
                 new_status = carry_out(panel, nm, cfg, enroll_stop)
                 if new_status is not None:
@@ -409,6 +402,35 @@ def main() -> None:
                 frame.blit(dim, (0, 0))
             present(screen, frame, place)
             pygame.display.flip()
+            # The network poll goes AFTER the frame, and that ordering is the
+            # whole point of it being here rather than above.
+            #
+            # nm.status() is three nmcli calls. They are bounded now (10 s
+            # each; see netcfg.status), but 30 s of bounded waiting in front
+            # of the first flip is still half a minute of black panel, on the
+            # one boot where a new owner is watching and has been told the
+            # panel may look dead. Polling after the flip means the FIRST
+            # frame -- and every frame -- is painted before any nmcli call is
+            # made, so a slow or wedged nmcli can only ever delay the next
+            # frame, never the first.
+            #
+            # What it costs: net_ok is one frame stale, 100 ms at 10 Hz,
+            # against a poll interval of 10 s. net_ok is read in exactly one
+            # place (screens.screen_for, below) and nowhere else, which is
+            # what makes the move safe rather than merely appealing.
+            #
+            # While MQTT is connected there is demonstrably a network, so the
+            # scoreboard path costs no nmcli calls at all. Only a panel that
+            # isn't working asks the radio, and then only every 10 seconds.
+            if link_ok:
+                net_ok, last_net_check = True, time.time()
+            elif time.time() - last_net_check >= NET_POLL_S:
+                last_net_check = time.time()
+                try:
+                    net_ok = nm.status().online
+                except Exception as e:  # nmcli absent on a desktop, or failing
+                    log.debug("network status unavailable: %s", e)
+                    net_ok = False
             clock.tick(10)
     finally:
         enroll_stop.set()

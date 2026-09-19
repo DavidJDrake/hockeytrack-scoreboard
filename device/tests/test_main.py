@@ -312,6 +312,94 @@ def test_enrollment_does_not_start_when_a_fixture_is_set(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------
+# The first frame, and what it is allowed to wait behind
+#
+# netcfg.status() lost its timeout for one round and the render loop polled it
+# before its first draw, so a wedged nmcli meant a panel that was black for
+# good (scoreboard.service has Restart=always but no WatchdogSec). The timeout
+# is back, but a bound of 10 s x 3 queries is still up to 30 s in front of the
+# first flip -- on exactly the boot where a new owner is watching a dark panel
+# and has been told to leave it powered on. So the poll now runs after the
+# frame, not before it.
+# --------------------------------------------------------------------------
+
+
+def one_pass_then_quit(monkeypatch):
+    """Let the render loop complete one whole pass, then quit on the next."""
+    passes = {"n": 0}
+
+    def fake_get(*a, **k):
+        passes["n"] += 1
+        if passes["n"] == 1:
+            return []           # pass one runs the loop body end to end
+        return [pygame.event.Event(pygame.QUIT)]
+
+    monkeypatch.setattr(pygame.event, "get", fake_get)
+    return passes
+
+
+def test_the_first_frame_is_painted_before_the_first_network_poll(tmp_path, monkeypatch):
+    # The ordering, asserted on the real loop rather than read off the source.
+    # An unprovisioned panel with no MQTT link is the first-boot case: nothing
+    # sets link_ok, so the poll fires on the very first pass.
+    monkeypatch.setenv("SCOREBOARD_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("SDL_VIDEODRIVER", "dummy")
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("SCOREBOARD_FIXTURE", raising=False)
+    monkeypatch.setattr(main_module, "enrollment_thread", lambda *a, **k: None)
+
+    order = []
+
+    class Recorder:
+        def status(self, *a, **k):
+            order.append("status")
+            raise NetworkError("no nmcli here")
+
+        def scan(self, *a, **k):
+            raise NetworkError("no nmcli here")
+
+    monkeypatch.setattr(main_module, "NetworkManager", Recorder)
+
+    real_flip = pygame.display.flip
+
+    def flip():
+        order.append("flip")
+        real_flip()
+
+    monkeypatch.setattr(pygame.display, "flip", flip)
+    one_pass_then_quit(monkeypatch)
+
+    main_module.main()
+
+    assert "flip" in order, "the render loop never painted a frame"
+    assert "status" in order, "the network poll never ran, so the order proves nothing"
+    assert order.index("flip") < order.index("status"), \
+        f"the first network poll ran before the first frame: {order}"
+
+
+def test_a_network_poll_that_fails_does_not_stop_the_panel_painting(tmp_path, monkeypatch):
+    # The poll moved below the flip; it must still be inside the try. An
+    # nmcli that is absent (a desktop) or wedged is a debug line, not a crash.
+    monkeypatch.setenv("SCOREBOARD_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("SDL_VIDEODRIVER", "dummy")
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("SCOREBOARD_FIXTURE", raising=False)
+    monkeypatch.setattr(main_module, "enrollment_thread", lambda *a, **k: None)
+
+    class Exploding:
+        def status(self, *a, **k):
+            raise RuntimeError("nmcli is not installed")
+
+        def scan(self, *a, **k):
+            raise RuntimeError("nmcli is not installed")
+
+    monkeypatch.setattr(main_module, "NetworkManager", Exploding)
+    one_pass_then_quit(monkeypatch)
+
+    main_module.main()  # must return rather than raise
+
+
+# --------------------------------------------------------------------------
 # Which way up the panel is mounted
 #
 # Three places can say, and they have to be ordered once, in one place, or
