@@ -1132,8 +1132,10 @@ anybody touching the panel:
 | Off because | Comes back when |
 |---|---|
 | The game is further away than the countdown lead | the window opens, or the owner chooses another game |
+| The game never started — more than 2 h past its scheduled start with no LIVE document | any state update arrives (LIVE or otherwise), or the owner chooses a game |
 | The final hold has run out | the owner chooses a game, or a new state arrives |
 | No game is selected, past the grace period | the owner chooses a game, or a state arrives |
+| A state this build does not recognize has been up for 2 h | any state update arrives, or the owner chooses a game |
 | Inside the owner's sleep hours | the window ends, or a live game starts |
 
 Three timings the owner will be able to set, with the defaults a panel runs
@@ -1145,13 +1147,40 @@ on until it is told otherwise:
 | Final hold | 3 hours | How long a final score stays up, measured from the moment **this panel first saw the game go final** — the state document carries no end timestamp, and the Pi's own wall clock cannot be trusted to compare against `asOf`. Then off. |
 | Sleep hours | unset | A daily local-time window (may cross midnight) in an explicitly chosen IANA zone. A **live game overrides it**; a countdown and a final hold do not, and resume by themselves when the window ends if they are still due. |
 
-Two further rules that are the panel's own, not settings:
+Three further rules that are the panel's own, not settings:
 
 - **Grace period, 5 minutes.** After anything the owner caused or needs to
   see — boot, a game chosen or cleared, a game going final — the relevant
   screen stays up for five minutes whatever the hour, then the rules above
   apply. It exists so that somebody who has just clicked something on the
   site, or just powered the panel on, sees that it was heard.
+  **Decision, 2026-09-19: the grace beats sleep hours**, deliberately. An
+  owner choosing a game at one in the morning is plainly awake and is
+  looking at the panel for an answer; a panel that stayed dark because of
+  the hour would read as "the site did not reach it", which is the very
+  confusion this whole change exists to remove. Five minutes later it is
+  dark again.
+- **Staleness bound, 2 hours.** A countdown is not only late-bounded but
+  early-bounded: past two hours after the scheduled start with no LIVE
+  document, the game is treated as not happening and the panel goes off.
+  This matters because of what the panel would otherwise show. Past a start
+  that has passed, `GameState.seconds_to_start` floors at zero and
+  `render.draw` paints **`PUCK DROP` / `00:00:00`** — the same frame five
+  minutes and five days later — and a postponed or cancelled game sends
+  nothing further, so it would have stayed there for ever. That is the
+  owner's own complaint pointing the other way. Two hours because games
+  start a few minutes late routinely and an ice or weather delay can run an
+  hour or more; a shorter bound would switch the panel off on a game that is
+  merely late. It is measured on the wall clock against the document's own
+  `start` (not from when the panel noticed), so a panel powered on the
+  morning after a postponed game shows it for the boot grace and is then
+  off, rather than earning a fresh two hours for having only just booted.
+  **A state this build does not recognize** falls under the same bound, from
+  when it arrived: shown — a panel that hides what it does not understand
+  cannot be diagnosed by anybody looking at it — and then off. Unknown
+  states fail lit-then-off, never lit for ever. (The reducer only ever emits
+  PRE, LIVE and FINAL, so this is a document that did not come through it,
+  or this build talking to a newer cloud.)
 - **The screens that ask for help are never off**, in or out of sleep hours:
   not registered, the pairing code, enrollment failing, no network. A panel
   that cannot say "I have no network" cannot be fixed by the person standing
@@ -1163,10 +1192,12 @@ off: a whole-frame offset of at most 4 px that steps round a fixed
 eight-point ring every seven minutes, in the 1920×480 drawing space before
 the frame is turned for the panel. It never moves the frame downward,
 because the game layout's real bottom margin is zero with two penalties a
-side. Sleep hours are the only thing here that needs wall-clock local time,
-and they are not in effect until `/run/systemd/timesync/synchronized`
-exists; every other duration is measured on `time.monotonic()`, because this
-board has no RTC and NTP may step the clock hours forward after boot.
+side. Sleep hours and the two window edges measured against a game's `start`
+are the only things here that need wall-clock time, and none of them is in
+effect until `/run/systemd/timesync/synchronized` exists; every duration —
+the final hold, the grace, the staleness bound, the shift's schedule — is
+measured on `time.monotonic()`, because this board has no RTC and NTP may
+step the clock hours forward after boot.
 
 **What the next session should watch for:**
 
@@ -1185,9 +1216,16 @@ board has no RTC and NTP may step the clock hours forward after boot.
    room for a quarter of an hour: nothing should be seen to move. Then
    photograph the same screen seven minutes apart from a fixed position and
    confirm the frame really did move a few pixels.
-5. **The pairing code and "No network" never switch off**, including
+5. **A postponed game does not leave `00:00:00` on the wall.** The awkward
+   one to arrange deliberately, so take it when the schedule offers it: a
+   game that is postponed, or simply one whose LIVE document never arrives,
+   should count down to zero, sit there a while, and be off two hours after
+   the scheduled start. Worth checking on the morning after, too — a panel
+   booted onto last night's stale pre-game document should show it only for
+   the five-minute grace.
+6. **The pairing code and "No network" never switch off**, including
    overnight if sleep hours are set once they can be delivered.
-6. **Nothing is dark that should not be.** Anything the panel does that
+7. **Nothing is dark that should not be.** Anything the panel does that
    looks dead is a finding, whether or not it matches the table above.
 
 **Follow-up: can the display itself be put to sleep?** "Off" today is a

@@ -161,7 +161,11 @@ Cost: a heartbeat every 5 s per live game ≈ 720 invocations per game-hour;
   with a small "no link" glyph. The service restarts on crash.
 - Pre-game (`state: PRE`): puck-drop countdown from `start`, shown once the
   game is inside the countdown lead (default 2 h) and never interrupted
-  while it runs. Post-game: FINAL held with the final score for the final
+  while it runs. That window also closes 2 h after the scheduled start if no
+  LIVE document ever arrives, so a postponed or cancelled game does not
+  leave `PUCK DROP 00:00:00` on the wall indefinitely; a state this build
+  does not recognize is shown under the same bound — lit, then off, never
+  lit for ever. Post-game: FINAL held with the final score for the final
   hold (default 3 h), measured from the moment this panel first saw the game
   end. The screen is black outside those windows, when no game is selected
   (after a five-minute grace, so whoever just chose or cleared one sees that
