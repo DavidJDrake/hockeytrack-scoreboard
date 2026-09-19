@@ -329,3 +329,95 @@ def test_the_journal_drop_in_sorts_after_the_volatile_one():
 def test_the_stage_documents_its_tmpfs_assumption():
     run = (PIGEN / "stage-scoreboard" / "01-install" / "00-run.sh").read_text()
     assert "tmpfs" in run
+
+
+LISTENERS_RUN = PIGEN / "stage-scoreboard" / "05-no-listeners" / "00-run.sh"
+
+# What the panel needs from a network is DHCP, DNS, NTP and outbound TLS. Each
+# of these answered, radiated or armed something beyond that on a real v0.1.2
+# boot or in the v0.1.3 build log. `ssh` is the metapackage, named so that
+# purging openssh-server does not leave apt to decide.
+PURGED_FOR_NETWORK_SURFACE = (
+    "avahi-daemon", "libnss-mdns", "bluez", "bluez-firmware", "rpi-usb-gadget",
+    "ssh-import-id", "rpi-update", "openssh-server", "openssh-sftp-server",
+    "openssh-client", "ssh",
+)
+MASKED_FOR_NETWORK_SURFACE = (
+    "avahi-daemon.service", "avahi-daemon.socket", "bluetooth.service",
+    "sshswitch.service", "ssh.service", "ssh.socket", "sshd.service", "sshd.socket",
+)
+
+
+def test_the_stage_purges_every_listener_package():
+    # Purge, not remove, for the same reason 03-no-remote-access gives: a
+    # removed-but-not-purged package keeps its stanza in /var/lib/dpkg/status,
+    # which is the signal tools/image-gate.sh reads.
+    run = LISTENERS_RUN.read_text()
+    assert "on_chroot" in run
+    assert "apt-get purge" in run
+    assert "DEBIAN_FRONTEND=noninteractive" in run
+    assert "apt-get remove" not in run
+    for package in PURGED_FOR_NETWORK_SURFACE:
+        assert re.search(rf"(?<![\w.+-]){re.escape(package)}(?![\w.+-])", run), \
+            f"{package} is no longer purged"
+    # pi-gen skips a sub-stage script that is not executable, silently.
+    assert os.access(LISTENERS_RUN, os.X_OK), f"{LISTENERS_RUN} must be executable or pi-gen skips it"
+
+
+def test_the_stage_masks_what_it_cannot_purge_away_for_good():
+    # A mask on a purged package is not redundant: it is what stops the unit
+    # being enabled if the package ever returns, because systemctl refuses to
+    # enable a masked unit. sshswitch.service is the one whose package stays --
+    # raspberrypi-sys-mods is load-bearing -- and it reads the boot partition.
+    run = LISTENERS_RUN.read_text()
+    assert "/dev/null" in run
+    for unit in MASKED_FOR_NETWORK_SURFACE:
+        assert unit in run, f"{unit} is no longer masked"
+
+
+def test_the_stage_and_the_gate_agree_on_the_purged_and_masked_sets():
+    # If the two drift, the stage stops removing something the gate still
+    # refuses -- which fails a release build thirty-five minutes in rather
+    # than being cleaned by the stage that exists to clean it.
+    gate = GATE.read_text()
+    for package in PURGED_FOR_NETWORK_SURFACE:
+        assert package in gate, f"the gate no longer checks {package}"
+    for unit in MASKED_FOR_NETWORK_SURFACE:
+        assert unit in gate, f"the gate no longer asserts the mask on {unit}"
+
+
+def test_the_stage_turns_the_bluetooth_radio_off_in_the_device_tree():
+    # Purging bluez stops the daemon, not the radio: the kernel attaches the
+    # adapter from the device tree over HCI UART, and pi-bluetooth (which
+    # would ship hciuart.service) is not installed, so there is no attach unit
+    # to mask. disable-bt sets the &bt node to disabled, which is the only
+    # place the radio can actually be switched off.
+    run = LISTENERS_RUN.read_text()
+    assert "dtoverlay=disable-bt" in run
+    assert "boot/firmware/config.txt" in run
+    # pi-gen's stage2/02-net-tweaks writes 0 (unblocked) into a systemd-rfkill
+    # state file per known on-board address; 1 is blocked.
+    assert ":bluetooth" in run
+    assert "echo 1 >" in run
+
+
+def test_the_wifi_firmware_is_not_what_the_stage_removes():
+    # bluez-firmware ships Bluetooth HCI patch files only. The firmware the
+    # panel cannot join a network without -- brcmfmac43455-sdio on the Pi 4,
+    # brcmfmac43436-sdio on the Zero 2 W -- is in firmware-brcm80211, and
+    # removing it would brick every panel.
+    run = LISTENERS_RUN.read_text()
+    assert "firmware-brcm80211" not in PURGED_FOR_NETWORK_SURFACE
+    assert "firmware-brcm80211" in run, "the stage no longer says which firmware must stay"
+    for load_bearing in ("firmware-brcm80211", "raspberrypi-sys-mods", "network-manager",
+                         "libbluetooth3"):
+        assert load_bearing not in PURGED_FOR_NETWORK_SURFACE
+
+
+def test_the_stage_recreates_the_sshd_config_directory_pi_gen_writes_into():
+    # export-image/01-user-rename runs rename-user AFTER this stage, and it
+    # unconditionally writes /etc/ssh/sshd_config.d/rename_user.conf. Purging
+    # openssh-server takes that directory away with it.
+    run = LISTENERS_RUN.read_text()
+    assert "/etc/ssh/sshd_config.d" in run
+    assert "rename-user" in run
