@@ -24,7 +24,7 @@ from .display import display_failure, parse_size, placement, present
 from .link import Link
 from .model import GameState, parse_chosen_at, parse_today, parse_config
 from .netcfg import NetworkError, NetworkManager, Status, owner_hint, rotate_hint
-from .render import H, W, draw, shift_frame
+from .render import H, STALE_FRAME_S, W, draw, shift_frame
 from .reset import factory_reset
 from .settings import Settings
 
@@ -52,6 +52,8 @@ log = logging.getLogger("scoreboard")
 #   after the final hold          -> the owner's re-send, or a state change
 #   no game, past the grace       -> the owner chooses, or a state arrives
 #   inside sleep hours            -> the window ends, or a live game starts
+#   a LIVE document nobody has    -> ANY fresh document, or the owner's
+#   refreshed for 2 h                re-send (see live_and_fresh)
 #
 # Note what is NOT on that list: "any update". changed_at moves only when the
 # state NAME changes, so a reducer republishing the same stale document does
@@ -465,8 +467,27 @@ def _complain_once(key: str, message: str, *args) -> None:
         log.warning(message + " (%s)", *args, key)
 
 
+def live_and_fresh(state: GameState | None, state_age: float | None) -> bool:
+    """Is there a live game on this panel *right now*?
+
+    The one predicate behind "a live game wins": it is what earns the
+    exemption from sleep hours, and what screens.screen_for is given as
+    ``live_game``. Both used to be told "state.state in IN_PLAY", with
+    nothing at all bounding how old that document was, so a LIVE document
+    left behind by a Wi-Fi drop in the second period pinned the panel lit at
+    3 a.m. for as many nights as it took somebody to notice.
+
+    ``state_age`` is seconds since this panel received the document, on the
+    monotonic clock. None means no document has arrived for what is on
+    screen, which is not freshness either.
+    """
+    return (state is not None and state.state in IN_PLAY
+            and state_age is not None and state_age < STALE_FRAME_S)
+
+
 def presentation(now: float, now_utc: datetime | None, screen: str,
-                 state: GameState | None, final_seen: float | None,
+                 state: GameState | None, state_age: float | None,
+                 final_seen: float | None,
                  last_change: float, display: Display) -> Presentation:
     """The one decision the render loop obeys: what to draw, and where.
 
@@ -477,18 +498,23 @@ def presentation(now: float, now_utc: datetime | None, screen: str,
     ``final_seen`` and ``last_change`` come from ``final_seen_at`` and
     ``changed_at``. The order of the rules below is the whole design:
 
+    ``state_age`` is how long ago the document in ``state`` arrived, on the
+    monotonic clock, or None if none ever has.
+
     1. A screen asking the owner for something is never off, and never
        asleep. A panel that cannot say "I have no network" is just broken.
-    2. A live game beats everything, including sleep hours: the late game on
-       the west coast is exactly what somebody bought a wall panel for.
+    2. A live game -- LIVE *and* a document less than STALE_FRAME_S old --
+       beats everything, including sleep hours: the late game on the west
+       coast is exactly what somebody bought a wall panel for.
     3. Anything the owner just did, or needs to see, gets GRACE_S on screen
        whatever the hour -- an owner choosing a game at one in the morning is
        plainly awake, and needs to see that the panel heard them.
     4. Sleep hours.
-    5. Then, and only then, the windows: a countdown from ``countdown_lead_s``
-       before puck drop until STALE_AFTER_S after it, a final for
-       ``final_hold_s`` after this panel first saw it, and an unrecognized
-       state for STALE_AFTER_S after it arrived.
+    5. Then, and only then, the windows: a LIVE document that has stopped
+       arriving for up to STALE_AFTER_S, a countdown from
+       ``countdown_lead_s`` before puck drop until STALE_AFTER_S after it, a
+       final for ``final_hold_s`` after this panel first saw it, and an
+       unrecognized state for STALE_AFTER_S after it arrived.
     """
     shift = shift_at(now)
     within_grace = now - last_change < GRACE_S
@@ -506,10 +532,39 @@ def presentation(now: float, now_utc: datetime | None, screen: str,
                 and asleep(now_utc, display.sleep):
             return Presentation(OFF, (0, 0))
         return Presentation(MESSAGE, shift)
-    if state is not None and state.state in IN_PLAY:
+    if live_and_fresh(state, state_age):
         return Presentation(GAME, shift)
     if not within_grace and asleep(now_utc, display.sleep):
         return Presentation(OFF, (0, 0))
+    if state is not None and state.state in IN_PLAY:
+        # A LIVE document that has stopped arriving. It degrades in two
+        # steps, and this is the second one.
+        #
+        # Past STALE_FRAME_S it is already below sleep hours -- that is what
+        # the branch order above does -- so the ordinary overnight case is
+        # dark at 3 a.m. whatever this decides. It is still SHOWN, frozen at
+        # its own numbers with the banner saying how old they are, because a
+        # scoreboard that is true as of a stated moment is worth more than a
+        # black panel to anybody in the room.
+        #
+        # But not for ever. STALE_AFTER_S -- the same two hours that already
+        # mean "this has gone on too long to be real" for a game that never
+        # started and for a state this build cannot read -- and then it is
+        # nothing due, and goes off like anything else with nothing true to
+        # show. Two hours because a real live game refreshes every five
+        # seconds, so anything approaching it is already a long way past
+        # doubt; the shorter bound is doing the work here, and this one is
+        # only the backstop against a lit wall.
+        #
+        # The ways back, all of which need nobody at the panel: any fresh
+        # document (the age resets and rule 2 applies again from the next
+        # frame), or the owner's re-send, which restarts the grace below. A
+        # LIVE state with no arrival time at all (state_age None) cannot
+        # happen from the link -- the loop stamps every document it accepts
+        # -- and is treated as past the bound rather than as news.
+        age = state_age if state_age is not None else STALE_AFTER_S
+        return Presentation(GAME, shift) if age < STALE_AFTER_S or within_grace \
+            else Presentation(OFF, (0, 0))
     if state is None:
         return Presentation(NO_GAME, shift) if within_grace else Presentation(OFF, (0, 0))
     if state.state in OVER:
@@ -744,10 +799,14 @@ def main() -> None:
         with open(fixture, "rb") as f:
             current = GameState.from_json(f.read())
         following = current.game_id
+        state_received_at = time.monotonic()
 
     def select(game_id):
-        nonlocal following, current, last_change
+        nonlocal following, current, last_change, state_received_at
+        # The arrival time belongs to the document that has just been thrown
+        # away, not to whatever arrives for the new game.
         following, current, last_change = game_id, None, time.monotonic()
+        state_received_at = None
         if cfg:
             cfg.save_game_id(game_id)
         if link:
@@ -916,27 +975,39 @@ def main() -> None:
             if fixture:
                 # The desktop preview exists to be looked at, and its fixture
                 # never changes. Hold it inside the grace period so the frame
-                # somebody is inspecting does not switch itself off.
-                last_change = mono
+                # somebody is inspecting does not switch itself off -- and
+                # hold the document fresh, so the clock keeps running and no
+                # banner is thrown across the frame being inspected. It is
+                # the one case where "nothing is arriving" is not news.
+                last_change = state_received_at = mono
             if panel is not None and panel.pending is not None:
                 new_status = carry_out(panel, nm, cfg, enroll_stop)
                 if new_status is not None:
                     status = new_status
+            # How old the document on screen is, and the one value three
+            # different decisions are made from: whether the renderer freezes
+            # its clocks and draws the banner, whether this still counts as a
+            # live game for screen_for, and whether presentation lets it beat
+            # sleep hours. One number, so the three can never disagree.
+            state_age = None if state_received_at is None else mono - state_received_at
             # The settings screen is somebody standing at the panel with a
             # keyboard, so it counts as a screen that must not switch itself
             # off mid-sentence -- presentation exempts everything that is not
             # the scoreboard.
-            # A live game keeps the panel even when the link has gone:
-            # the frozen frame and its banner say everything the help
-            # screen would, over a scoreboard that is still true as of a
-            # stated moment. See screens.screen_for.
+            # A live game keeps the panel even when the link has gone -- the
+            # frozen frame and its banner say everything the help screen
+            # would, over a scoreboard that is still true as of a stated
+            # moment -- but only while its document is fresh. With the link
+            # down the document can only get older, so the exemption expires
+            # by itself and the help screen gets its turn. See
+            # screens.screen_for.
             showing = (screens.SETTINGS if panel is not None else
                        screens.screen_for(cfg is not None or bool(fixture),
                                           net_ok or bool(fixture), enroll_state,
                                           needs_link_help(link_down_since, mono,
                                                           LINK_HELP_AFTER_S),
-                                          current is not None and current.state in IN_PLAY))
-            now_showing = presentation(mono, now_utc, showing, current,
+                                          live_and_fresh(current, state_age)))
+            now_showing = presentation(mono, now_utc, showing, current, state_age,
                                        final_seen, last_change, display)
             # The guard of last resort. Everything inside is drawing, and
             # almost all of it draws text this panel was handed by somebody
@@ -974,7 +1045,7 @@ def main() -> None:
                     # whose start it cannot read.
                     draw(frame, None if now_showing.show == NO_GAME else current,
                          now_ms, assets, link_ok, clock_ok=now_utc is not None,
-                         stale_s=None if state_received_at is None else mono - state_received_at)
+                         stale_s=state_age)
             except Exception as e:
                 # Once per distinct failure, not once per frame: at 10 Hz
                 # the second kind fills the journal in an afternoon, and the

@@ -16,10 +16,10 @@ from scoreboard.main import (COUNTDOWN, FINAL, GAME, GRACE_S, IGNORE,
                              LINK_HELP_AFTER_S, MESSAGE, NO_GAME, OFF, REARM,
                              SELECT, STALE_AFTER_S, Display, Sleep, asleep,
                              carry_out, changed_at, clock_synced,
-                             config_action, final_seen_at, needs_link_help,
-                             presentation, shift_at)
+                             config_action, final_seen_at, live_and_fresh,
+                             needs_link_help, presentation, shift_at)
 from scoreboard.model import GameState
-from scoreboard.render import H, W
+from scoreboard.render import H, STALE_FRAME_S, W
 from scoreboard.netcfg import NetworkError, WifiSettings
 from scoreboard.settings import RESULT, Settings
 
@@ -61,10 +61,15 @@ LONG_AGO = -100_000.0   # a last_change far enough back that no grace is left
 
 
 def shown(now=0.0, now_utc=None, screen=screens.SCOREBOARD, state=None,
-          final_seen=None, last_change=LONG_AGO, display=DEFAULTS):
+          state_age=0.0, final_seen=None, last_change=LONG_AGO, display=DEFAULTS):
     """presentation() with the panel's ordinary condition filled in, so each
-    test says only what it is actually about."""
-    return presentation(now, now_utc, screen, state, final_seen, last_change, display)
+    test says only what it is actually about.
+
+    ``state_age`` defaults to 0.0 -- a document that has just arrived -- so
+    every test that is not about staleness reads as it always did.
+    """
+    return presentation(now, now_utc, screen, state, state_age, final_seen,
+                        last_change, display)
 
 
 def before_puck_drop(hours: float) -> datetime:
@@ -105,6 +110,100 @@ def test_a_live_game_beats_sleep_hours():
     assert asleep(at_one_am, night)
     assert shown(now_utc=at_one_am, state=live_state(),
                  display=Display(sleep=night)).show == GAME
+
+
+# --------------------------------------------------------------------------
+# A LIVE document that stopped arriving
+#
+# N-1/N-2/N-3. "Stale" is the age of the DOCUMENT, not the state of the
+# socket. The cloud reducer republishes a live game's clock heartbeat about
+# every five seconds, all the way through intermissions
+# (cloud/internal/reduce/reduce.go: the nhl.game.clock fold always reports
+# changed), so a live document that has not been refreshed in half a minute
+# is not being updated -- whether that is because the socket is down (the old
+# link_ok test), because the reducer is erroring, because the feed died, or
+# because the broker just replayed a retained document that was already old.
+#
+# What was wrong: screen_for kept a live game on the scoreboard whenever the
+# link was down, presentation tested `state in IN_PLAY` BEFORE sleep hours,
+# and nothing bounded how old that document could be. Measured on this code
+# at 3 a.m. inside a 23:00-07:00 window with the link dead, the decision was
+# still "game" after 1 h, 9 h, 48 h and 720 h. A frame whose own banner says
+# "660 MIN OLD" is not a live game.
+# --------------------------------------------------------------------------
+
+
+AT_THREE_AM = datetime(2026, 10, 2, 10, 0, tzinfo=timezone.utc)   # 03:00 PDT
+
+
+def test_only_a_fresh_live_document_counts_as_a_live_game():
+    # The one predicate both the decision and screens.screen_for are given,
+    # so "a live game wins" can never again mean "a document from last night
+    # wins".
+    assert live_and_fresh(live_state(), 0.0)
+    assert live_and_fresh(live_state(), STALE_FRAME_S - 1)
+    assert not live_and_fresh(live_state(), STALE_FRAME_S)
+    assert not live_and_fresh(live_state(), None), "no document has arrived at all"
+    assert not live_and_fresh(final_state(), 0.0)
+    assert not live_and_fresh(None, 0.0)
+
+
+def test_a_stale_live_game_no_longer_beats_sleep_hours():
+    # The defect, in the shape it takes in a house: Wi-Fi drops in the second
+    # period, the game ends, FINAL never arrives, and the panel shows a frozen
+    # mid-game frame at full brightness every night. final_seen_at only fires
+    # for FINAL, so the three-hour hold never engages.
+    night = Display(sleep=NIGHT)
+    assert asleep(AT_THREE_AM, NIGHT)
+    assert shown(now_utc=AT_THREE_AM, state=live_state(), state_age=0.0,
+                 display=night).show == GAME
+    assert shown(now_utc=AT_THREE_AM, state=live_state(),
+                 state_age=STALE_FRAME_S - 1, display=night).show == GAME
+    for age in (STALE_FRAME_S, 3600.0, 9 * 3600.0, 48 * 3600.0, 720 * 3600.0):
+        assert shown(now=age, now_utc=AT_THREE_AM, state=live_state(),
+                     state_age=age, display=night).show == OFF, age
+
+
+def test_a_stale_live_game_is_shown_frozen_and_then_stops_being_a_game():
+    # Two steps, deliberately. Past the first threshold it is still on the
+    # wall -- frozen, with the banner saying how old it is -- because a
+    # scoreboard that is true as of a stated moment is worth more than a
+    # black panel. Past the second it is no longer a live game at all.
+    for age in (STALE_FRAME_S, 60.0, 3600.0, STALE_AFTER_S - 1):
+        assert shown(now=age, state=live_state(), state_age=age).show == GAME, age
+    for age in (STALE_AFTER_S, 48 * 3600.0, 720 * 3600.0):
+        assert shown(now=age, state=live_state(), state_age=age).show == OFF, age
+
+
+def test_a_fresh_document_brings_a_stale_live_game_straight_back():
+    # The first way back, and it needs nobody at the panel: one document.
+    old = 720 * 3600.0
+    assert shown(now=old, state=live_state(), state_age=old).show == OFF
+    assert shown(now=old, state=live_state(), state_age=0.0).show == GAME
+    assert shown(now=old, now_utc=AT_THREE_AM, state=live_state(), state_age=0.0,
+                 display=Display(sleep=NIGHT)).show == GAME, \
+        "a game that is live again must beat sleep hours again"
+
+
+def test_the_owners_re_send_brings_a_stale_live_game_back_for_the_grace():
+    # The second way back: Show on panel, which restarts the grace. Five
+    # minutes of the frozen frame and its banner, and then dark again --
+    # because nothing has actually arrived.
+    old = 720 * 3600.0
+    assert shown(now=old, state=live_state(), state_age=old, last_change=old).show == GAME
+    assert shown(now=old + GRACE_S, state=live_state(), state_age=old,
+                 last_change=old).show == OFF
+
+
+def test_a_stale_live_game_does_not_suppress_the_help_screen_for_ever():
+    # screen_for's live_game argument is now "LIVE and fresh". With the link
+    # down the document can only get older, so the exemption expires and the
+    # panel says "cannot reach the service" instead of holding a frozen frame
+    # for ever.
+    assert screens.screen_for(True, True, link_down=True, live_game=True) == screens.SCOREBOARD
+    assert screens.screen_for(True, True, link_down=True, live_game=False) == screens.NO_SERVICE
+    assert shown(now=3600.0, screen=screens.NO_SERVICE, state=live_state(),
+                 state_age=3600.0).show == MESSAGE
 
 
 # --------------------------------------------------------------------------
@@ -621,16 +720,20 @@ def every_condition():
         for state in (None, live_state(), pregame_state(), pregame_state(start=None),
                       pregame_state(start="not a timestamp"),
                       final_state(), off_state(), odd_state()):
-            for now_utc in (None, before_puck_drop(20), before_puck_drop(6),
-                            before_puck_drop(1), PUCK_DROP + timedelta(days=3),
-                            datetime(2026, 10, 2, 8, 0, tzinfo=timezone.utc)):
-                for final_seen in (None, 0.0):
-                    for last_change in (0.0, LONG_AGO):
-                        for display in SETTINGS_SWEPT:
-                            for now in (0.0, GRACE_S, 10 * 3600.0):
-                                yield dict(now=now, now_utc=now_utc, screen=screen,
-                                           state=state, final_seen=final_seen,
-                                           last_change=last_change, display=display)
+            # Just arrived; too old to draw as live; past the bound that
+            # says it was never going to come back.
+            for state_age in (0.0, STALE_FRAME_S, STALE_AFTER_S):
+                for now_utc in (None, before_puck_drop(20), before_puck_drop(6),
+                                before_puck_drop(1), PUCK_DROP + timedelta(days=3),
+                                datetime(2026, 10, 2, 8, 0, tzinfo=timezone.utc)):
+                    for final_seen in (None, 0.0):
+                        for last_change in (0.0, LONG_AGO):
+                            for display in SETTINGS_SWEPT:
+                                for now in (0.0, GRACE_S, 10 * 3600.0):
+                                    yield dict(now=now, now_utc=now_utc, screen=screen,
+                                               state=state, state_age=state_age,
+                                               final_seen=final_seen,
+                                               last_change=last_change, display=display)
 
 
 def why_it_could_be_dark(case) -> dict:
@@ -669,6 +772,9 @@ def why_it_could_be_dark(case) -> dict:
             name is not None and name not in main_module.PREGAME
             and name not in main_module.OVER and name not in main_module.IN_PLAY
             and stale,
+        "a live document stopped arriving":
+            name in main_module.IN_PLAY
+            and (case["state_age"] is None or case["state_age"] >= STALE_AFTER_S),
     }
 
 
@@ -695,12 +801,19 @@ def test_the_panel_is_only_ever_dark_for_a_stated_reason():
             assert asleep(case["now_utc"], case["display"].sleep), \
                 "the service-unreachable screen went dark outside sleep hours"
             continue
-        assert name not in main_module.IN_PLAY, "a live game was switched off"
+        # N-1. Not "a live game is never switched off" -- that assertion is
+        # what forbade the fix, and it was true of a document from three
+        # nights ago. A live game whose document is ARRIVING is never
+        # switched off; one nobody is refreshing is bounded like everything
+        # else, and says so on its own face while it lasts.
+        assert not live_and_fresh(case["state"], case["state_age"]), \
+            "a live game whose document is fresh was switched off"
         assert any(why_it_could_be_dark(case).values()), f"dark for no stated reason: {case}"
-    # 7 screens x 8 states x 6 clocks x 2 sightings x 2 last-changes
-    # x 6 settings x 3 monotonic times. Stated so that a sweep that
-    # silently stops covering something is a failure, not a quiet pass.
-    assert swept == 7 * 8 * 6 * 2 * 2 * 6 * 3 == 24_192, swept
+    # 7 screens x 8 states x 3 document ages x 6 clocks x 2 sightings
+    # x 2 last-changes x 6 settings x 3 monotonic times. Stated so that a
+    # sweep that silently stops covering something is a failure, not a
+    # quiet pass.
+    assert swept == 7 * 8 * 3 * 6 * 2 * 2 * 6 * 3 == 72_576, swept
 
 
 def test_a_dark_frame_is_never_also_shifted():
@@ -843,9 +956,10 @@ def a_loop_that_receives(monkeypatch, tmp_path, script, game_id=2026020001, pass
 
     monkeypatch.setattr(pygame.event, "get", fake_get)
     main_module.main()
-    # (now, now_utc, screen, state, final_seen, last_change, display)
-    return [dict(zip(("now", "now_utc", "screen", "state", "final_seen",
-                      "last_change", "display"), args)) for args in seen]
+    # (now, now_utc, screen, state, state_age, final_seen, last_change, display)
+    return [dict(zip(("now", "now_utc", "screen", "state", "state_age",
+                      "final_seen", "last_change", "display"), args))
+            for args in seen]
 
 
 def test_re_choosing_the_same_game_restarts_the_hold_in_the_real_loop(tmp_path, monkeypatch):
@@ -1210,6 +1324,30 @@ def test_the_help_screen_outranks_the_scoreboard_but_not_no_network():
     assert screens.screen_for(True, True, link_down=True) == screens.NO_SERVICE
     assert screens.screen_for(True, False, link_down=True) == screens.OFFLINE
     assert screens.screen_for(True, True, link_down=False) == screens.SCOREBOARD
+
+
+def test_a_live_game_with_the_link_pulled_hands_over_to_the_help_screen(tmp_path, monkeypatch):
+    # N-1 through the real loop, as it happens in a house: a live game is on
+    # the wall and the Wi-Fi goes. While the document is fresh the game keeps
+    # the panel (the banner says how old the frame is). Once it is not, the
+    # exemption is gone and the panel says what is actually wrong -- instead
+    # of holding a frozen mid-game frame at full brightness until somebody
+    # unplugs it.
+    monkeypatch.setattr(main_module, "LINK_HELP_AFTER_S", 0.0)
+    live = (FIX / "state_live.json").read_bytes()
+    script = {0: [("on_state", (2026020001, live))]}
+
+    fresh = a_loop_that_receives(monkeypatch, tmp_path, script, connect=False)
+    assert fresh[1]["state"].state == "LIVE"
+    assert fresh[1]["state_age"] is not None and fresh[1]["state_age"] < STALE_FRAME_S
+    assert fresh[1]["screen"] == screens.SCOREBOARD, \
+        "a live game that is still arriving lost the panel to the help screen"
+
+    monkeypatch.setattr(main_module, "STALE_FRAME_S", -1.0)   # every document is old
+    stalled = a_loop_that_receives(monkeypatch, tmp_path, script, connect=False)
+    assert stalled[1]["state"].state == "LIVE"
+    assert stalled[1]["screen"] == screens.NO_SERVICE, \
+        "a stalled live game suppressed the help screen"
 
 
 def test_a_panel_with_no_identity_yet_is_unaffected():

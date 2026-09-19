@@ -44,16 +44,25 @@ def screen_for(has_identity: bool, has_network: bool, enrollment=None,
     is the more specific fault and the one somebody standing there can act
     on, and above the scoreboard -- with one exception, ``live_game``.
 
-    A live game keeps the panel, because the owner's rule is that a live
-    game wins and because the alternative throws away the one thing they
-    are watching. What makes that safe is that render.draw stops pretending
-    when the link goes: the clock and the penalty clocks freeze at the last
-    document's own values instead of counting down from them, and a banner
-    across the bottom says how old the frame is. That banner says everything
-    this screen would have said, over a scoreboard that is still true as of
-    a stated moment. Brief drops never get here at all; that is what the
-    threshold is for. An unregistered panel never gets here either: it has
-    no link to lose, and its own screens already say what is wrong.
+    ``live_game`` means LIVE *and* a document that is actually arriving --
+    main.live_and_fresh, not "the last document said LIVE". A live game
+    keeps the panel, because the owner's rule is that a live game wins and
+    because the alternative throws away the one thing they are watching.
+    What makes that safe is that render.draw stops pretending when the
+    documents stop: the clock and the penalty clocks freeze at the last
+    document's own values instead of counting down from them, and a band
+    says how old the frame is. That band says everything this screen would
+    have said, over a scoreboard that is still true as of a stated moment.
+    Brief drops never get here at all; that is what the threshold is for.
+
+    What the freshness test adds is an end to it. The exemption used to be
+    granted by the state name alone, so a stalled LIVE document suppressed
+    this screen for ever -- and with the link down a document can only get
+    older, so within a couple of minutes of the link help threshold the
+    panel stops holding a frozen frame and says what is wrong instead.
+
+    An unregistered panel never gets here: it has no link to lose, and its
+    own screens already say what is wrong.
     """
     if has_identity:
         if not has_network:

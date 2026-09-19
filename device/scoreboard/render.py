@@ -7,12 +7,45 @@ from .assets import Assets
 from .model import GameState, fmt_clock
 
 W, H = 1920, 480
-# Where the "NO LINK" banner's band starts. Below everything the score
-# columns draw (their lowest ink is the POWER PLAY line at y=270) and below
-# the first penalty row (its progress bar ends at y=430), so a stalled frame
-# loses nothing that matters. Inset to the same 60 px as the rule line
-# rather than bled to the edges, so the +-4 px burn-in shift cannot clip it.
-BANNER_TOP = 436
+
+# When a document that is supposed to be arriving has stopped arriving.
+#
+# The cloud reducer republishes a live game's clock heartbeat about every
+# five seconds, all the way through intermissions (the nhl.game.clock fold in
+# cloud/internal/reduce/reduce.go always reports changed), so half a minute
+# is six missed heartbeats: far above ordinary jitter, a retry or two, and a
+# broker hiccup, and far below the two minutes the old rule waited -- two
+# minutes of a period clock counting down from a moment that is receding is
+# two minutes of the panel making up a hockey game.
+#
+# It is one number for three jobs, which is the point: it decides when the
+# frame freezes, when the banner appears, and (in main) when a LIVE document
+# stops counting as a live game. "Stale" used to mean "the socket is down",
+# which was neither necessary nor sufficient for any of the three.
+STALE_FRAME_S = 30
+
+# Where the staleness band goes, and how tall it is.
+#
+# Measured against this renderer on a live frame with two penalties a side --
+# the deepest the layout ever goes -- the empty horizontal bands are y 0..75,
+# 265..281, 324..371, 374..391 and 430..443. This is the widest of them: the
+# gutter between the period label and the rule line at y=372. It costs
+# nothing at all. The band used to sit at y 436..471, which is where the
+# SECOND penalty row is drawn, so a stalled frame hid a penalty that had been
+# on the screen a moment earlier -- exactly when nothing was arriving to say
+# whether it had ended.
+#
+# Inset to the same 60 px as the rule line rather than bled to the edges, so
+# the +-4 px burn-in shift cannot clip it. On the real 400x1280 panel the
+# 1920x480 frame lands at 1280x320, so this band is about 32 physical px.
+BANNER_TOP, BANNER_H = 324, 48
+
+# The states whose documents are expected to keep arriving. A pre-game
+# document is written once and a final one stops for good -- that is what a
+# final IS -- so their age says nothing and neither may ever carry the
+# banner, or the panel would accuse the cloud of failing every time a game
+# ended.
+STATIC_STATES = ("PRE", "FINAL", "OFF")
 INK = (250, 250, 250)
 MUTED = (150, 158, 168)
 BG = (10, 10, 12)
@@ -111,16 +144,23 @@ def _penalty_rows(surface, assets, state, now_ms, y, limit=2):
 
 
 def _stale_banner(surface, assets, stale_s: float | None) -> None:
-    """How old this frame is, across the bottom of it.
+    """How old this frame is, in the gutter above the rule line.
 
     Said in minutes, and never in zeroes: "0 MIN OLD" reads as a rounding
     error rather than as news, so anything under a minute says so in words.
+
+    "NO UPDATES" rather than "NO LINK", because the socket is only one of the
+    ways this happens: the reducer can be erroring, the feed can be dead, or
+    the broker can have replayed a retained document that was already old,
+    with MQTT perfectly healthy throughout. What the panel can actually see
+    is that nothing has arrived, and that is what it says. The socket has its
+    own 8 px dot.
     """
     minutes = int((stale_s or 0) // 60)
     age = f"{minutes} MIN OLD" if minutes else "UNDER A MINUTE OLD"
-    pygame.draw.rect(surface, RULE, (60, BANNER_TOP, W - 120, H - BANNER_TOP - 8))
-    _text_fit(surface, assets, f"NO LINK - {age}", 40, W - 160, INK,
-              W // 2, BANNER_TOP + (H - BANNER_TOP - 8) // 2, "center")
+    pygame.draw.rect(surface, RULE, (60, BANNER_TOP, W - 120, BANNER_H))
+    _text_fit(surface, assets, f"NO UPDATES - {age}", 40, W - 160, INK,
+              W // 2, BANNER_TOP + BANNER_H // 2, "center")
 
 
 def draw(surface: pygame.Surface, state: GameState | None, now_ms: int, assets: Assets,
@@ -131,16 +171,23 @@ def draw(surface: pygame.Surface, state: GameState | None, now_ms: int, assets: 
     NTP. It has no RTC, so until then ``now_ms`` may be hours out, and the
     difference between a countdown and a guess is exactly this flag.
 
-    ``link_ok`` False means no document has arrived for a while and
-    ``stale_s`` says how long (monotonic, measured by main from when the
-    last one was received -- not from its asOf, which would need a clock
-    this panel may not have). A live game stays on the wall when that
-    happens, because the owner's rule is that a live game wins, but it stops
-    pretending: every clock here is derived as `seconds - (now - asOf)`, so
-    a frame nobody is updating counts a period down to 0:00 that may still
-    have ten minutes in it and quietly expires penalties that never ended.
-    They freeze at the document's own numbers, and the banner says how old
-    those numbers are. Show what is true, say what is unknown.
+    ``stale_s`` is how long ago the document on screen arrived (monotonic,
+    measured by main from when it was received -- not from its asOf, which
+    would need a clock this panel may not have), or None if none ever has.
+    Past ``STALE_FRAME_S`` the frame stops pretending: every clock here is
+    derived as `seconds - (now - asOf)`, so a frame nobody is updating counts
+    a period down to 0:00 that may still have ten minutes in it and quietly
+    expires penalties that never ended. They freeze at the document's own
+    numbers and the banner says how old those numbers are. Show what is true,
+    say what is unknown.
+
+    ``link_ok`` says one thing and only one thing: whether the MQTT socket is
+    up. It draws the 8 px dot. It used to drive the freeze as well, which was
+    wrong in both directions -- the link comes back one round trip BEFORE the
+    retained document does, so the clock unfroze and the banner vanished
+    while the frame on the glass was still eleven minutes old; and a socket
+    that stays up while the cloud goes quiet produced no banner, no freeze,
+    and a period clock counting down to 0:00 and sticking there.
     """
     surface.fill(BG)
     if state is None:
@@ -170,12 +217,19 @@ def draw(surface: pygame.Surface, state: GameState | None, now_ms: int, assets: 
         return
 
     # The moment every derived clock is measured from. Frozen at the
-    # document's own asOf while the link is down, so clock_at and
-    # penalties_at return exactly what it said. The goal flash is
-    # deliberately left on the real clock below: it is a three-second
-    # animation, and freezing it would leave a wash on the screen for ever.
-    clock_ms = now_ms if link_ok else state.as_of_ms
-    flash_team = state.last_goal[0] if state.goal_flash(now_ms) else None
+    # document's own asOf once it has gone stale, so clock_at and
+    # penalties_at return exactly what it said.
+    stale = (stale_s is not None and stale_s >= STALE_FRAME_S
+             and state.state not in STATIC_STATES)
+    clock_ms = state.as_of_ms if stale else now_ms
+    # The goal flash is deliberately left on the real clock: it is a
+    # three-second animation, and freezing it would leave a wash on the
+    # screen for ever. But it is suppressed on a stale frame -- a document
+    # nobody has refreshed for half a minute is not having a goal, and
+    # goal_flash() compares against this panel's wall clock, which on a board
+    # with no RTC may be minutes out and could fire the wash over a stalled
+    # frame, painting the band out of sight.
+    flash_team = state.last_goal[0] if not stale and state.goal_flash(now_ms) else None
     away_edge = _side(surface, assets, state.away, 60, "left", state.pp == state.away.abbrev, state.empty_net == state.away.abbrev, flash_team == state.away.abbrev)
     home_edge = _side(surface, assets, state.home, W - 60, "right", state.pp == state.home.abbrev, state.empty_net == state.home.abbrev, flash_team == state.home.abbrev)
 
@@ -204,11 +258,11 @@ def draw(surface: pygame.Surface, state: GameState | None, now_ms: int, assets: 
         _text_fit(surface, assets, f"GOAL  #{state.last_goal[1]}", 90, W - 240, INK, W // 2, 400, "center")
     else:
         pygame.draw.line(surface, RULE, (60, 372), (W - 60, 372), 2)
-        # One penalty row a side while the link is down: the second row is
-        # drawn where the banner goes, and of the two, "this frame is eleven
-        # minutes old" is the thing somebody needs to know first.
-        _penalty_rows(surface, assets, state, clock_ms, 386, limit=2 if link_ok else 1)
+        # Both penalty rows, stalled or not: the band lives in the gutter
+        # above the rule line now, so it no longer costs the second row.
+        _penalty_rows(surface, assets, state, clock_ms, 386)
 
-    if not link_ok:
+    if stale:
         _stale_banner(surface, assets, stale_s)
+    if not link_ok:
         pygame.draw.circle(surface, RED, (W - 24, 24), 8)
