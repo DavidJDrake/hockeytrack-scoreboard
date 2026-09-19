@@ -8,6 +8,7 @@
 // api.js, setupfile.js or view.js; this file only wires them up.
 import { beginSignIn, completeSignIn, forgetSignIn, logoutUrl, mayReauth, wasSignedIn } from "./auth.js";
 import { ApiError, createApi } from "./api.js";
+import { reformat } from "./claimcode.js";
 import { SETUP_FILE_NAME, SetupFileError, countryNoteFor, regionFromLocale, setupFileFor } from "./setupfile.js";
 import { emailVerified, gameChoices, messageFor, panelTitle } from "./view.js";
 
@@ -273,6 +274,23 @@ function download(text) {
 }
 
 function wireClaim() {
+  // Show the code the way the panel shows it, XXXX-XXXX, as it is typed or
+  // pasted. Appearance only: the server normalizes whatever is sent.
+  // What the box showed after the last edit, so the formatter can tell a
+  // Delete that removed only the dash from one that removed a character.
+  let shown = $("claim-code").value;
+  $("claim-code").addEventListener("input", (event) => {
+    // Mid-composition (a phone keyboard's suggestion, an IME) the browser
+    // owns the text; rewriting it then drops characters. The event that ends
+    // the composition arrives with isComposing false and is handled here.
+    if (event.isComposing) return;
+    const input = event.target;
+    const next = reformat(input.value, input.selectionStart, { inputType: event.inputType, previous: shown });
+    shown = next.value;
+    if (next.value === input.value) return;
+    input.value = next.value;
+    input.setSelectionRange(next.caret, next.caret);
+  });
   $("claim").addEventListener("submit", async (event) => {
     event.preventDefault();
     if (busy) return;
@@ -292,6 +310,7 @@ function wireClaim() {
         return;
       }
       input.value = "";
+      shown = "";
       if (await refresh()) setStatus("Panel added. It restarts into the scoreboard in about thirty seconds.");
     } finally {
       setBusy(false);
