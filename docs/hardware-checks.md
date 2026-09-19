@@ -412,8 +412,9 @@ whether anything needs optimising.
 
 **2026-09-19 — PASS on a Pi 4, v0.1.2.** The image booted unattended, with no
 keyboard and nothing on screen asking for anything, and `scoreboard.service`
-started once and ran. The Zero 2 W has still not been run, so this is half of
-H5, not all of it.
+started once and ran. The Zero 2 W half of H5 was never run and is now
+**SHELVED (2026-09-19)** — see H6 — so H5 is a Pi 4B check and complete as
+one, rather than half of a two-board check that is still waiting.
 
 Three defects came out of that boot. None of them stopped it; all three are
 fixed on branch `first-light`, and each is written up below because the
@@ -1148,10 +1149,41 @@ first image built after the pass. **Pi 4B only** — the Zero 2 W is shelved
    #   instance cannot start. A line here means the mask did not take.
    ```
 
-5. Optional, and the whole point of keeping the console: attach a **3.3 V**
+5. **Read the packaged kernel's SysRq default off the card**, since that —
+   not the defconfig — is what actually runs:
+
+   ```sh
+   grep MAGIC_SYSRQ_DEFAULT_ENABLE /path/to/card-root/boot/config-*
+   #   expect CONFIG_MAGIC_SYSRQ_DEFAULT_ENABLE=0x1f6, which spec §9.13
+   #   decodes: everything except 0x8 (the task/memory dumps). Nothing in the
+   #   image sets kernel.sysrq, so the compiled-in value is the live one.
+   #   A different value is not a failure -- it is a number to re-decode and
+   #   write into §9.13.
+   ```
+
+   (`/boot` is on the card's **root** partition, not the boot partition;
+   `linux-image-*-rpi-v8` ships the file.)
+
+6. Optional, and the whole point of keeping the console: attach a **3.3 V**
    USB-serial adapter to header pins 8 (GPIO 14, TX) and 10 (GPIO 15, RX)
-   plus a ground pin, open it at **115200 8N1**, and power the panel on. The
-   boot log should scroll past. Do not attach 5 V.
+   plus a ground pin, open it at **115200 8N1**, and power the panel on. Do
+   not attach 5 V.
+
+   **Expect kernel messages up to sysinit and then near-silence** —
+   `raspberrypi-sys-mods` sets `kernel.printk = 3 4 1 3`, so once
+   `systemd-sysctl` has run only EMERG/ALERT/CRIT reach the console and
+   `KERN_ERR` does not. That is the honest shape of this console, and it is
+   why the next step exists.
+
+7. Optional, and this is the step that makes the console useful for the
+   failures this project actually has: add
+   `systemd.journald.forward_to_console=1` to `/boot/firmware/cmdline.txt` on
+   the card and boot again. Userspace — `scoreboard.service`,
+   `scoreboard-netcfg` — then reaches the UART live. Note what that puts on
+   the wire: the kernel command line (including the Ethernet MAC as
+   `smsc95xx.macaddr=`) and, in `netcfg`'s error lines, **the Wi-Fi SSID in
+   plaintext**. Not the PSK — `netcfg.py` guards it deliberately. Take the
+   flag back off before handing the panel to anyone.
 
 ### Part 2 — find the panel's address, from a Windows + WSL2 machine
 
@@ -1233,8 +1265,23 @@ but the standard library:
 
 ```python
 #!/usr/bin/env python3
-"""Legacy-unicast mDNS probe. Exit 0 = nothing answered (what we want)."""
+"""Legacy-unicast mDNS probe.
+
+The socket is CONNECTED, not used with sendto/recvfrom. That is what makes a
+closed port distinguishable from a filtered one: on a connected UDP socket the
+kernel surfaces the ICMP port-unreachable as ConnectionRefusedError in
+milliseconds, instead of the caller waiting out the timeout with no way to
+tell "closed" from "dropped".
+
+  ANSWERED  a responder replied           -> FAILURE on a hardened panel
+  REFUSED   ICMP port unreachable, closed -> the pass we want
+  TIMEOUT   nothing came back at all      -> INCONCLUSIVE, not a pass
+Exit 0 only when every probe was REFUSED; 1 if anything answered; 2 if any
+probe was inconclusive.
+"""
 import socket, struct, sys
+
+ANSWERED, REFUSED, TIMEOUT = "ANSWERED", "REFUSED", "TIMEOUT"
 
 def encode(name):
     out = b""
@@ -1242,34 +1289,56 @@ def encode(name):
         out += bytes([len(label)]) + label.encode()
     return out + b"\x00"
 
-def query(ip, name, qtype, timeout=3.0):
+def query(ip, name, qtype, port=5353, timeout=3.0):
     pkt = (struct.pack(">HHHHHH", 0x4242, 0, 1, 0, 0, 0)
            + encode(name) + struct.pack(">HH", qtype, 1))
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.settimeout(timeout)
     try:
-        s.sendto(pkt, (ip, 5353))
-        data, _ = s.recvfrom(4096)
-    except OSError as e:
-        return None, type(e).__name__
+        s.connect((ip, port))       # so a closed port raises instead of hanging
+        s.send(pkt)
+        data = s.recv(4096)
+    except ConnectionRefusedError:
+        return REFUSED, 0
+    except (socket.timeout, OSError):
+        return TIMEOUT, 0
     finally:
         s.close()
-    return struct.unpack(">H", data[6:8])[0], None
+    return ANSWERED, struct.unpack(">H", data[6:8])[0]
+
+PROBES = [("scoreboard.local", 1, "A"),
+          ("scoreboard.local", 28, "AAAA"),
+          ("_services._dns-sd._udp.local", 12, "PTR"),
+          ("_workstation._tcp.local", 12, "PTR")]
 
 ip = sys.argv[1]
-answered = 0
-for name, qtype, label in [("scoreboard.local", 1, "A"),
-                           ("_services._dns-sd._udp.local", 12, "PTR"),
-                           ("_workstation._tcp.local", 12, "PTR")]:
-    n, err = query(ip, name, qtype)
-    if n is None:
-        print(f"  {label:4} {name:32} no answer ({err})")
-    else:
-        print(f"  {label:4} {name:32} ANSWERED, {n} record(s)")
-        answered += 1
-print(f"{answered} of 3 answered")
-sys.exit(1 if answered else 0)
+port = int(sys.argv[2]) if len(sys.argv) > 2 else 5353
+counts = {ANSWERED: 0, REFUSED: 0, TIMEOUT: 0}
+for name, qtype, label in PROBES:
+    verdict, n = query(ip, name, qtype, port)
+    extra = f", {n} record(s)" if verdict == ANSWERED else ""
+    print(f"  {label:4} {name:32} {verdict}{extra}")
+    counts[verdict] += 1
+print(f"{counts[ANSWERED]} answered, {counts[REFUSED]} refused (closed), "
+      f"{counts[TIMEOUT]} inconclusive  [udp/{port}]")
+sys.exit(1 if counts[ANSWERED] else (2 if counts[TIMEOUT] else 0))
 ```
+
+```sh
+python3 mdnsq.py "$PANEL"          # expect: "0 answered, 4 refused (closed)"
+python3 mdnsq.py "$PANEL" 5354     # sanity: a port that was closed before too
+```
+
+**Read the exit status, not just the text.** `0` is the pass — the panel
+actively refused on 5353, which is what the baseline table's "UDP 5353 →
+closed" row promises. `1` means something answered and the image is not
+hardened. **`2` is not a pass**: nothing came back at all, which means
+filtered, rate-limited or unreachable, and the run must be repeated more
+slowly. On v0.1.3 this printed `4 answered, 0 refused (closed), 0
+inconclusive` and exited 1; against udp/5354 on the same panel it printed `0
+answered, 4 refused (closed), 0 inconclusive` and exited 0, which is exactly
+the shape the hardened image must produce on 5353.
+
 
 ```sh
 python3 mdnsq.py "$PANEL"   # expect: "0 of 3 answered"
@@ -1336,9 +1405,10 @@ unfalsifiable.**
 |---|---|---|
 | ICMP echo | answers | answers — this is the positive control |
 | TCP, all 65535 ports | 0 open, 65535 refused, 0 unanswered (8 s) | unchanged |
-| mDNS `scoreboard.local` A | **answers**, → 192.168.68.67 | no answer |
-| mDNS `_services._dns-sd._udp.local` PTR | **answers**, advertises `_workstation._tcp` | no answer |
-| mDNS `_workstation._tcp.local` PTR | **answers**, 5 records, instance `scoreboard [d8:3a:dd:29:33:6d]` — hostname *and* MAC published | no answer |
+| mDNS `scoreboard.local` A | **answers**, → 192.168.68.67 | no answer (refused) |
+| mDNS `scoreboard.local` AAAA | **answers**, → `fe80::4eae:f1c9:9bd4:d588` — the panel publishes its link-local address too | no answer (refused) |
+| mDNS `_services._dns-sd._udp.local` PTR | **answers**, advertises `_workstation._tcp` | no answer (refused) |
+| mDNS `_workstation._tcp.local` PTR | **answers**, 5 records, instance `scoreboard [d8:3a:dd:29:33:6d]` — hostname *and* MAC published | no answer (refused) |
 | mDNS `_ssh._tcp` / `_sftp-ssh._tcp` | no answer | no answer |
 | UDP 53, 67, 123, 137, 161, 1900, 5355 | closed (ICMP port unreachable) | unchanged |
 | UDP 5353 | open, answering | **closed** |

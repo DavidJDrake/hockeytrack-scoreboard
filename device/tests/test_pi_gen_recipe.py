@@ -273,10 +273,12 @@ WIZARD_STAGE = PIGEN / "stage-scoreboard" / "02-no-first-boot-wizard" / "00-run.
 #
 # Anchored on the -name/-path that precedes them, not on the quotes alone.
 # Without that anchor any other quoted mention of one of these unit names
-# counts as a find predicate -- which it is not: 05-no-listeners masks
-# 'serial-getty@.service', and before the anchor was added that mask made this
-# test report "the gate's unit set changed" for a file whose autologin scan
-# had not changed at all.
+# counts as a find predicate -- which it is not. The case that found it:
+# tools/image-gate.sh grew an assert_masked 'serial-getty@.service' line, and
+# this test then reported "the gate's unit set changed" for a file whose
+# autologin scan had not changed at all. (It reads the GATE and
+# 02-no-first-boot-wizard; 05-no-listeners, which does the masking, is never
+# read here.)
 UNIT_GLOB = re.compile(
     r"-(?:name|path)\s+'(?:\*/)?"
     r"((?:serial-getty|autovt|getty)@\*?\.service(?:\.d)?|console-getty\.service(?:\.d)?)(?:/\*)?'")

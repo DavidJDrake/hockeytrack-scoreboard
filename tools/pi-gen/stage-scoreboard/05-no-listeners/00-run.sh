@@ -117,9 +117,10 @@
 # installed (every name pi-gen lists in an NN-packages file, plus this
 # repository's own 00-packages, plus everything of Priority required or
 # important, which debootstrap installs with dpkg directly), walk
-# Depends/Pre-Depends/Recommends over the image's 836 packages -- Recommends
+# Depends/Pre-Depends/Recommends over the image's 726 packages -- Recommends
 # included, because APT::AutoRemove::RecommendsImportant defaults to true --
-# and subtract what is still reachable once the purge set is gone:
+# and subtract what is still reachable once the purge set is gone (724 before,
+# 695 after):
 #
 #   libavahi-core7 libdaemon0                       avahi's own
 #   libfido2-1 libcbor0.10 libwrap0 libwtmpdb0      OpenSSH's own
@@ -289,15 +290,27 @@ fi
 #   shows it today as ttyAMA1, which is what the secondary UART gets -- and
 #   console=serial0,115200 becomes a live kernel console on GPIO 14/15.
 #
-# KEPT, because it is the diagnosis path this project has needed on every
-# failed boot. v0.1.0, v0.1.1 and v0.1.2 all had to be diagnosed by powering
-# the panel down and reading the card; spec 9.12 has been asking for an
-# on-panel failure painter ever since. A 3.3 V USB-serial adapter on pins 8
-# and 10 now reads the boot log live, and with
-# systemd.journald.forward_to_console=1 added to cmdline.txt by hand (the
-# procedure docs/hardware-checks.md already documents) it reads the journal
-# live too -- with no card removal and no login. It costs nothing to anyone
-# who does not attach a cable, and it cannot be reached over a network.
+# KEPT, because it is the nearest thing to a diagnosis path this project has.
+# v0.1.0, v0.1.1 and v0.1.2 all had to be diagnosed by powering the panel down
+# and reading the card; spec 9.12 has been asking for an on-panel failure
+# painter ever since. A 3.3 V USB-serial adapter on pins 8 and 10 reads this
+# console with no card removal and no login, and it cannot be reached over a
+# network.
+#
+# BE PRECISE ABOUT WHAT IT SHOWS, because "reads the boot log live" oversells
+# it. raspberrypi-sys-mods ships /etc/sysctl.d/98-rpi.conf with
+# `kernel.printk = 3 4 1 3`, so once systemd-sysctl runs at sysinit the
+# console loglevel is 3 and only EMERG/ALERT/CRIT still print -- KERN_ERR does
+# not. So the kernel's own boot chatter is readable up to sysinit and
+# essentially silent afterwards. Every failure this project has actually had
+# was in USERSPACE, and userspace reaches this console only with
+# systemd.journald.forward_to_console=1 added to cmdline.txt by hand, which is
+# the procedure docs/hardware-checks.md already documents. The console is
+# worth keeping; it is not a free journal.
+#
+# The same fact is good news for the cost below: synchronous printk to the
+# UART is confined to the pre-sysinit window, so the boot-time price is
+# bounded by that window rather than by the whole boot.
 #
 # THE LOGIN PROMPT IS NOT KEPT. systemd-getty-generator reads
 # /sys/class/tty/console/active and instantiates serial-getty@<tty>.service
@@ -309,14 +322,17 @@ fi
 # mask: printk does not go through a getty.
 #
 # WHAT IT COSTS, and the escape hatch. printk to a 115200 UART is synchronous,
-# so a boot that previously wrote to tty1 alone now also serializes every
-# kernel line out the UART, attached or not. docs/hardware-checks.md H9 part 1
-# measures first paint against v0.1.3 for exactly this reason. If it turns out
-# to cost more than a second or two on a panel that is already dark for up to
-# 85 s (spec 9.12), the fix is one line: drop console=serial0,115200 from
-# /boot/firmware/cmdline.txt here. That file is written by pi-gen's
-# stage1/00-boot-files and only sed-edited afterwards (export-image/
-# 04-set-partuuid substitutes ROOTDEV), so this stage can edit it safely.
+# so a boot that previously wrote to tty1 alone now also serializes kernel
+# lines out the UART, attached or not -- but only until systemd-sysctl applies
+# kernel.printk = 3 4 1 3, after which almost nothing prints. That bound makes
+# the escape hatch unlikely to be needed. docs/hardware-checks.md H9 part 1
+# measures first paint against v0.1.3 anyway, because "unlikely" is not a
+# measurement. If it does cost more than a second or two on a panel already
+# dark for up to 85 s (spec 9.12), the fix is one line: drop
+# console=serial0,115200 from /boot/firmware/cmdline.txt here. That file is
+# written by pi-gen's stage1/00-boot-files and only sed-edited afterwards
+# (export-image/04-set-partuuid substitutes ROOTDEV), so this stage can edit
+# it safely.
 
 # pi-gen's stage2/02-net-tweaks/01-run.sh deliberately un-blocks the on-board
 # Bluetooth adapter, by writing 0 into a state file for each known on-board
