@@ -8,7 +8,9 @@ import pytest
 
 from scoreboard import main as main_module
 from scoreboard.display import EX_CONFIG
-from scoreboard.main import carry_out, should_blank
+from scoreboard.main import (FINAL_HOLD_S, GAME, IDLE, IGNORE, REARM, SELECT,
+                             carry_out, config_action, drift_at, final_seen_at,
+                             presentation, shift_at)
 from scoreboard.model import GameState
 from scoreboard.netcfg import WifiSettings
 from scoreboard.settings import RESULT, Settings
@@ -25,34 +27,226 @@ def final_state() -> GameState:
     return GameState.from_json((FIX / "state_live.json").read_text().replace('"state":"LIVE"', '"state":"FINAL"'))
 
 
+def off_state() -> GameState:
+    return GameState.from_json((FIX / "state_live.json").read_text().replace('"state":"LIVE"', '"state":"OFF"'))
+
+
 def pregame_state() -> GameState:
     return GameState.from_json((FIX / "state_pre.json").read_bytes())
 
 
-def test_never_blanks_while_a_game_is_live():
-    # Even long past blank_after_s, a live game (including its
-    # intermissions, which just means clock_running=False) stays lit.
-    assert not should_blank(now=10_000, last_update=0, state=live_state(), blank_after_s=30)
+# --------------------------------------------------------------------------
+# What the panel shows, and where on the glass
+#
+# These replace the tests for should_blank, which encoded a rule found wrong
+# on real hardware: anything that was not LIVE went to a pure black frame
+# after 30 minutes without a state update. On a Pi 4 on 2026-09-19 the owner
+# chose a game six hours out, watched "PUCK DROP in 06:00:00" count down, and
+# thirty minutes later had a black panel -- with no keyboard, no touch and no
+# buttons on that build, so nothing to wake it with. A black panel with no
+# input is indistinguishable from a dead one.
+#
+# Every case the old tests covered is below with the outcome it has now, and
+# nothing the decision can return is a dark frame.
+# --------------------------------------------------------------------------
 
 
-def test_blanks_after_idle_with_no_game_selected():
-    assert not should_blank(now=29, last_update=0, state=None, blank_after_s=30)
-    assert should_blank(now=30, last_update=0, state=None, blank_after_s=30)
+def test_a_live_game_is_always_the_game_screen():
+    # Was test_never_blanks_while_a_game_is_live: same answer, put more
+    # strongly. A stall of any length leaves the game on the panel.
+    for elapsed in (0, 60, 30 * 60, 24 * 3600):
+        assert presentation(elapsed, live_state(), final_seen=None).show == GAME
 
 
-def test_blanks_a_final_or_pregame_board_left_up_overnight():
-    # This is the case that actually matters for burn-in: a game ended (or
-    # hasn't started) and nobody touched the panel for the idle window.
-    assert should_blank(now=1_000, last_update=0, state=final_state(), blank_after_s=30)
-    assert should_blank(now=1_000, last_update=0, state=pregame_state(), blank_after_s=30)
+def test_a_countdown_never_falls_back_however_long_it_runs():
+    # The owner's case. Was test_blanks_a_final_or_pregame_board_left_up
+    # _overnight's pregame half, which asserted the opposite. A countdown is
+    # redrawn from the clock every second, so there is nothing to update and
+    # nothing to mistake for idleness.
+    for elapsed in (0, 31 * 60, 6 * 3600, 24 * 3600):
+        assert presentation(elapsed, pregame_state(), final_seen=None).show == GAME
 
 
-def test_stays_lit_before_the_idle_window_elapses():
-    assert not should_blank(now=10, last_update=0, state=final_state(), blank_after_s=30)
+def test_no_game_selected_shows_the_idle_screen_and_never_a_black_one():
+    # Was test_blanks_after_idle_with_no_game_selected. There is no longer a
+    # window to wait out: with nothing selected the panel shows the drifting
+    # "No game selected" message from the first pass, and keeps showing it.
+    for elapsed in (0, 29, 30, 30 * 60, 24 * 3600):
+        assert presentation(elapsed, None, final_seen=None).show == IDLE
 
 
-def test_a_fresh_update_resets_the_idle_clock():
-    assert not should_blank(now=1_000, last_update=990, state=final_state(), blank_after_s=30)
+def test_a_final_stays_up_for_three_hours_and_then_falls_back_to_idle():
+    # Was test_blanks_a_final_or_pregame_board_left_up_overnight's final
+    # half (30 minutes, then black) and test_stays_lit_before_the_idle
+    # _window_elapses. The hold is far longer and what follows it is lit.
+    seen = 1_000.0
+    assert presentation(seen, final_state(), final_seen=seen).show == GAME
+    assert presentation(seen + FINAL_HOLD_S - 1, final_state(), final_seen=seen).show == GAME
+    assert presentation(seen + FINAL_HOLD_S, final_state(), final_seen=seen).show == IDLE
+
+
+def test_an_off_game_is_held_and_aged_out_exactly_like_a_final():
+    # The feed says OFF once a final has been signed off; it is the same
+    # thing to an owner looking at the panel.
+    seen = 0.0
+    assert presentation(seen + FINAL_HOLD_S - 1, off_state(), final_seen=seen).show == GAME
+    assert presentation(seen + FINAL_HOLD_S, off_state(), final_seen=seen).show == IDLE
+
+
+def test_the_final_hold_runs_from_the_first_sighting_not_the_last_update():
+    # Was test_a_fresh_update_resets_the_idle_clock, and the answer is now
+    # the other way round: a final game stops producing updates, which is
+    # exactly why the old rule blanked it. GameState carries no end
+    # timestamp (only asOf and start), and the panel has no RTC, so the one
+    # honest measure is when this panel first saw the game go final.
+    first = 1_000.0
+    assert final_seen_at(first, final_state(), now=first + 7_200) == first
+    # ...so a refresh two hours in does not buy another three hours.
+    assert presentation(first + FINAL_HOLD_S, final_state(), final_seen=first).show == IDLE
+
+
+def test_a_stall_after_the_final_does_not_end_the_hold_early():
+    # The other half of the same point: no updates at all for three hours
+    # still leaves the score up for the whole three hours.
+    assert presentation(FINAL_HOLD_S - 1, final_state(), final_seen=0.0).show == GAME
+
+
+def test_the_first_sighting_is_taken_the_moment_the_game_goes_final():
+    assert final_seen_at(None, final_state(), now=42.0) == 42.0
+    assert final_seen_at(None, off_state(), now=42.0) == 42.0
+
+
+def test_a_game_that_is_not_over_has_no_sighting_to_age():
+    # Which is also how the hold is rearmed: select() sets current to None
+    # while the panel waits for the new game's state, so following anything
+    # else clears the sighting on the next pass.
+    assert final_seen_at(1_000.0, live_state(), now=2_000.0) is None
+    assert final_seen_at(1_000.0, pregame_state(), now=2_000.0) is None
+    assert final_seen_at(1_000.0, None, now=2_000.0) is None
+
+
+def test_nothing_the_decision_can_return_is_a_blank_screen():
+    # The invariant, at the decision layer: whatever the state and however
+    # long ago anything happened, the panel is told to draw something.
+    states = [None, live_state(), pregame_state(), final_state(), off_state()]
+    for state in states:
+        for seen in (None, 0.0):
+            for now in (0.0, 1.0, 30 * 60.0, FINAL_HOLD_S, 48 * 3600.0):
+                assert presentation(now, state, final_seen=seen).show in (GAME, IDLE)
+
+
+def test_the_old_blanking_rule_is_gone():
+    # Requirement, not trivia: a name left behind is a rule somebody will
+    # call again. Nothing blanks, so nothing is called should_blank.
+    assert not hasattr(main_module, "should_blank")
+    assert not hasattr(main_module, "BLANK_AFTER_S")
+
+
+# --------------------------------------------------------------------------
+# The pixel shift
+# --------------------------------------------------------------------------
+
+
+def test_the_shift_holds_still_for_minutes_at_a_time():
+    # Burn-in mitigation, not an animation: at 10 Hz a shift that stepped in
+    # seconds would read as jitter from across the room.
+    assert shift_at(0) == shift_at(60) == shift_at(main_module.SHIFT_STEP_S - 1)
+    assert shift_at(main_module.SHIFT_STEP_S) != shift_at(0)
+    assert main_module.SHIFT_STEP_S >= 60
+
+
+def test_the_shift_is_deterministic_and_cycles():
+    # Derived from the clock, never random: two panels side by side step
+    # together, and a test can say what the offset will be.
+    step = main_module.SHIFT_STEP_S
+    circuit = len(main_module.SHIFT_PATTERN)
+    assert [shift_at(i * step) for i in range(circuit)] == list(main_module.SHIFT_PATTERN)
+    assert shift_at(circuit * step) == shift_at(0)
+
+
+def test_every_offset_the_shift_can_take_fits_the_layout_margins():
+    # +-4 px across, and never downward: the game screen's own bottom margin
+    # is zero with two penalties a side (the progress bar for the second row
+    # already runs to y=479), while its top margin is 76 and its side
+    # margins 60. test_render's shift tests check no ink is actually lost.
+    for dx, dy in main_module.SHIFT_PATTERN:
+        assert -4 <= dx <= 4, (dx, dy)
+        assert -4 <= dy <= 0, (dx, dy)
+
+
+def test_the_shift_moves_in_small_steps():
+    # A step of the whole pattern at once would be a visible jump.
+    pattern = list(main_module.SHIFT_PATTERN)
+    for (x0, y0), (x1, y1) in zip(pattern, pattern[1:] + pattern[:1]):
+        assert abs(x1 - x0) <= 2 and abs(y1 - y0) <= 2, ((x0, y0), (x1, y1))
+
+
+def test_the_idle_screen_is_not_also_shifted():
+    # It is already moving, and its drift box is measured against the panel
+    # edges -- a shift on top of it is the one thing that could push the
+    # message off the glass.
+    assert presentation(12_345.0, None, final_seen=None).shift == (0, 0)
+
+
+# --------------------------------------------------------------------------
+# The idle drift
+# --------------------------------------------------------------------------
+
+
+def test_the_drift_stays_inside_its_box():
+    # Fractions of the travel box, so screens.draw_idle can size the box
+    # against the message it actually rendered and cannot put it off-screen.
+    for t in range(0, 4 * 3600, 7):
+        fx, fy = drift_at(float(t))
+        assert 0.0 <= fx <= 1.0 and 0.0 <= fy <= 1.0, (t, fx, fy)
+
+
+def test_the_drift_visits_the_whole_box_rather_than_one_line():
+    # Burn-in is the point: a path that retraced one diagonal would leave
+    # the rest of the panel unused and the diagonal overcooked.
+    seen = {(round(fx, 1), round(fy, 1)) for fx, fy in (drift_at(float(t)) for t in range(0, 6 * 3600, 5))}
+    assert min(fx for fx, _ in seen) < 0.02 and max(fx for fx, _ in seen) > 0.98
+    assert min(fy for _, fy in seen) < 0.02 and max(fy for _, fy in seen) > 0.98
+    assert len(seen) > 40
+
+
+def test_the_drift_never_dwells():
+    # A sine would slow to a stop at each end of its travel and sit there,
+    # which is the one thing a burn-in path must not do. Constant speed on
+    # both axes: every second covers the same fraction of the box, apart
+    # from the handful that straddle a turn, which cover less, never more.
+    for axis, period in ((0, main_module.DRIFT_X_S), (1, main_module.DRIFT_Y_S)):
+        per_second = [abs(drift_at(float(t + 1))[axis] - drift_at(float(t))[axis]) * period
+                      for t in range(3 * 3600)]
+        assert max(per_second) <= 2.0 + 1e-9
+        assert sum(1 for s in per_second if abs(s - 2.0) < 1e-9) > 0.98 * len(per_second)
+
+
+def test_the_drift_is_deterministic():
+    assert drift_at(1_234.0) == drift_at(1_234.0)
+    assert drift_at(0.0) != drift_at(600.0)
+
+
+# --------------------------------------------------------------------------
+# Getting the display back from the site
+# --------------------------------------------------------------------------
+
+
+def test_choosing_a_different_game_selects_it():
+    assert config_action(2026020002, following=2026020001) == SELECT
+    assert config_action(2026020001, following=None) == SELECT
+
+
+def test_choosing_the_game_already_on_the_panel_rearms_the_hold():
+    # The only lever an owner has on a panel with no input device: re-choose
+    # the game on the site and the aged-out final comes back for another
+    # hold. Without this, the site's config message for a game the panel is
+    # already following is dropped and the panel stays idle.
+    assert config_action(2026020001, following=2026020001) == REARM
+
+
+def test_an_unreadable_config_message_changes_nothing():
+    assert config_action(None, following=2026020001) == IGNORE
 
 
 def test_a_video_driver_missing_from_the_build_stops_the_service_for_good():
