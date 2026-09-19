@@ -406,6 +406,9 @@ VERIFY_OVERRUN_S = 3 * VERIFY_TIMEOUT_S
 # call therefore cannot finish past the deadline.
 #
 #   set_country -> raspi-config                 RASPI_TIMEOUT_S    10 s
+#     OR, when the file has no country= line and /proc/cmdline has no
+#     regdom either, the other half of the same slot:
+#     regulatory_domain -> iw reg get           RASPI_TIMEOUT_S   (10 s)
 #   radio_on    -> nmcli radio wifi on          FAST_TIMEOUT_S      5 s
 #   wait_for_wifi (device-state queries + naps) WIFI_READY_S       10 s
 #   wait_for_ssid (rescans + list polls + naps) SCAN_BUDGET_S      12 s
@@ -414,6 +417,12 @@ VERIFY_OVERRUN_S = 3 * VERIFY_TIMEOUT_S
 #   the first connect                           CONNECT_TIMEOUT_S  45 s
 #                                                                  ----
 #                                        BOOT_BUDGET_S             82 s
+#
+# The first row is an either/or, never both: apply_boot_file takes exactly one
+# of those two branches. The iw call was off this table for a round and
+# unclamped, which was harmless only because QUERY_TIMEOUT_S happens to equal
+# RASPI_TIMEOUT_S -- an arithmetic coincidence rather than a construction, and
+# the third time a call on this path had been left off the table it bounds.
 #
 # The sum is exact on purpose: 37 + 45 = 82, so even when every earlier step
 # runs to its cap the first connect is still granted a full CONNECT_TIMEOUT_S.
@@ -761,8 +770,19 @@ def _run_iw_reg_get(timeout: float = QUERY_TIMEOUT_S) -> str:
     return result.stdout
 
 
-def regulatory_domain(run_iw=None) -> str | None:
+def regulatory_domain(run_iw=None, budget: "Budget | None" = None) -> str | None:
     """The Wi-Fi regulatory domain this panel already has, or None.
+
+    **This is on the boot path, so it is on the budget.** apply_boot_file
+    calls it whenever the setup file carries no ``country=`` line, and the
+    ``iw reg get`` below is then a subprocess like any other. It was off the
+    table and unclamped for a round, and harmless only by arithmetic accident:
+    QUERY_TIMEOUT_S happens to equal RASPI_TIMEOUT_S, and this branch happens
+    to be the else of the set_country branch, so the total came out right.
+    Neither of those is construction, and the unit file's claim that "every
+    call on the path is on that table" was simply false. It now takes the
+    budget and draws RASPI_TIMEOUT_S from it -- the same slot as
+    raspi-config, because it is the alternative to raspi-config, never both.
 
     Two sources, because they answer slightly different questions and neither
     alone is enough:
@@ -801,8 +821,12 @@ def regulatory_domain(run_iw=None) -> str | None:
                     return code
     except OSError:
         pass
+    # min(its own cap, time remaining), exactly like every other call, and
+    # passed to the injected runner too so a test can see the bound rather
+    # than take it on trust.
     try:
-        out = (run_iw or _run_iw_reg_get)()
+        out = (run_iw or _run_iw_reg_get)(
+            timeout=budget.allow(RASPI_TIMEOUT_S) if budget else RASPI_TIMEOUT_S)
     except NetworkError:
         return None
     for line in out.splitlines():
@@ -1365,7 +1389,11 @@ def apply_boot_file(path: Path | None = None, nm: "NetworkManager | None" = None
         # file by hand, or a card written before the line existed, and taking
         # it offline over a missing line of text would be a worse bug than the
         # one this check exists to prevent.
-        country = regulatory_domain()
+        #
+        # On the budget, and in the SAME slot as set_country above: exactly
+        # one of these two branches runs, so the table's raspi-config line
+        # covers whichever it is.
+        country = regulatory_domain(budget=budget)
         if country is None:
             raise ValueError(MISSING_COUNTRY)
         budget.say("no country= line, but this panel is already set to %s; "

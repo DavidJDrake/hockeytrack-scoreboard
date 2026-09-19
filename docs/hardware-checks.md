@@ -524,9 +524,21 @@ list query are each one round trip to a daemon on this machine, so they get
 `FAST_TIMEOUT_S = 5 s` rather than the 10 s hung-binary default. The rescans
 now live *inside* `wait_for_ssid`'s budget rather than beside it.
 
+**And once more, on the release review:** a *third* call was off the table.
+`regulatory_domain()` runs `iw reg get`, a subprocess like any other, and
+`apply_boot_file` calls it on every boot where the setup file has no
+`country=` line and `/proc/cmdline` has no regdom — with no `budget.allow()`
+around it. It was harmless only because `QUERY_TIMEOUT_S` happens to equal
+`RASPI_TIMEOUT_S` and it is the else-branch of the `raspi-config` slot:
+arithmetic coincidence, not construction, and the unit file and `netcfg.py`
+both claimed "every call on the path is on that table". It is now clamped
+through the budget and on the table below, as the alternative to
+`raspi-config` rather than as an extra row.
+
 | step | call | cap |
 |---|---|---|
 | `set_country` | `raspi-config nonint do_wifi_country` | `RASPI_TIMEOUT_S` 10 s |
+| *or* `regulatory_domain` | `iw reg get` — the other half of that same slot, taken when the setup file has no `country=` line and `/proc/cmdline` carries no regdom. One branch or the other, never both. | `RASPI_TIMEOUT_S` 10 s |
 | `radio_on` | `nmcli radio wifi on` | `FAST_TIMEOUT_S` 5 s |
 | `wait_for_wifi` | `nmcli -t -f DEVICE,TYPE,STATE device` ×N + naps | `WIFI_READY_S` 10 s |
 | `wait_for_ssid` | `nmcli device wifi rescan` ×N + `… wifi list --rescan no` ×N + naps | `SCAN_BUDGET_S` 12 s |

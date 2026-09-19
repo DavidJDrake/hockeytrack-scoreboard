@@ -139,7 +139,7 @@ def test_the_note_the_panel_writes_is_accepted_once_it_is_filled_in(tmp_path, mo
     path = tmp_path / "scoreboard-setup.txt"
     path.write_text("ssid=HomeNet\npsk=supersecret\ncountry=GB\nrotate=270\n"
                     "owner=friend@example.com\n")
-    monkeypatch.setattr(netcfg, "regulatory_domain", lambda: None)
+    monkeypatch.setattr(netcfg, "regulatory_domain", lambda budget=None: None)
     first = FakeNmcli()
     assert apply_boot_file(
         path, nm=NetworkManager(run=first, run_raspi_config=NO_RASPI_CONFIG),
@@ -178,7 +178,7 @@ def test_the_note_records_the_domain_relied_on_when_the_file_had_no_country(
     # self-sufficient even though this one was not.
     path = tmp_path / "scoreboard-setup.txt"
     path.write_text("ssid=HomeNet\npsk=supersecret\n")
-    monkeypatch.setattr(netcfg, "regulatory_domain", lambda: "CA")
+    monkeypatch.setattr(netcfg, "regulatory_domain", lambda budget=None: "CA")
     assert apply_boot_file(
         path, nm=NetworkManager(run=FakeNmcli(), run_raspi_config=NO_RASPI_CONFIG),
         now=lambda: "NOW") is True
@@ -577,7 +577,7 @@ def test_a_fresh_panel_refuses_a_file_with_no_country(tmp_path, monkeypatch):
     # rather than proceed to an nmcli call that cannot succeed.
     path = tmp_path / "scoreboard-setup.txt"
     path.write_text("ssid=HomeNet\npsk=supersecret\n")
-    monkeypatch.setattr(netcfg, "regulatory_domain", lambda: None)
+    monkeypatch.setattr(netcfg, "regulatory_domain", lambda budget=None: None)
     with pytest.raises(ValueError, match="country"):
         apply_boot_file(path, nm=NetworkManager(run=FakeNmcli(), run_raspi_config=NO_RASPI_CONFIG))
     assert "psk=supersecret" in path.read_text(), "the user's only copy was destroyed"
@@ -588,7 +588,7 @@ def test_the_missing_country_message_says_what_to_add(tmp_path, monkeypatch):
     # lands in the journal and nowhere else, so it has to stand on its own.
     path = tmp_path / "scoreboard-setup.txt"
     path.write_text("ssid=HomeNet\npsk=supersecret\n")
-    monkeypatch.setattr(netcfg, "regulatory_domain", lambda: None)
+    monkeypatch.setattr(netcfg, "regulatory_domain", lambda budget=None: None)
     with pytest.raises(ValueError) as caught:
         apply_boot_file(path, nm=NetworkManager(run=FakeNmcli(), run_raspi_config=NO_RASPI_CONFIG))
     message = str(caught.value)
@@ -606,7 +606,7 @@ def test_a_panel_that_already_has_a_domain_does_not_go_dark_over_a_missing_line(
     # take a working panel offline over a missing line of text.
     path = tmp_path / "scoreboard-setup.txt"
     path.write_text("ssid=HomeNet\npsk=supersecret\n")
-    monkeypatch.setattr(netcfg, "regulatory_domain", lambda: "GB")
+    monkeypatch.setattr(netcfg, "regulatory_domain", lambda budget=None: "GB")
     fake = FakeNmcli()
     with caplog.at_level(logging.INFO, logger="scoreboard.netcfg"):
         assert apply_boot_file(
@@ -622,7 +622,7 @@ def test_regulatory_domain_reads_the_kernel_command_line(tmp_path, monkeypatch):
     cmdline = tmp_path / "cmdline"
     cmdline.write_text("console=serial0,115200 cfg80211.ieee80211_regdom=CA rootwait\n")
     monkeypatch.setattr(netcfg, "PROC_CMDLINE", cmdline)
-    assert netcfg.regulatory_domain(run_iw=lambda: "country 00: DFS-UNSET\n") == "CA"
+    assert netcfg.regulatory_domain(run_iw=lambda timeout=None: "country 00: DFS-UNSET\n") == "CA"
 
 
 def test_regulatory_domain_falls_back_to_iw_within_the_same_boot(tmp_path, monkeypatch):
@@ -631,7 +631,7 @@ def test_regulatory_domain_falls_back_to_iw_within_the_same_boot(tmp_path, monke
     cmdline = tmp_path / "cmdline"
     cmdline.write_text("console=serial0,115200 rootwait\n")
     monkeypatch.setattr(netcfg, "PROC_CMDLINE", cmdline)
-    assert netcfg.regulatory_domain(run_iw=lambda: "global\ncountry DE: DFS-ETSI\n") == "DE"
+    assert netcfg.regulatory_domain(run_iw=lambda timeout=None: "global\ncountry DE: DFS-ETSI\n") == "DE"
 
 
 def test_regulatory_domain_treats_the_world_domain_as_unset(tmp_path, monkeypatch):
@@ -642,7 +642,7 @@ def test_regulatory_domain_treats_the_world_domain_as_unset(tmp_path, monkeypatc
     cmdline = tmp_path / "cmdline"
     cmdline.write_text("console=serial0,115200 rootwait\n")
     monkeypatch.setattr(netcfg, "PROC_CMDLINE", cmdline)
-    assert netcfg.regulatory_domain(run_iw=lambda: "global\ncountry 00: DFS-UNSET\n") is None
+    assert netcfg.regulatory_domain(run_iw=lambda timeout=None: "global\ncountry 00: DFS-UNSET\n") is None
 
 
 def test_regulatory_domain_ignores_a_self_managed_phy_block(tmp_path, monkeypatch):
@@ -656,7 +656,7 @@ def test_regulatory_domain_ignores_a_self_managed_phy_block(tmp_path, monkeypatc
     monkeypatch.setattr(netcfg, "PROC_CMDLINE", cmdline)
     out = ("global\ncountry 00: DFS-UNSET\n"
            "\nphy#0 (self-managed)\ncountry US: DFS-FCC\n")
-    assert netcfg.regulatory_domain(run_iw=lambda: out) is None
+    assert netcfg.regulatory_domain(run_iw=lambda timeout=None: out) is None
 
 
 def test_regulatory_domain_reads_the_global_block_whatever_follows_it(tmp_path, monkeypatch):
@@ -667,7 +667,7 @@ def test_regulatory_domain_reads_the_global_block_whatever_follows_it(tmp_path, 
     monkeypatch.setattr(netcfg, "PROC_CMDLINE", cmdline)
     out = ("global\ncountry US: DFS-FCC\n"
            "\nphy#0 (self-managed)\ncountry DE: DFS-ETSI\n")
-    assert netcfg.regulatory_domain(run_iw=lambda: out) == "US"
+    assert netcfg.regulatory_domain(run_iw=lambda timeout=None: out) == "US"
 
 
 def test_regulatory_domain_treats_the_drivers_own_default_as_unset(tmp_path, monkeypatch):
@@ -677,7 +677,7 @@ def test_regulatory_domain_treats_the_drivers_own_default_as_unset(tmp_path, mon
     cmdline = tmp_path / "cmdline"
     cmdline.write_text("console=serial0,115200 rootwait\n")
     monkeypatch.setattr(netcfg, "PROC_CMDLINE", cmdline)
-    assert netcfg.regulatory_domain(run_iw=lambda: "global\ncountry 99: DFS-UNSET\n") is None
+    assert netcfg.regulatory_domain(run_iw=lambda timeout=None: "global\ncountry 99: DFS-UNSET\n") is None
 
 
 def test_regulatory_domain_is_none_when_nothing_can_be_read(tmp_path, monkeypatch):
@@ -685,10 +685,60 @@ def test_regulatory_domain_is_none_when_nothing_can_be_read(tmp_path, monkeypatc
     # refused with an explanation rather than applied into a radio that is off.
     monkeypatch.setattr(netcfg, "PROC_CMDLINE", tmp_path / "does-not-exist")
 
-    def boom():
+    def boom(timeout=None):
         raise NetworkError("iw is not installed")
 
     assert netcfg.regulatory_domain(run_iw=boom) is None
+
+
+def test_the_iw_call_is_clamped_by_the_budget_like_every_other(tmp_path, monkeypatch):
+    # regulatory_domain() runs `iw reg get`, a subprocess, on the boot path --
+    # whenever the setup file has no country= line and /proc/cmdline has no
+    # regdom. It was off the budget table and unclamped, and harmless only
+    # because QUERY_TIMEOUT_S happens to equal RASPI_TIMEOUT_S and this is the
+    # else-branch of the raspi-config slot. Arithmetic coincidence is not a
+    # bound, and the unit file claims every call on the path is on the table.
+    monkeypatch.setattr(netcfg, "PROC_CMDLINE", tmp_path / "does-not-exist")
+    seen = []
+
+    def record(timeout=None):
+        seen.append(timeout)
+        return "global\ncountry GB: DFS-ETSI\n"
+
+    # Its own cap when there is plenty of budget left.
+    plenty = netcfg.Budget(netcfg.BOOT_BUDGET_S)
+    assert netcfg.regulatory_domain(run_iw=record, budget=plenty) == "GB"
+    assert seen == [netcfg.RASPI_TIMEOUT_S], \
+        f"the iw call was granted {seen}, not its own {netcfg.RASPI_TIMEOUT_S}s cap"
+
+    # What is left, when that is less -- which is the whole point of a clamp.
+    seen.clear()
+    nearly_spent = netcfg.Budget(3, clock=lambda: 1000.0)
+    assert netcfg.regulatory_domain(run_iw=record, budget=nearly_spent) == "GB"
+    assert seen == [3], f"the iw call was granted {seen} against 3s of budget"
+    assert seen[0] <= netcfg.RASPI_TIMEOUT_S
+
+
+def test_a_panel_with_no_country_line_puts_its_iw_call_on_the_budget(tmp_path, monkeypatch):
+    # End to end through apply_boot_file, so the call site is covered and not
+    # only the function. A budget with nothing left must grant nothing.
+    monkeypatch.setattr(netcfg, "PROC_CMDLINE", tmp_path / "does-not-exist")
+    path = tmp_path / "scoreboard-setup.txt"
+    path.write_text("ssid=HomeNet\npsk=supersecret\n")
+    seen = []
+
+    def record(timeout=None):
+        seen.append(timeout)
+        return "global\ncountry GB: DFS-ETSI\n"
+
+    monkeypatch.setattr(netcfg, "_run_iw_reg_get", record)
+    fake = FakeNmcli()
+    nm = NetworkManager(run=fake, run_raspi_config=NO_RASPI_CONFIG)
+    assert apply_boot_file(path, nm=nm, now=lambda: "NOW") is True
+    assert seen, "apply_boot_file never asked for the regulatory domain"
+    assert seen[0] is not None, "the iw call on the boot path was left unbounded"
+    assert seen[0] <= netcfg.RASPI_TIMEOUT_S, \
+        f"the iw call was granted {seen[0]}s, over the {netcfg.RASPI_TIMEOUT_S}s slot"
 
 
 def test_the_radio_is_switched_on_before_connecting(tmp_path, monkeypatch):

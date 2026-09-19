@@ -31,6 +31,10 @@ ExecStart=/opt/scoreboard/.venv/bin/python -m scoreboard.netcfg
 # the number, by construction:
 #
 #   set_country   -> raspi-config               RASPI_TIMEOUT_S    10 s
+#     or, when the setup file has no country= line and the kernel command
+#     line carries no regdom either, the other half of that same slot --
+#     one branch or the other, never both:
+#     regulatory_domain -> iw reg get           RASPI_TIMEOUT_S   (10 s)
 #   radio_on      -> nmcli radio wifi on        FAST_TIMEOUT_S      5 s
 #   wait_for_wifi -> device-state queries+naps  WIFI_READY_S       10 s
 #   wait_for_ssid -> rescans, list polls, naps  SCAN_BUDGET_S      12 s
@@ -40,10 +44,13 @@ ExecStart=/opt/scoreboard/.venv/bin/python -m scoreboard.netcfg
 #                                        BOOT_BUDGET_S             ----
 #                                                                  82 s
 #
-# Every call on the path is on that table, which was the fault twice over:
-# radio_on() and the rescans were missing from it, so the pre-connect path was
-# really 57 s and the first connect was measured getting 32 s and 27 s while
-# the table claimed 45. The instant calls now have a 5 s cap of their own
+# Every call on the path is on that table, which was the fault THREE times
+# over: radio_on() and the rescans were missing from it, so the pre-connect
+# path was really 57 s and the first connect was measured getting 32 s and
+# 27 s while the table claimed 45; and regulatory_domain()'s `iw reg get` was
+# missing from it too, unclamped, and harmless only because QUERY_TIMEOUT_S
+# happens to equal RASPI_TIMEOUT_S. It is now drawn from the budget like
+# everything else. The instant calls now have a 5 s cap of their own
 # rather than the 10 s hung-binary default, the rescans live inside
 # wait_for_ssid's budget, and 37 + 45 = 82 exactly -- so even when every
 # earlier step runs to its cap the FIRST CONNECT IS STILL GRANTED A FULL 45 s.
