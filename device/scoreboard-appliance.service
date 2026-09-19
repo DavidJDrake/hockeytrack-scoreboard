@@ -132,7 +132,9 @@ DeviceAllow=/dev/tty1 rw
 # factory; the first one, lgpio, opens /dev/gpiochip%d (lgGpio.c:724) and
 # gpiozero picks chip 0 on a Pi 4 (gpiozero/pins/lgpio.py:67). Nothing here
 # allowed it. The kernel registers that char-device class as "gpiochip"
-# (drivers/gpio/gpiolib.h:23), which is the name systemd matches against
+# (drivers/gpio/gpiolib.h, GPIOCHIP_NAME -- no line number: it is :21 in
+# upstream v6.12 and :23 in the rpi-6.18.y tree this panel runs), which is
+# the name systemd matches against
 # /proc/devices, so this is the class rather than a path -- and a path would
 # be wrong anyway, since which chip number a board presents is not fixed.
 #

@@ -229,7 +229,9 @@ both established from source:
   Pi 4 (`gpiozero/pins/lgpio.py:67`). The unit's `DeviceAllow` named
   `char-drm`, `char-input` and `/dev/tty1` and nothing else. The kernel
   registers that char-device class as `"gpiochip"`
-  (`drivers/gpio/gpiolib.h:23`), which is the name systemd matches against
+  (`drivers/gpio/gpiolib.h`, `GPIOCHIP_NAME` — quoted without a line number
+  because it moves: `:21` in upstream v6.12, `:23` in the `rpi-6.18.y` tree
+  this panel runs), which is the name systemd matches against
   `/proc/devices`, so `char-gpiochip` is the class. (`/dev/gpiomem` in the
   last message is gpiozero's *native* factory, the end of the chain, not the
   one that matters.)
@@ -325,6 +327,22 @@ signal strengths, arrow keys move the selection, and joining one connects.
 Check specifically that an SSID containing a colon appears intact — that is
 what `split_terse` exists for, and it is the one case a fake `nmcli` can only
 approximate.
+
+**Recorded, not fixed: `nmcli` joins the first matching AP, not the
+strongest.** `find_ap_on_device` walks libnm's access-point array and returns
+the first entry whose SSID matches, in array order, and that is what gets
+handed to activation. On a mesh advertising one SSID from several BSSIDs
+across 2.4 and 5 GHz, that can be the weakest radio in the house. This is
+pre-existing `nmcli` behavior and nothing in this repository changes it — the
+settings screen's own list is sorted by signal, but `device wifi connect`
+takes a name, not a BSSID. Worth knowing before blaming the panel for a poor
+link. Fixing it would mean picking a BSSID ourselves and passing it, which is
+a behavior change on a path with no hardware coverage yet.
+
+**Also still to run here: a hidden network.** `hidden=yes` in the setup file
+is implemented and undocumented, and neither the code path nor the reasoning
+behind it (see defect 2 under H5) has been run against a real hidden SSID. It
+is not in the README on purpose. Run it before documenting it.
 
 **2026-09-18 — this check has a precondition nothing on the panel can
 satisfy.** The image ships with the Wi-Fi radio switched off until the
@@ -479,43 +497,162 @@ have been seen, and `nmcli device wifi connect <ssid>` checks its own AP list
 and fails immediately when the SSID is not in it — before any activation
 (`src/nmcli/devices.c:3927` at 1.52.1). Nothing retried.
 
-**The budget, from the journals.** NetworkManager logs no scan at info level,
-so the only marker available is `manager: startup complete`, which came
-**5.82 s** and **5.81 s** after `wlan0` reached `disconnected` on the two
-boots. Reading that as "the first scan's results had landed by then" is
-inference, so the new wait is set clear of it rather than beside it:
+**The budget, and it is now a bound rather than an intention.** The first
+version of this was a column of numbers added up to "87 s". It was not a
+ceiling: it left out `radio_on()` and the rescans (a capped `nmcli` call
+each), and it counted the device wait as six two-second sleeps when each of
+those six iterations first ran a query that could take `QUERY_TIMEOUT_S` on
+its own. Worked through honestly that version could reach roughly **195 s** —
+past the unit's own `TimeoutStartSec=120`, so systemd would have killed it
+rather than the budget stopping it.
 
-| step | budget |
+So the number is enforced instead. `netcfg.Budget` is a single monotonic
+deadline, created once in `apply_boot_file` and threaded through every step;
+each `nmcli` call, and `raspi-config`, gets `timeout=min(its own cap, time
+remaining)`, and every loop re-checks the deadline **after** a call returns,
+because the call is where the time goes. A call therefore cannot finish past
+the deadline, and the ceiling is the constant:
+
+| step | cap |
 |---|---|
 | `raspi-config` setting the regulatory domain | 10 s |
-| waiting for the Wi-Fi device (6 × 2 s, was 10 × 2 s) | 12 s |
-| waiting for the network to appear in a scan (new) | 20 s |
-| every connect attempt, together | 45 s |
-| **worst case** | **87 s** |
+| waiting for the Wi-Fi device (was 10 × 2 s, then 6 × 2 s) | 12 s |
+| waiting for the network to appear in a scan (new) | 15 s |
+| one full connect | 45 s |
+| **`BOOT_BUDGET_S`, enforced** | **82 s** |
 
-That replaces the old 75 s, and still fits `TimeoutStartSec=120` and the "up
-to a minute and a half" both site pages promise. The device wait shrank
-because the same journals show that step taking 152 ms and 266 ms — eighty
-times less than its old budget — and those eight seconds were better spent on
-the step that was actually short. `device/tests/test_netcfg.py` asserts the
-arithmetic, so a changed constant fails a test rather than a panel.
+Retries and their back-offs are not extra time: they happen only after a
+connect that failed instantly, so they spend the connect budget the first
+attempt did not. 82 s leaves 38 s of headroom under `TimeoutStartSec=120` for
+systemd's own overhead, and fits the "up to a minute and a half" both site
+pages promise. `device/tests/test_netcfg.py` runs the whole path with every
+call hanging to its kill and asserts the wall clock, so a changed constant
+fails a test rather than a panel.
+
+**Where the scan number comes from, strengthened.** NetworkManager logs no
+scan at info level, so the only marker available is `manager: startup
+complete`, which came **5.82 s** and **5.81 s** after `wlan0` reached
+`disconnected` on the two boots. That is better than a coincidence:
+NetworkManager adds `NM_PENDING_ACTION_WIFI_SCAN` while a scan is running and
+removes it when one is not (`nm-device-wifi.c:479` and `:489`), and a pending
+action is exactly what holds `startup complete` back — so startup complete
+**cannot** be logged mid-scan. The 5.8 s is therefore a hard upper bound on
+when the first scan had finished, not merely the nearest thing in the log.
+15 s is two and a half times it.
+
+**The polls pass `--rescan no`, and that is load-bearing.** `nmcli device wifi
+list` defaults to `--rescan auto`, which sets the cutoff to *now − 30 s*
+(`devices.c:3463`); when that is newer than the device's `last_scan` — which
+it is on the boot path, where nothing has scanned yet and `last_scan` is −1 —
+nmcli requests a scan and **blocks on `notify::last-scan` for up to 15 s**
+(`devices.c:3554-3576`). A 15 s-capable call under a 10 s kill would have
+spent the whole poll budget on one query and then looked like a failure, with
+the scan budget never actually spent waiting — which is v0.1.2's failure
+again by a different route. With `--rescan no` the cutoff is `G_MININT64`
+(`devices.c:3465`), the wait is zero, and the call returns whatever
+NetworkManager has right now, which is what lets the deadline be ours and be
+real. We ask for the scan once, explicitly, and poll for its results. A poll
+that errors no longer ends the wait either: it sleeps and looks again until
+the deadline, because a transient query failure is not an answer about the
+network.
 
 **Fixed** in `device/scoreboard/netcfg.py`: `join()` rescans, waits for the
-SSID, connects, and on "No network with SSID" rescans and retries — but never
+SSID, connects, and on "not found" rescans, backs off and retries — but never
 on a secrets failure, which NetworkManager reports differently ("Error:
 Connection activation failed: Secrets were required, but not provided.", and
 the `802.1X supplicant …` family, from `src/libnmc-base/nm-client-utils.c`).
-Retrying a wrong password joins nothing and costs another 45 s of dark panel.
-A refused rescan is not fatal: NetworkManager answers `NOT_ALLOWED` while a
-scan is running or was recent, which means results are already coming.
+Retrying a wrong password joins nothing and costs another stretch of dark
+panel.
 
-**Hidden networks** are not waited for at all — a hidden SSID never appears in
-`device wifi list`, so the wait could only ever expire — but they are still
-connected to, with nmcli's own `hidden yes`, which asks NetworkManager for a
-directed probe of that exact name (`src/nmcli/devices.c:3878`) and then
-reports what it found. The same applies to a network that simply never turns
-up: the wait is a courtesy, not a gate, and nmcli's own message says more than
-"we gave up waiting" would.
+**"Not found" has two forms, and the second was missed at first.** There is
+nmcli's own pre-activation check — `Error: No network with SSID '…' found.`
+(`devices.c:3927`), which is what both v0.1.2 boots hit — and
+NetworkManager's, once activation has actually started and the AP turns out
+to be unreachable: `NM_DEVICE_STATE_REASON_SSID_NOT_FOUND`, printed as
+`Error: Connection activation failed: The Wi-Fi network could not be found.`
+(`nm-client-utils.c:442`). The second is plausible on a mesh with a stale AP
+entry. Both are retried. The marker is the whole phrase, because the same
+file also has "The modem could not be found" (`:424`) and "The Wi-Fi P2P peer
+could not be found" (`:467`), and neither is our network.
+
+**A refused rescan means the device is not ready — the opposite of what was
+written here first.** That said a refusal meant a scan was already running or
+had just finished, so results were on their way. In NetworkManager 1.52 there
+is exactly **one** `NM_DEVICE_ERROR_NOT_ALLOWED` return in
+`nm-device-wifi.c` (`:1556`), guarded by `!priv->enabled || !priv->sup_iface
+|| nm_device_get_state(device) < NM_DEVICE_STATE_DISCONNECTED`. Rate limiting
+and scans already in progress are absorbed inside `_scan_kickoff()` and
+produce no error at all. So a refusal says the radio is off, the supplicant
+is not up, or the interface has not reached `disconnected`. It stays
+non-fatal, and it is now logged at **INFO** rather than debug: it cannot be
+found out any other way once a panel is in the field.
+
+**Hidden networks: the docs used to say this worked, and it did not.** A
+hidden SSID never appears in `device wifi list`, so it is not waited for by
+name — that part was right. The rest was not. nmcli's `hidden yes` calls the
+synchronous `nm_device_wifi_request_scan_options()` and then looks for the AP
+**immediately** (`devices.c:3878-3900`), and NetworkManager returns as soon as
+it has kicked the scan off (`nm-device-wifi.c:1516-1518`,
+`dbus_request_scan_cb`). So the list is still empty and nmcli prints the same
+not-found error. With no back-off, `join()`'s three attempts all fired inside
+a few hundred milliseconds and it raised.
+
+What makes it able to work is the back-off. The SSID nmcli passed **is**
+tracked as a pending explicit probe (`_scan_request_ssids_track`, `:315`) and
+goes into the next scan's probe list
+(`_scan_request_ssids_build_hidden`, `:1604`), so the attempt after a pause is
+the one that can find the AP. Each hidden attempt now waits
+`RETRY_BACKOFF_S` inside the same deadline.
+
+The more robust alternative, if that proves not to be enough: create the
+profile explicitly (`nmcli connection add type wifi … 802-11-wireless.hidden
+yes`, then `connection up`), which makes NetworkManager probe for the SSID on
+**every** scan rather than once, and survives a reboot. It is a larger change
+and was not taken here.
+
+**`hidden=` remains undocumented for owners, deliberately, and is untested on
+hardware.** Neither approach has been run against a real hidden network — this
+panel has none to test with — so the README still does not mention the key.
+Do not document it until H3 has been run against one.
+
+A network that is simply not there is treated the same way as before: the wait
+is a courtesy, not a gate, and the connect is attempted anyway so nmcli's own
+message is the one that reaches the journal.
+
+**The next boot is a measurement, not another inference.** Every claim above
+rests on comparing two boots and reading source, because the panel logged one
+error line and nothing else. `netcfg` now logs its milestones at INFO with
+elapsed seconds from the moment it started — the same clock the deadline uses,
+so the journal and the budget cannot disagree about how long something took.
+A successful first boot should read:
+
+    INFO:scoreboard.netcfg:+0.00s applying /boot/firmware/scoreboard-setup.txt (budget 82s)
+    INFO:scoreboard.netcfg:+1.83s country set to US
+    INFO:scoreboard.netcfg:+1.95s radio on
+    INFO:scoreboard.netcfg:+2.21s wifi device ready
+    INFO:scoreboard.netcfg:+2.28s rescan requested
+    INFO:scoreboard.netcfg:+6.31s 'YourNetwork' seen in a scan after 3 poll(s)
+    INFO:scoreboard.netcfg:+6.31s connect attempt 1 of 3
+    INFO:scoreboard.netcfg:+9.87s connected to 'YourNetwork' on attempt 1
+    INFO:scoreboard.netcfg:+9.87s network phase done
+
+and a failing one says exactly which step ran long:
+
+    INFO:scoreboard.netcfg:+2.28s rescan refused (…) -- NetworkManager only refuses this when the device is not ready (radio off, no supplicant, or not yet disconnected)
+    INFO:scoreboard.netcfg:+17.3s 'YourNetwork' not seen after 8 poll(s); trying the connect anyway so nmcli can say why
+    INFO:scoreboard.netcfg:+17.3s connect attempt 1 of 3
+    INFO:scoreboard.netcfg:+17.4s attempt 1 failed: the network was not found (…)
+    INFO:scoreboard.netcfg:+17.4s waiting 5s before attempt 2, so a rescan or a directed probe can land
+    …
+    INFO:scoreboard.netcfg:+52.9s giving up after 3 attempt(s)
+
+One read of `journalctl -u scoreboard-netcfg` should now say where every
+second went, which is what the first light could not.
+
+The SSID appears in the panel's own journal, which is right — it is the
+owner's network on the owner's card, and the journal is the only place a
+failure can be read. **The password never does**, and a test asserts that
+across the whole path, failure branches included.
 
 ### Defect 3 — the picture was upside down, and there was no way to say so
 

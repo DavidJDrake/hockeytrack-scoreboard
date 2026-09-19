@@ -117,36 +117,37 @@ def test_systemd_seconds_reads_the_spans_this_file_accepts():
 
 def test_the_network_unit_states_its_own_start_budget():
     # It is Before=scoreboard.service, so everything it does is time the panel
-    # spends showing nothing. Its worst case is raspi-config (10 s), the settle
-    # wait for the radio, the wait for the network to be scanned, and every
-    # connect attempt together -- close enough to systemd's 90 s default that
-    # inheriting it silently would mean the first slow connect gets killed
-    # part-way through, leaving the setup file looking as though it had been
-    # ignored.
+    # spends showing nothing.
     #
-    # Read from netcfg's own constants rather than repeated here, so the unit
-    # and the code cannot drift: the scan wait was added on 2026-09-19 after
-    # v0.1.2's connect raced the first scan on both boots, which changed this
-    # arithmetic from 75 s to 87 s.
+    # netcfg.BOOT_BUDGET_S is the whole of it now: one monotonic deadline that
+    # raspi-config and every nmcli call draw from, each given timeout=min(its
+    # own cap, time remaining). That replaced a column of intentions added up
+    # to "87 s" which was not a bound -- it left out radio_on() and the
+    # rescans, and counted the device wait as six two-second sleeps when each
+    # of those six iterations first ran a query that could itself take
+    # QUERY_TIMEOUT_S. The honest ceiling of that version was about 195 s,
+    # which is past this very timeout, so systemd would have killed the unit
+    # rather than the budget stopping it.
     #
-    # The bound is the reasoning, not a round number: it must exceed the worst
-    # case with room to spare, and stay small enough that a panel which cannot
-    # connect still reaches the screen in reasonable time.
+    # Read from netcfg's own constant rather than repeated here, so the unit
+    # and the code cannot drift.
     from scoreboard import netcfg
 
-    fields = unit(NETCFG_UNIT.read_text())
+    text = NETCFG_UNIT.read_text()
+    fields = unit(text)
     assert "TimeoutStartSec" in fields, "the unit inherits DefaultTimeoutStartSec without saying so"
     budget = systemd_seconds(fields["TimeoutStartSec"])
-    worst_case = (netcfg.QUERY_TIMEOUT_S
-                  + netcfg.WIFI_READY_TRIES * netcfg.WIFI_READY_WAIT_S
-                  + netcfg.SCAN_BUDGET_S
-                  + netcfg.CONNECT_BUDGET_S)
-    assert budget > worst_case, f"TimeoutStartSec={budget}s cannot cover the {worst_case}s worst case"
+    worst_case = netcfg.BOOT_BUDGET_S
+    assert budget > worst_case, f"TimeoutStartSec={budget}s cannot cover the {worst_case}s budget"
     assert budget <= 300, f"TimeoutStartSec={budget}s leaves the panel dark too long when Wi-Fi fails"
+    # Room for systemd's own overhead above a budget the code enforces, rather
+    # than a figure that merely happens to clear it by a second.
+    assert budget - worst_case >= 30, \
+        f"only {budget - worst_case}s between the enforced budget and the unit's timeout"
     # And the number the unit's own comment states, so the comment is a
     # tripwire rather than a decoration.
-    assert f"{worst_case} s" in NETCFG_UNIT.read_text(), \
-        f"the unit's comment no longer states the {worst_case}s worst case it adds up to"
+    assert f"{worst_case} s" in text, \
+        f"the unit's comment no longer states the {worst_case}s budget it is sized against"
 
 
 def test_appliance_unit_runs_as_its_own_account(checkout):
@@ -277,7 +278,8 @@ def test_the_appliance_unit_lets_the_gpio_buttons_reach_the_gpio(checkout):
     #    picks chip 0 on a Pi 4 (gpiozero/pins/lgpio.py:67). The unit's
     #    DeviceAllow list named char-drm, char-input and /dev/tty1 and
     #    nothing else. The kernel registers that char device class as
-    #    "gpiochip" (drivers/gpio/gpiolib.h:23), which is the name systemd
+    #    "gpiochip" (drivers/gpio/gpiolib.h, GPIOCHIP_NAME -- no line
+    #    number, it moves between trees), which is the name systemd
     #    matches against /proc/devices, so char-gpiochip is the class.
     #
     # The group half was already right: raspberrypi-sys-mods' 99-com.rules
@@ -297,7 +299,12 @@ def test_the_appliance_unit_lets_the_gpio_buttons_reach_the_gpio(checkout):
                 if line.startswith("ReadWritePaths=")]
     assert any(lg_wd == p or lg_wd.startswith(p.rstrip("/") + "/") for p in writable), \
         f"LG_WD={lg_wd} is not under any ReadWritePaths= ({writable}); the FIFO still cannot be made"
-    assert fields["WorkingDirectory"] != lg_wd or "ProtectSystem=strict" not in out
+    # And it must not be pointed back at the working directory, which is the
+    # default lgpio would have used by itself and the one place we know is
+    # read-only under ProtectSystem=strict. Setting LG_WD to that would look
+    # like a fix and change nothing.
+    assert lg_wd != fields["WorkingDirectory"], \
+        f"LG_WD={lg_wd} is the working directory, which is exactly where this failed"
 
 
 def test_appliance_unit_does_not_declare_supplementary_groups(checkout):

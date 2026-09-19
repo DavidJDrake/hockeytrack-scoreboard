@@ -23,28 +23,39 @@ ExecStart=/opt/scoreboard/.venv/bin/python -m scoreboard.netcfg
 # Stated rather than inherited, because this unit is Before=scoreboard.service
 # and so every second it takes is a second the panel shows nothing.
 #
-# The worst case, revised 2026-09-19 after v0.1.2's first light -- the step
-# that waits for the network to be scanned is new, and the wait for the device
-# shrank because the journals showed it taking 152 ms and 266 ms rather than
-# anything near its old budget (device/scoreboard/netcfg.py has the evidence):
+# netcfg ENFORCES its own budget rather than adding one up. BOOT_BUDGET_S in
+# device/scoreboard/netcfg.py is a single monotonic deadline, created once and
+# threaded through every step; each nmcli call, and raspi-config, is given
+# timeout=min(its own cap, time remaining), and every loop re-checks the
+# deadline after a call returns rather than only before one. So the ceiling is
+# the number, by construction:
 #
 #   raspi-config setting the regulatory domain  QUERY_TIMEOUT_S    10 s
-#   waiting for the Wi-Fi device to be usable   6 x 2 s            12 s
-#   waiting for the network to be scanned       SCAN_BUDGET_S      20 s
-#   every connect attempt, together             CONNECT_BUDGET_S   45 s
-#                                                                  ----
-#                                                                  87 s
+#   waiting for the Wi-Fi device to be usable   WIFI_READY_S       12 s
+#   waiting for the network to be scanned       SCAN_BUDGET_S      15 s
+#   one full connect                            CONNECT_TIMEOUT_S  45 s
+#                                 BOOT_BUDGET_S                    ----
+#                                                                  82 s
 #
-# It was 75 s before. Both stay inside the "up to a minute and a half" that
-# the download page and the setup steps promise an owner watching a dark
-# panel, and device/tests/test_netcfg.py asserts that, so a constant which
-# breaks the promise fails a test rather than a panel.
+# Retries and their back-offs are not extra time: they only happen after a
+# connect that failed instantly, so they spend what the first attempt did not.
 #
-# 120 s rather than 90: each cheap nmcli query carries its own QUERY_TIMEOUT_S
-# guard against a hung binary, which is not part of the 87 s but can add to
-# it. And 87 s is close enough to systemd's 90 s default that inheriting it
-# would mean the first slow connect gets killed part-way through, leaving the
-# setup file looking as though it had been ignored.
+# This briefly said "87 s", and that was an intention rather than a bound. It
+# left out radio_on() and the rescans -- a capped nmcli call each -- and it
+# counted the device wait as six two-second sleeps when each of those six
+# iterations first ran a query that could take QUERY_TIMEOUT_S on its own.
+# Worked through honestly that version could reach about 195 s: past this very
+# timeout, so systemd would have killed the unit rather than the budget
+# stopping it. device/tests/test_netcfg.py now runs the whole path with every
+# call hanging to its kill and asserts the wall clock.
+#
+# 82 s is inside the "up to a minute and a half" that the download page and
+# the setup steps promise an owner watching a dark panel.
+#
+# 120 s rather than 90 leaves 38 s above the enforced budget for systemd's own
+# overhead, and keeps a slow connect from being killed part-way through, which
+# would leave the setup file looking as though it had been ignored.
+# device/tests/test_pi_setup.py asserts that headroom.
 TimeoutStartSec=120
 
 [Install]

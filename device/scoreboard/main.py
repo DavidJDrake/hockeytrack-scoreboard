@@ -116,8 +116,7 @@ def enrollment_thread(config_dir, owner, events: queue.Queue,
     return t
 
 
-def chosen_rotation(device_json: int | None, setup_file: int | None,
-                    env: str | None) -> int | None:
+def chosen_rotation(device_json: int | None, setup_file, env: str | None) -> int | None:
     """Which way up this panel is mounted, from the three places that can say.
 
     The precedence, stated once here so nothing has to infer it:
@@ -139,12 +138,18 @@ def chosen_rotation(device_json: int | None, setup_file: int | None,
     None from all three means "decide from the shape of the display", which
     is ``display.placement``'s own default: a quarter turn for a landscape
     frame on a portrait panel.
+
+    ``setup_file`` is a zero-argument callable, not a value, so the card is
+    only read when it is going to be used. Reading it is a file open on the
+    boot partition, and the two sources above it win outright -- evaluating it
+    first would have meant every desktop preview with SCOREBOARD_ROTATE set
+    going and looking at /boot/firmware for an answer it then discarded.
     """
     if env is not None:
         return parse_rotate(env)
     if device_json is not None:
         return device_json
-    return setup_file
+    return setup_file()
 
 
 def should_blank(now: float, last_update: float, state: GameState | None, blank_after_s: float) -> bool:
@@ -191,7 +196,7 @@ def main() -> None:
     # pairing code an unregistered panel draws is the one screen its owner
     # must be able to read. rotate_hint() opens the boot-partition file and
     # leaves it exactly as it was, the same way owner_hint() below does.
-    rotate = chosen_rotation(cfg.rotate if cfg else None, rotate_hint(),
+    rotate = chosen_rotation(cfg.rotate if cfg else None, rotate_hint,
                              os.environ.get("SCOREBOARD_ROTATE"))
     pygame.init()
     # Open the display before anything else touches it. pygame.init() swallows

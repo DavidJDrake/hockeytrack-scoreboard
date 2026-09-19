@@ -323,23 +323,23 @@ def test_the_setup_file_says_which_way_up_when_nothing_else_does():
     # The case this exists for: a panel that has never enrolled. device.json
     # does not exist yet, so there is no other way to say, and the pairing
     # code the owner has to read is on screen upside down.
-    assert main_module.chosen_rotation(None, 270, None) == 270
+    assert main_module.chosen_rotation(None, lambda: 270, None) == 270
 
 
 def test_device_json_wins_over_the_setup_file():
     # The card's file is set once by hand and then carried along by
     # consume(); device.json is the panel's own provisioned identity.
-    assert main_module.chosen_rotation(90, 270, None) == 90
+    assert main_module.chosen_rotation(90, lambda: 270, None) == 90
 
 
 def test_the_environment_override_wins_over_both():
     # SCOREBOARD_ROTATE is the desktop preview's knob and stays the last word.
-    assert main_module.chosen_rotation(90, 270, "180") == 180
-    assert main_module.chosen_rotation(90, 270, "auto") is None
+    assert main_module.chosen_rotation(90, lambda: 270, "180") == 180
+    assert main_module.chosen_rotation(90, lambda: 270, "auto") is None
 
 
 def test_nothing_anywhere_still_means_decide_from_the_shape():
-    assert main_module.chosen_rotation(None, None, None) is None
+    assert main_module.chosen_rotation(None, lambda: None, None) is None
 
 
 def test_an_auto_in_device_json_falls_through_to_the_setup_file():
@@ -347,14 +347,14 @@ def test_an_auto_in_device_json_falls_through_to_the_setup_file():
     # indistinguishable from device.json saying nothing -- and in both cases
     # the file is the next thing that has an opinion. Stated here rather than
     # left to be rediscovered.
-    assert main_module.chosen_rotation(None, 180, None) == 180
+    assert main_module.chosen_rotation(None, lambda: 180, None) == 180
 
 
 def test_a_bad_environment_override_is_not_swallowed():
     # Unlike the card's file, SCOREBOARD_ROTATE is typed by a developer at a
     # shell who wants to be told they got it wrong.
     with pytest.raises(ValueError):
-        main_module.chosen_rotation(None, None, "sideways")
+        main_module.chosen_rotation(None, lambda: None, "sideways")
 
 
 def test_a_panel_with_only_a_setup_file_is_turned_the_way_it_asks(tmp_path, monkeypatch):
@@ -393,3 +393,20 @@ def test_a_panel_with_only_a_setup_file_is_turned_the_way_it_asks(tmp_path, monk
     main_module.main()
 
     assert seen == [270], "the panel ignored the rotation on its own boot partition"
+
+
+def test_the_card_is_not_read_when_something_else_has_already_decided():
+    # Reading it is a file open on the boot partition, and the two sources
+    # above it win outright. A desktop preview with SCOREBOARD_ROTATE set
+    # should not go looking at /boot/firmware for an answer it will discard.
+    looked = []
+
+    def from_the_card():
+        looked.append(True)
+        return 270
+
+    assert main_module.chosen_rotation(None, from_the_card, "180") == 180
+    assert main_module.chosen_rotation(90, from_the_card, None) == 90
+    assert looked == [], "the boot partition was read for nothing"
+    assert main_module.chosen_rotation(None, from_the_card, None) == 270
+    assert looked == [True]

@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 import subprocess
 import traceback
 from pathlib import Path
@@ -263,10 +264,10 @@ def test_applying_wifi_keeps_the_rotate_line(tmp_path):
                     "owner=friend@example.com\n")
 
     class FakeNM:
-        def set_country(self, code): self.country = code
-        def radio_on(self): self.radio_on_called = True
-        def wait_for_wifi(self): return True
-        def join(self, settings): self.applied = settings
+        def set_country(self, code, budget=None): self.country = code
+        def radio_on(self, budget=None): self.radio_on_called = True
+        def wait_for_wifi(self, budget=None, clock=None): return True
+        def join(self, settings, budget=None, clock=None): self.applied = settings
 
     assert netcfg.apply_boot_file(path, nm=FakeNM(), now=lambda: "NOW") is True
     left = path.read_text()
@@ -282,10 +283,10 @@ def test_the_note_carries_no_rotate_line_when_there_was_none(tmp_path):
     path.write_text("ssid=Home\npsk=password123\ncountry=US\n")
 
     class FakeNM:
-        def set_country(self, code): pass
-        def radio_on(self): pass
-        def wait_for_wifi(self): return True
-        def join(self, settings): pass
+        def set_country(self, code, budget=None): pass
+        def radio_on(self, budget=None): pass
+        def wait_for_wifi(self, budget=None, clock=None): return True
+        def join(self, settings, budget=None, clock=None): pass
 
     assert netcfg.apply_boot_file(path, nm=FakeNM(), now=lambda: "NOW") is True
     assert "rotate" not in path.read_text()
@@ -315,10 +316,10 @@ def test_applying_wifi_keeps_the_owner_line(tmp_path):
 
     class FakeNM:
         """The slice of NetworkManager that apply_boot_file drives."""
-        def set_country(self, code): self.country = code
-        def radio_on(self): self.radio_on_called = True
-        def wait_for_wifi(self): return True
-        def join(self, settings): self.applied = settings   # the boot path's entry point
+        def set_country(self, code, budget=None): self.country = code
+        def radio_on(self, budget=None): self.radio_on_called = True
+        def wait_for_wifi(self, budget=None, clock=None): return True
+        def join(self, settings, budget=None, clock=None): self.applied = settings   # the boot path's entry point
         def apply(self, settings, timeout=None): self.applied = settings
 
     assert netcfg.apply_boot_file(path, nm=FakeNM(), now=lambda: "2026-09-13 10:00 UTC") is True
@@ -353,10 +354,10 @@ def test_a_card_with_only_the_old_filename_still_gets_its_wifi_applied(tmp_path,
 
     class FakeNM:
         """The slice of NetworkManager that apply_boot_file drives."""
-        def set_country(self, code): self.country = code
-        def radio_on(self): self.radio_on_called = True
-        def wait_for_wifi(self): return True
-        def join(self, settings): self.applied = settings   # the boot path's entry point
+        def set_country(self, code, budget=None): self.country = code
+        def radio_on(self, budget=None): self.radio_on_called = True
+        def wait_for_wifi(self, budget=None, clock=None): return True
+        def join(self, settings, budget=None, clock=None): self.applied = settings   # the boot path's entry point
         def apply(self, settings, timeout=None): self.applied = settings
 
     nm = FakeNM()
@@ -624,7 +625,7 @@ def test_the_radio_is_switched_on_before_connecting(tmp_path, monkeypatch):
     # it itself. The call is idempotent and instant, and netcfg runs as root.
     path = tmp_path / "scoreboard-setup.txt"
     path.write_text("ssid=HomeNet\npsk=supersecret\ncountry=US\n")
-    monkeypatch.setattr(netcfg, "set_country", lambda code, run=None: None)
+    monkeypatch.setattr(netcfg, "set_country", lambda code, run=None, timeout=None: None)
     fake = FakeNmcli()
     assert apply_boot_file(path, nm=NetworkManager(run=fake), now=lambda: "NOW") is True
     assert ["radio", "wifi", "on"] in fake.calls
@@ -639,7 +640,7 @@ def test_the_country_is_set_before_the_radio_is_switched_on(tmp_path, monkeypatc
     order = []
     path = tmp_path / "scoreboard-setup.txt"
     path.write_text("ssid=HomeNet\npsk=supersecret\ncountry=GB\n")
-    monkeypatch.setattr(netcfg, "set_country", lambda code, run=None: order.append(("country", code)))
+    monkeypatch.setattr(netcfg, "set_country", lambda code, run=None, timeout=None: order.append(("country", code)))
 
     class Recorder(FakeNmcli):
         def __call__(self, args, timeout=None):
@@ -660,7 +661,7 @@ def test_it_waits_for_the_wifi_device_to_come_out_of_unavailable(tmp_path, monke
     # has anything to do -- that opens it.
     path = tmp_path / "scoreboard-setup.txt"
     path.write_text("ssid=HomeNet\npsk=supersecret\ncountry=US\n")
-    monkeypatch.setattr(netcfg, "set_country", lambda code, run=None: None)
+    monkeypatch.setattr(netcfg, "set_country", lambda code, run=None, timeout=None: None)
     states = ["wlan0:wifi:unavailable", "wlan0:wifi:unavailable", "wlan0:wifi:disconnected"]
 
     class Settling(FakeNmcli):
@@ -763,49 +764,96 @@ def clock(monkeypatch):
 
 
 class Air(FakeNmcli):
-    """nmcli with an airwave: which SSIDs a `device wifi list` can see, and
-    what each `device wifi connect` does."""
+    """nmcli with an airwave, and with a clock.
 
-    def __init__(self, visible=(), appears_after=None, connect_errors=(), clock=None):
+    Every call costs time, because that is the whole subject: `cost` is what a
+    normal call takes, and `slow=True` makes every call run to the full
+    timeout it was granted, which is how the enforced deadline gets tested.
+    A runner that ignored `timeout=` could not tell a real bound from an
+    intended one.
+    """
+
+    def __init__(self, visible=(), appears_after=None, appears_at=None,
+                 connect_errors=(), clock=None, cost=0.05, slow=False):
         super().__init__()
         self.visible = list(visible)
         self.appears_after = appears_after  # (ssid, number of list calls first)
+        self.appears_at = appears_at        # (ssid, seconds after the first call)
         self.connect_errors = list(connect_errors)
         self.clock = clock
+        self.cost = cost
+        self.slow = slow
         self.lists = 0
         self.rescans = 0
+        self.rescan_error = None
         self.connects = 0
+        self.device_state = "wlan0:wifi:disconnected"
         self.connect_timeouts = []
+        self.list_timeouts = []
+        self.timeouts = []
+        self.started = clock() if clock is not None else 0.0
+
+    def _spend(self, timeout):
+        """Take the time this call costs, honoring the granted timeout."""
+        self.timeouts.append(timeout)
+        if self.clock is None:
+            return
+        if self.slow:
+            # The pathological case every hung binary produces, and the only
+            # way to see whether the deadline is real.
+            self.clock.sleep(timeout if timeout is not None else netcfg.QUERY_TIMEOUT_S)
+        else:
+            self.clock.sleep(min(self.cost, timeout if timeout is not None else self.cost))
 
     def __call__(self, args, timeout=None):
         self.calls.append(list(args))
+        if args[:2] == ["-t", "-f"] and "STATE" in args[2]:
+            self._spend(timeout)
+            return self.device_state + "\n"
         if args[:3] == ["device", "wifi", "rescan"]:
             self.rescans += 1
+            self._spend(timeout)
+            if self.rescan_error is not None:
+                raise NetworkError(self.rescan_error)
             return ""
         if "list" in args:
             self.lists += 1
+            self.list_timeouts.append(timeout)
+            self._spend(timeout)
             names = list(self.visible)
             if self.appears_after is not None:
                 ssid, after = self.appears_after
                 if self.lists > after:
                     names.append(ssid)
+            if self.appears_at is not None and self.clock is not None:
+                ssid, when = self.appears_at
+                if self.clock() - self.started >= when:
+                    names.append(ssid)
             return "".join(n.replace("\\", r"\\").replace(":", r"\:") + "\n" for n in names)
         if args[:3] == ["device", "wifi", "connect"]:
             self.connects += 1
             self.connect_timeouts.append(timeout)
-            if self.connect_errors:
-                error = self.connect_errors.pop(0)
-                if error is not None:
-                    if self.clock is not None:
-                        self.clock.sleep(0.1)  # nmcli's own not-found check is instant
-                    raise NetworkError(error)
+            error = self.connect_errors.pop(0) if self.connect_errors else None
+            if error is not None and not self.slow:
+                # nmcli's not-found check runs before any activation
+                # (devices.c:3927), so it comes back at once.
+                if self.clock is not None:
+                    self.clock.sleep(0.1)
+                raise NetworkError(error)
+            self._spend(timeout)
+            if error is not None:
+                raise NetworkError(error)
             return ""
+        self._spend(timeout)
         return ""
 
 
 NOT_FOUND = "Error: No network with SSID 'ExampleNet' found."
+ACTIVATION_NOT_FOUND = "Error: Connection activation failed: The Wi-Fi network could not be found."
 BAD_PASSWORD = "Error: Connection activation failed: Secrets were required, but not provided."
+SCAN_REFUSED = "Error: Scanning not allowed while unavailable."
 HOME = WifiSettings(ssid="ExampleNet", psk="supersecret", country="US")
+HIDDEN = WifiSettings(ssid="ExampleNet", psk="supersecret", country="US", hidden=True)
 
 
 def test_the_network_is_scanned_for_before_the_connect_is_attempted(clock):
@@ -825,7 +873,8 @@ def test_a_network_already_in_the_list_is_joined_without_waiting(clock):
     started = clock()
     NetworkManager(run=air).join(HOME, clock=clock)
     assert air.connects == 1
-    assert clock() == started, "waited for a network that was already visible"
+    assert air.lists == 1, "looked more than once at a network already in the list"
+    assert clock() - started < netcfg.SSID_POLL_S, "slept waiting for a visible network"
 
 
 def test_a_rescan_that_nmcli_refuses_is_not_fatal(clock):
@@ -896,21 +945,6 @@ def test_a_network_that_never_appears_is_still_attempted_so_nmcli_reports_it(clo
     assert air.connects >= 1, "gave up without letting nmcli say why"
 
 
-def test_a_hidden_network_is_not_waited_for(clock):
-    # A hidden SSID never appears in `device wifi list` -- it advertises no
-    # name, and both visible_ssids() and scan() drop unnamed rows. Waiting
-    # fifteen seconds for something that cannot arrive is fifteen seconds of
-    # dark panel. nmcli's `hidden yes` does its own directed probe for the
-    # name (src/nmcli/devices.c:3878) and reports its own error.
-    hidden = WifiSettings(ssid="ExampleNet", psk="supersecret", country="US", hidden=True)
-    air = Air(visible=["Neighbour"], clock=clock)
-    started = clock()
-    NetworkManager(run=air).join(hidden, clock=clock)
-    assert clock() == started, "waited for a hidden network to appear by name"
-    assert air.connects == 1
-    assert air.calls[-1][-2:] == ["hidden", "yes"]
-
-
 def test_the_ssid_comparison_survives_nmclis_terse_escaping(clock):
     # An SSID may contain a colon, and nmcli -t escapes it. A naive `in`
     # against the raw line would miss the network and wait out the budget.
@@ -919,7 +953,8 @@ def test_the_ssid_comparison_survives_nmclis_terse_escaping(clock):
     started = clock()
     NetworkManager(run=air).join(
         WifiSettings(ssid=ssid, psk="supersecret", country="US"), clock=clock)
-    assert clock() == started, "the escaped SSID was not recognised"
+    assert air.lists == 1 and clock() - started < netcfg.SSID_POLL_S, \
+        "the escaped SSID was not recognised"
     assert air.connects == 1
 
 
@@ -931,14 +966,15 @@ def test_a_non_ascii_ssid_is_recognised_in_the_scan_list(clock):
     started = clock()
     NetworkManager(run=air).join(
         WifiSettings(ssid=ssid, psk="supersecret", country="US"), clock=clock)
-    assert clock() == started
+    assert air.lists == 1 and clock() - started < netcfg.SSID_POLL_S
     assert air.connects == 1
 
 
 def test_the_scan_wait_gives_up_rather_than_holding_the_boot_open(clock):
     air = Air(visible=["Neighbour"], clock=clock)
     started = clock()
-    assert NetworkManager(run=air).wait_for_ssid("ExampleNet", clock=clock) is False
+    seen, polls = NetworkManager(run=air).wait_for_ssid("ExampleNet", clock=clock)
+    assert seen is False and polls >= 1
     assert clock() - started <= netcfg.SCAN_BUDGET_S
 
 
@@ -948,19 +984,8 @@ def test_a_failing_scan_query_does_not_abandon_the_connect(clock):
     def boom(args, timeout=None):
         raise NetworkError("nmcli failed")
 
-    assert NetworkManager(run=boom).wait_for_ssid("ExampleNet", clock=clock) is False
-
-
-def test_the_scan_waits_share_one_budget_across_the_retries(clock):
-    # Three attempts must not mean three full waits: the unit is
-    # Before=scoreboard.service and every second here is a dark panel.
-    air = Air(visible=["Neighbour"], connect_errors=[NOT_FOUND] * 20, clock=clock)
-    started = clock()
-    with pytest.raises(NetworkError):
-        NetworkManager(run=air).join(HOME, clock=clock)
-    waited = clock() - started
-    assert waited <= netcfg.SCAN_BUDGET_S + netcfg.CONNECT_ATTEMPTS, \
-        f"the retries waited {waited}s, more than the {netcfg.SCAN_BUDGET_S}s budget"
+    seen, _ = NetworkManager(run=boom).wait_for_ssid("ExampleNet", clock=clock)
+    assert seen is False
 
 
 def test_the_first_connect_gets_a_full_association_plus_dhcp(clock):
@@ -970,29 +995,6 @@ def test_the_first_connect_gets_a_full_association_plus_dhcp(clock):
     air = Air(visible=["ExampleNet"], clock=clock)
     NetworkManager(run=air).join(HOME, clock=clock)
     assert air.connect_timeouts[0] == netcfg.CONNECT_TIMEOUT_S
-
-
-def test_the_connects_share_one_budget_across_the_retries(clock):
-    # Three attempts must not mean three full connects. The budget is time
-    # SPENT, not time granted: a retry after an instant "not found" costs
-    # almost none of it, while an attempt that really does run its timeout
-    # leaves nothing for another -- which is right, because a connect that ran
-    # for 45 s was associating, not failing to find the network.
-    class Slow(Air):
-        def __call__(self, args, timeout=None):
-            if args[:3] == ["device", "wifi", "connect"]:
-                self.clock.sleep(timeout)  # the pathological case: nmcli hangs
-            return super().__call__(args, timeout=timeout)
-
-    air = Slow(visible=["ExampleNet"], connect_errors=[NOT_FOUND] * 20, clock=clock)
-    started = clock()
-    with pytest.raises(NetworkError):
-        NetworkManager(run=air).join(HOME, clock=clock)
-    # The clock only moves when something sleeps on it, and the network is
-    # visible from the first look, so every second here was a connect.
-    spent = clock() - started
-    assert spent <= netcfg.CONNECT_BUDGET_S + netcfg.CONNECT_ATTEMPTS, \
-        f"the connects ran {spent}s between them, past the {netcfg.CONNECT_BUDGET_S}s budget"
 
 
 def test_the_boot_path_joins_rather_than_connecting_blind(tmp_path, clock):
@@ -1005,41 +1007,6 @@ def test_the_boot_path_joins_rather_than_connecting_blind(tmp_path, clock):
     assert apply_boot_file(path, nm=nm, now=lambda: "NOW") is True
     assert air.rescans >= 1, "the boot path connected without asking for a scan"
     assert air.connects == 1
-
-
-def test_the_whole_first_boot_budget_fits_what_the_unit_and_the_site_promise():
-    # scoreboard-netcfg.service is Type=oneshot, Before=scoreboard.service and
-    # TimeoutStartSec=120; the site tells owners the screen can stay dark "up
-    # to a minute and a half". Both have to hold, and the arithmetic lives
-    # here so changing a constant fails a test rather than a panel.
-    #
-    # The parts that actually spend time:
-    #   raspi-config setting the regulatory domain   QUERY_TIMEOUT_S   10 s
-    #   waiting for the Wi-Fi device to be usable    6 x 2 s           12 s
-    #   waiting for the network to be scanned        SCAN_BUDGET_S     20 s
-    #   every connect attempt, together              CONNECT_BUDGET_S  45 s
-    #
-    # The cheap nmcli queries each carry their own QUERY_TIMEOUT_S guard
-    # against a hung binary. Those are not part of the intended budget, and
-    # they are why TimeoutStartSec is 120 rather than 90.
-    worst_case = (netcfg.QUERY_TIMEOUT_S
-                  + netcfg.WIFI_READY_TRIES * netcfg.WIFI_READY_WAIT_S
-                  + netcfg.SCAN_BUDGET_S
-                  + netcfg.CONNECT_BUDGET_S)
-    assert worst_case <= 90, \
-        f"a first boot can now be dark for {worst_case}s; the site promises 90"
-    assert netcfg.CONNECT_BUDGET_S >= netcfg.CONNECT_TIMEOUT_S, \
-        "the first connect cannot get a full association plus DHCP"
-
-
-def test_the_scan_budget_covers_what_the_panel_actually_took():
-    # From the journals: wlan0 reached "disconnected" 5.82 s and 5.81 s before
-    # NetworkManager logged "manager: startup complete" on the two boots. That
-    # marker is the only bound the journal offers on the first scan, so the
-    # budget is set well clear of it rather than next to it.
-    observed = 5.82
-    assert netcfg.SCAN_BUDGET_S >= 3 * observed, \
-        f"SCAN_BUDGET_S={netcfg.SCAN_BUDGET_S}s leaves no room over the {observed}s observed"
 
 
 def test_a_missing_boot_file_is_not_worth_a_warning(tmp_path, caplog):
@@ -1301,3 +1268,249 @@ def test_the_website_knows_every_character_the_panel_breaks_lines_on():
     # the injection. Across all of Unicode this takes under a second.
     actual = [c for c in range(0x110000) if netcfg.parse_owner(f"owner=a{chr(c)}b") == "a"]
     assert json.loads(LINE_BOUNDARIES_FIXTURE.read_text(encoding="utf-8")) == actual
+
+
+# ==========================================================================
+# Fix round 1 — the budget has to be a bound, not an intention
+# ==========================================================================
+
+
+def test_the_scan_poll_does_not_wait_on_nmclis_own_rescan(clock):
+    # `nmcli device wifi list` defaults to --rescan auto, and on the boot case
+    # that BLOCKS: devices.c:3463 sets rescan_cutoff_msec = now - 30 s, and
+    # :3554 gives the call timeout_msec = 15000 whenever that cutoff is newer
+    # than last_scan -- which it is when nothing has scanned yet
+    # (last_scan == -1). A 15 s-capable call under our 10 s kill would burn
+    # the poll budget on one query and then look like a failure.
+    #
+    # --rescan no takes the other branch: devices.c:3465 sets the cutoff to
+    # G_MININT64, which is <= any last_scan, so timeout_msec is 0 and the
+    # call returns with whatever NetworkManager currently has. The waiting is
+    # then ours, on our own clock, which is the only way the deadline below
+    # can be enforced.
+    air = Air(visible=["ExampleNet"], clock=clock)
+    NetworkManager(run=air).wait_for_ssid("ExampleNet", clock=clock)
+    listing = next(c for c in air.calls if "list" in c)
+    assert "--rescan" in listing and listing[listing.index("--rescan") + 1] == "no", \
+        "the poll leans on nmcli's own blocking rescan instead of owning the wait"
+
+
+def test_a_slow_scan_query_does_not_throw_away_the_rest_of_the_budget(clock):
+    # The concrete way this could have failed identically on the next boot.
+    # The first poll times out; wait_for_ssid used to catch that and return
+    # False at once, so join() fired every connect within a second or two and
+    # raised "not found" -- exactly v0.1.2 -- with the scan budget unspent.
+    # A query that errors is transient: sleep and keep looking until the
+    # deadline. Letting nmcli's own message be the one reported belongs to the
+    # connect, not to a poll.
+    class Flaky(Air):
+        def __call__(self, args, timeout=None):
+            if "list" in args and self.lists == 0:
+                self.lists += 1
+                self.clock.sleep(timeout)      # runs to its kill
+                raise NetworkError("nmcli timed out")
+            return super().__call__(args, timeout=timeout)
+
+    air = Flaky(appears_at=("ExampleNet", 6.0), clock=clock)
+    started = clock()
+    seen, polls = NetworkManager(run=air).wait_for_ssid("ExampleNet", clock=clock)
+    assert seen is True, "one failed query abandoned a network that did turn up"
+    assert polls >= 2, "it did not look again after the query that failed"
+    assert clock() - started >= 6.0
+
+
+def test_every_scan_query_is_capped_by_what_is_left_of_the_budget(clock):
+    air = Air(clock=clock, slow=True)
+    budget = netcfg.Budget(12.0, clock=clock)
+    NetworkManager(run=air).wait_for_ssid("ExampleNet", budget=budget, clock=clock)
+    assert air.list_timeouts, "no list query was made"
+    assert sum(air.list_timeouts) <= 12.0 + netcfg.QUERY_TIMEOUT_S, \
+        f"the polls were granted {air.list_timeouts}s against a 12s budget"
+    assert all(t <= netcfg.QUERY_TIMEOUT_S for t in air.list_timeouts)
+
+
+def test_the_deadline_holds_even_when_a_query_returns_late(clock):
+    # Checking the clock only before a call is not a deadline. Every loop has
+    # to re-check after the call returns, because the call is where the time
+    # goes.
+    air = Air(clock=clock, slow=True)
+    budget = netcfg.Budget(5.0, clock=clock)
+    started = clock()
+    NetworkManager(run=air).wait_for_ssid("ExampleNet", budget=budget, clock=clock)
+    assert clock() - started <= 5.0 + netcfg.QUERY_TIMEOUT_S, \
+        "a late-returning query was followed by another one past the deadline"
+
+
+def test_waiting_for_the_device_is_a_wall_clock_bound_not_a_count(clock):
+    # The old docstring said "never blocks longer than tries*wait". It was
+    # false: each iteration first runs a query that can take QUERY_TIMEOUT_S,
+    # so six tries two seconds apart was really up to ~70 s.
+    air = Air(clock=clock, slow=True)
+    budget = netcfg.Budget(netcfg.BOOT_BUDGET_S, clock=clock)
+    started = clock()
+    NetworkManager(run=air).wait_for_wifi(budget=budget, clock=clock)
+    assert clock() - started <= netcfg.WIFI_READY_S + netcfg.QUERY_TIMEOUT_S, \
+        "the device wait ran past its own cap"
+
+
+def test_the_whole_boot_path_is_bounded_when_every_call_runs_to_its_timeout(tmp_path, clock, monkeypatch):
+    # The test the reviewer asked for: nothing answers, everything hangs to
+    # its kill, and the wall clock still has to respect the stated number.
+    path = tmp_path / "scoreboard-setup.txt"
+    path.write_text("ssid=ExampleNet\npsk=supersecret\ncountry=US\n")
+    air = Air(clock=clock, slow=True, connect_errors=[NOT_FOUND] * 20)
+    slow_raspi = lambda args, timeout=None: (clock.sleep(timeout or netcfg.QUERY_TIMEOUT_S), "")[1]
+    nm = NetworkManager(run=air, run_raspi_config=slow_raspi)
+    started = clock()
+    with pytest.raises(NetworkError):
+        apply_boot_file(path, nm=nm, now=lambda: "NOW", clock=clock)
+    spent = clock() - started
+    assert spent <= netcfg.BOOT_BUDGET_S + 1, \
+        f"the boot path ran {spent:.1f}s against an enforced {netcfg.BOOT_BUDGET_S}s"
+
+
+def test_the_enforced_budget_fits_the_unit_and_the_site(clock):
+    # One number now, enforced by construction rather than added up from
+    # intentions: BOOT_BUDGET_S covers raspi-config and every nmcli call.
+    assert netcfg.BOOT_BUDGET_S <= 90, \
+        f"a first boot can be dark for {netcfg.BOOT_BUDGET_S}s; the site promises 90"
+    # And the parts have to fit inside it, or a step is dead code.
+    assert (netcfg.QUERY_TIMEOUT_S + netcfg.WIFI_READY_S + netcfg.SCAN_BUDGET_S
+            + netcfg.CONNECT_TIMEOUT_S) <= netcfg.BOOT_BUDGET_S, \
+        "the sequential worst path does not fit the budget that bounds it"
+    assert netcfg.CONNECT_BUDGET_S >= netcfg.CONNECT_TIMEOUT_S
+
+
+def test_the_scan_budget_clears_a_hard_upper_bound_on_the_first_scan():
+    # Strengthened: NetworkManager holds NM_PENDING_ACTION_WIFI_SCAN while a
+    # scan is running (nm-device-wifi.c:479, removed at :489), and a pending
+    # action delays "manager: startup complete". So startup complete cannot be
+    # logged mid-scan, and the journals' 5.82 s and 5.81 s are a hard upper
+    # bound on the first scan finishing, not merely the nearest marker.
+    assert netcfg.SCAN_BUDGET_S >= 2.5 * 5.82, \
+        f"SCAN_BUDGET_S={netcfg.SCAN_BUDGET_S}s leaves no room over a 5.82s bound"
+
+
+def test_a_refused_rescan_means_the_device_is_not_ready_and_says_so(clock, caplog):
+    # There is exactly one NM_DEVICE_ERROR_NOT_ALLOWED in nm-device-wifi.c
+    # (:1556), guarded by !enabled || !sup_iface || state < DISCONNECTED.
+    # Rate limiting and in-progress scans are absorbed by _scan_kickoff() and
+    # produce no error at all. So a refusal is the opposite of "results are on
+    # their way" -- and it is diagnostic gold in the panel's only log, so it
+    # goes in at INFO, not debug.
+    air = Air(visible=["ExampleNet"], clock=clock)
+    air.rescan_error = SCAN_REFUSED
+    with caplog.at_level(logging.INFO, logger="scoreboard.netcfg"):
+        assert NetworkManager(run=air).rescan(clock=clock) is False
+    assert any(r.levelno == logging.INFO and "rescan refused" in r.getMessage()
+               for r in caplog.records), "a refused rescan left nothing at INFO"
+    assert "not ready" in caplog.text.lower()
+
+
+def test_a_refused_rescan_is_still_not_fatal(clock):
+    air = Air(visible=["ExampleNet"], clock=clock)
+    air.rescan_error = SCAN_REFUSED
+    NetworkManager(run=air).join(HOME, clock=clock)
+    assert air.connects == 1
+
+
+def test_the_activation_time_not_found_is_retryable_too(clock):
+    # NM_DEVICE_STATE_REASON_SSID_NOT_FOUND, printed by nmcli as
+    # "Error: Connection activation failed: The Wi-Fi network could not be
+    # found." (nm-client-utils.c:442). Plausible on a mesh with a stale AP
+    # entry: nmcli finds an AP, starts activating, and NetworkManager then
+    # cannot reach it. Retrying after a rescan is exactly right.
+    air = Air(visible=["ExampleNet"], connect_errors=[ACTIVATION_NOT_FOUND, None], clock=clock)
+    NetworkManager(run=air).join(HOME, clock=clock)
+    assert air.connects == 2
+
+
+def test_the_other_could_not_be_found_reasons_are_not_mistaken_for_it(clock):
+    # nm-client-utils.c also has "The modem could not be found" (:424) and
+    # "The Wi-Fi P2P peer could not be found" (:467). Neither is our network.
+    for message in ("Error: Connection activation failed: The modem could not be found.",
+                    "Error: Connection activation failed: The Wi-Fi P2P peer could not be found."):
+        assert not netcfg.is_network_not_found(message), f"{message!r} read as our network"
+
+
+def test_retries_back_off_instead_of_firing_in_a_burst(clock):
+    # Without this, CONNECT_ATTEMPTS = 3 is effectively 1: once the scan
+    # deadline has passed, attempts 2 and 3 complete in milliseconds and
+    # nothing has had time to change between them.
+    air = Air(visible=["Neighbour"], connect_errors=[NOT_FOUND] * 20, clock=clock)
+    started = clock()
+    with pytest.raises(NetworkError):
+        NetworkManager(run=air).join(HOME, clock=clock)
+    assert air.connects == netcfg.CONNECT_ATTEMPTS
+    assert clock() - started >= (netcfg.CONNECT_ATTEMPTS - 1) * netcfg.RETRY_BACKOFF_S, \
+        "the retries fired in a burst with no time for anything to change"
+
+
+def test_a_hidden_network_gets_time_for_its_directed_probe_to_land(clock):
+    # nmcli's `hidden yes` asks NetworkManager for a directed scan and then
+    # looks immediately (devices.c:3878-3900). NetworkManager returns as soon
+    # as it has kicked the scan off (nm-device-wifi.c:1516-1518), so the first
+    # attempt ALWAYS reports not-found. The SSID is tracked as a pending
+    # explicit probe (_scan_request_ssids_track, :315) and goes into the next
+    # scan's probe list (_scan_request_ssids_build_hidden, :1604), so the
+    # attempt after a back-off is the one that can work.
+    air = Air(connect_errors=[NOT_FOUND, None], clock=clock)
+    started = clock()
+    NetworkManager(run=air).join(HIDDEN, clock=clock)
+    assert air.connects == 2, "a hidden network got one shot at a probe that had not landed"
+    assert clock() - started >= netcfg.RETRY_BACKOFF_S
+    assert all(c[-2:] == ["hidden", "yes"]
+               for c in air.calls if c[:3] == ["device", "wifi", "connect"])
+
+
+def test_a_hidden_network_is_still_not_waited_for_by_name(clock):
+    # It cannot appear in the list: it advertises no SSID, and visible_ssids()
+    # drops unnamed rows. The back-off replaces the wait; it does not add to it.
+    air = Air(connect_errors=[NOT_FOUND, None], clock=clock)
+    NetworkManager(run=air).join(HIDDEN, clock=clock)
+    assert air.lists == 0, "polled a scan list for a network that cannot be in one"
+
+
+def test_the_milestones_reach_the_journal_with_their_timings(tmp_path, clock, caplog):
+    # The next boot has to be a measurement, not another inference. One read
+    # of the journal should say where every second went.
+    path = tmp_path / "scoreboard-setup.txt"
+    path.write_text("ssid=ExampleNet\npsk=supersecret\ncountry=US\n")
+    air = Air(appears_at=("ExampleNet", 3.0), clock=clock)
+    nm = NetworkManager(run=air, run_raspi_config=NO_RASPI_CONFIG)
+    with caplog.at_level(logging.INFO, logger="scoreboard.netcfg"):
+        assert apply_boot_file(path, nm=nm, now=lambda: "NOW", clock=clock) is True
+    said = caplog.text
+    for milestone in ("country set", "radio on", "device ready", "rescan requested",
+                      "connect attempt 1", "connected to"):
+        assert milestone in said, f"the journal never says {milestone!r}"
+    # Every milestone carries elapsed seconds, or it cannot be used to find
+    # where the time went.
+    timed = [r.getMessage() for r in caplog.records if r.getMessage().startswith("+")]
+    assert len(timed) >= 6, f"only {len(timed)} timed milestones"
+    assert all(re.match(r"^\+\d+\.\d\ds ", m) for m in timed), timed
+
+
+def test_the_journal_never_carries_the_password(tmp_path, clock, caplog):
+    path = tmp_path / "scoreboard-setup.txt"
+    path.write_text("ssid=ExampleNet\npsk=supersecret\ncountry=US\n")
+    air = Air(visible=["ExampleNet"], connect_errors=[NOT_FOUND, BAD_PASSWORD], clock=clock)
+    nm = NetworkManager(run=air, run_raspi_config=NO_RASPI_CONFIG)
+    with caplog.at_level(logging.DEBUG, logger="scoreboard.netcfg"):
+        with pytest.raises(NetworkError):
+            apply_boot_file(path, nm=nm, now=lambda: "NOW", clock=clock)
+    assert "supersecret" not in caplog.text
+
+
+def test_the_failure_path_says_how_long_it_spent_and_on_what(tmp_path, clock, caplog):
+    path = tmp_path / "scoreboard-setup.txt"
+    path.write_text("ssid=ExampleNet\npsk=supersecret\ncountry=US\n")
+    air = Air(visible=["Neighbour"], connect_errors=[NOT_FOUND] * 20, clock=clock)
+    nm = NetworkManager(run=air, run_raspi_config=NO_RASPI_CONFIG)
+    with caplog.at_level(logging.INFO, logger="scoreboard.netcfg"):
+        with pytest.raises(NetworkError):
+            apply_boot_file(path, nm=nm, now=lambda: "NOW", clock=clock)
+    said = caplog.text
+    assert "not seen" in said, "the journal does not say the network never appeared"
+    assert "giving up" in said
+    assert "attempt 3" in said
