@@ -34,6 +34,37 @@ Environment=SDL_VIDEODRIVER=kmsdrm
 # scoreboard ever plays a sound; device/tests/test_pi_setup.py fails the
 # moment it starts to.
 Environment=SDL_AUDIODRIVER=dummy
+# Which 2D renderer SDL emulates the window surface with. Without this the
+# panel is SOLID BLACK while the program runs perfectly: v0.1.2 booted, drew
+# for fifteen minutes and logged every frame; the next boot changed nothing
+# but these two variables (passed on the kernel command line with
+# systemd.setenv=) and the panel painted. docs/hardware-checks.md, H1.
+#
+# SDL 2.32.4, read rather than recalled. pygame's non-OpenGL set_mode ends in
+# SDL_GetWindowSurface -> SDL_CreateWindowFramebuffer (SDL_video.c:2708), and
+# on kmsdrm ShouldAttemptTextureFramebuffer() is true, so the surface is
+# emulated with a 2D renderer by SDL_CreateWindowTexture (SDL_video.c:230).
+# With no hint that walks render_drivers[] in order (SDL_render.c:100), where
+# "opengl" is listed before "opengles2". This image ships no libGL.so.1 on
+# purpose, so the "opengl" attempt must fail -- and failing is not free: it
+# tears the kmsdrm window down and rebuilds it twice (SDL_render_gl.c:1726
+# and :1943), each destroy pointing the CRTC back at the original TTY buffer
+# and dropping DRM master (KMSDRM_DestroySurfaces, KMSDRM_GBMDeinit). Naming
+# the renderer skips that attempt entirely.
+#
+# Either variable alone satisfies SDL_CreateWindowTexture, which reads
+# SDL_FRAMEBUFFER_ACCELERATION first and falls back to SDL_RENDER_DRIVER.
+# Both are set because both together are what a real boot proved; checking
+# whether one would do costs a 35-minute build and somebody reflashing a card
+# at night, and buys nothing.
+#
+# The trade, also from the source: when a renderer IS named and cannot be
+# created, SDL_CreateWindowTexture returns -1 with no fallback, kmsdrm has no
+# CreateWindowFramebuffer of its own, and set_mode raises instead of handing
+# back a surface. That is the better failure -- a line in the journal rather
+# than a black screen with nothing to explain it.
+Environment=SDL_FRAMEBUFFER_ACCELERATION=opengles2
+Environment=SDL_RENDER_DRIVER=opengles2
 Environment=PYTHONUNBUFFERED=1
 Environment=SCOREBOARD_CONFIG_DIR=/var/lib/scoreboard
 ExecStart=/opt/scoreboard/.venv/bin/python -m scoreboard.main

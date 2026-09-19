@@ -173,6 +173,53 @@ def test_both_units_ask_sdl_for_the_dummy_audio_driver(checkout):
         assert "Environment=SDL_AUDIODRIVER=dummy" in done.stdout, f"missing from {args}"
 
 
+def test_both_units_name_the_render_driver_for_the_window_surface(checkout):
+    # v0.1.2 booted, ran stably for fifteen minutes, logged every frame it
+    # drew -- and showed solid black. The second boot changed nothing but
+    # these two variables, passed on the kernel command line with
+    # systemd.setenv=, and the panel painted.
+    #
+    # Why, from SDL 2.32.4's source. pygame's non-OpenGL set_mode() ends in
+    # SDL_GetWindowSurface, which calls SDL_CreateWindowFramebuffer
+    # (SDL_video.c:2708). On kmsdrm ShouldAttemptTextureFramebuffer() is true
+    # -- the driver is not the dummy one and none of the x11/windows/
+    # emscripten special cases apply -- so the window surface is emulated with
+    # a 2D renderer by SDL_CreateWindowTexture (SDL_video.c:230). With no hint
+    # set that function walks render_drivers[] in order (SDL_render.c:100) and
+    # takes the first accelerated non-"software" one. GL_RenderDriver
+    # ("opengl") is listed before GLES2_RenderDriver ("opengles2"), so
+    # "opengl" is always tried first.
+    #
+    # It cannot succeed on this image, and failing is not free. The image
+    # ships no libGL.so.1 on purpose, so SDL_EGL_LoadLibraryInternal
+    # (SDL_egl.c:370) cannot load DEFAULT_OGL and KMSDRM_CreateWindow retries
+    # as GLES 2.0 (SDL_kmsdrmvideo.c:1552), leaving gl_config.profile_mask at
+    # SDL_GL_CONTEXT_PROFILE_ES. GL_CreateRenderer tests exactly that
+    # (SDL_render_gl.c:1717) and calls SDL_RecreateWindow to ask for a desktop
+    # context -- which destroys the kmsdrm window: KMSDRM_DestroySurfaces
+    # points the CRTC back at the original TTY buffer and KMSDRM_GBMDeinit
+    # drops DRM master. It fails anyway, and its error path recreates the
+    # window a second time (SDL_render_gl.c:1938). Only then does the loop
+    # reach "opengles2".
+    #
+    # Naming the driver skips the whole attempt: SDL_CreateWindowTexture reads
+    # SDL_FRAMEBUFFER_ACCELERATION first and falls back to SDL_RENDER_DRIVER,
+    # so either one alone would satisfy that code. Both are set because both
+    # together are what was observed to work, and checking an untested subset
+    # costs a 35-minute build and a reflash.
+    #
+    # Both units, because both run the same program against the same SDL on
+    # the same hardware: the appliance unit on an image, the checkout template
+    # on a developer's Pi, which is where H1, H3 and H7 are run.
+    for args in (("--print-unit",), ("--appliance", "--print-unit")):
+        done = run(checkout, *args)
+        assert done.returncode == 0, done.stderr
+        assert "Environment=SDL_FRAMEBUFFER_ACCELERATION=opengles2" in done.stdout, \
+            f"missing from {args}"
+        assert "Environment=SDL_RENDER_DRIVER=opengles2" in done.stdout, \
+            f"missing from {args}"
+
+
 def test_appliance_unit_keeps_the_tty_grab(checkout):
     # Without a controlling TTY, kmsdrm cannot become DRM master and the panel
     # stays black even though the service is "running".

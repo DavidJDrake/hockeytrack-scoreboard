@@ -18,6 +18,20 @@ Environment=SDL_VIDEODRIVER=kmsdrm
 # A developer's Pi has no sound hardware either, and the same 3-second
 # restart loop buries the same failures under the same noise.
 Environment=SDL_AUDIODRIVER=dummy
+# Same reason as the appliance unit, and the same two variables: SDL emulates
+# a non-OpenGL window surface with a 2D renderer (SDL_video.c:230, 2.32.4),
+# tries "opengl" before "opengles2" when nothing names one (SDL_render.c:100),
+# and a Pi whose apt line brings no libGL.so.1 -- which is this one, see
+# tools/pi-setup.sh -- fails that attempt in a way that tears the kmsdrm
+# window down and rebuilds it twice, leaving the panel black while the program
+# draws happily. The appliance unit carries the full reasoning.
+#
+# It belongs here too rather than only on the image: this template is what a
+# developer's Pi runs, and hardware checks H1, H3 and H7 are run through it
+# against the same SDL and the same vc4/v3d stack. Two units that render
+# differently would make those checks say nothing about the image.
+Environment=SDL_FRAMEBUFFER_ACCELERATION=opengles2
+Environment=SDL_RENDER_DRIVER=opengles2
 Environment=PYTHONUNBUFFERED=1
 ExecStart=@DEVICE_DIR@/.venv/bin/python -m scoreboard.main
 Restart=always
