@@ -7,18 +7,42 @@ export function panelTitle(device) {
   return name || device.thingName;
 }
 
-export function gameLabel(game, { timeZone, locale } = {}) {
-  const teams = `${game.away} at ${game.home}`;
+// What kind of game an NHL game id names. The id is season (4 digits), type
+// (2), number (4): 01 preseason, 02 regular season, 03 playoffs. Anything we
+// cannot read is "regular", which is the kind that gets no label -- a wrong
+// word on the list is worse than a missing one.
+export function gameKind(gameId) {
+  const id = String(gameId ?? "");
+  if (!/^\d{10}$/.test(id)) return "regular";
+  return { "01": "preseason", "03": "playoffs" }[id.slice(4, 6)] ?? "regular";
+}
+
+const KIND_LABEL = { preseason: "Preseason", playoffs: "Playoffs" };
+
+// The same two clubs twice on one list, each at home once: a split-squad
+// night. Both clubs ice two line-ups and play in both buildings at once, so
+// "MTL at TOR" beside "TOR at MTL" at the same hour is right, and looks like
+// a bug unless the list says so. Found by the owner on a real preseason night.
+function splitSquad(game, games) {
+  return games.some((other) => other.gameId !== game.gameId && other.away === game.home && other.home === game.away);
+}
+
+export function gameLabel(game, { timeZone, locale, games = [] } = {}) {
+  const parts = [`${game.away} at ${game.home}`];
   const when = new Date(game.start);
-  if (Number.isNaN(when.getTime())) return teams;
-  const time = new Intl.DateTimeFormat(locale, { hour: "numeric", minute: "2-digit", timeZone }).format(when);
-  return `${teams} · ${time}`;
+  if (!Number.isNaN(when.getTime())) {
+    parts.push(new Intl.DateTimeFormat(locale, { hour: "numeric", minute: "2-digit", timeZone }).format(when));
+  }
+  const notes = [KIND_LABEL[gameKind(game.gameId)], splitSquad(game, games) ? "split squad" : ""].filter(Boolean);
+  const note = notes.join(", ");
+  if (note) parts.push(note[0].toUpperCase() + note.slice(1));
+  return parts.join(" · ");
 }
 
 export function gameChoices(device, games, options = {}) {
   const choices = games.map((game) => ({
     value: String(game.gameId),
-    label: gameLabel(game, options),
+    label: gameLabel(game, { ...options, games }),
     selected: game.gameId === device.gameId,
     disabled: false,
   }));
