@@ -1824,8 +1824,14 @@ def test_a_connect_too_short_to_succeed_is_not_attempted(clock):
     budget = netcfg.Budget(netcfg.MIN_CONNECT_S - 1, clock=clock)
     with pytest.raises(NetworkError):
         NetworkManager(run=air).join(HOME, budget=budget, clock=clock)
-    assert all(t >= netcfg.MIN_CONNECT_S for t in air.connect_timeouts), \
-        f"an attempt was made with {air.connect_timeouts}s, under the {netcfg.MIN_CONNECT_S}s floor"
+    # Assert the connect was NOT MADE. `all(t >= MIN_CONNECT_S for t in
+    # air.connect_timeouts)` was what stood here, and it is vacuously true --
+    # no connect is attempted, so the list is empty and all([]) is True. The
+    # test passed whether the floor worked or not.
+    assert air.connects == 0, \
+        f"{air.connects} connect(s) were attempted under the {netcfg.MIN_CONNECT_S}s floor"
+    assert air.connect_timeouts == [], \
+        f"an attempt was granted {air.connect_timeouts}s, under the floor"
 
 
 def test_the_floor_is_long_enough_to_associate_and_get_a_lease():
@@ -2056,6 +2062,10 @@ def test_the_absolute_ceiling_covers_the_one_check_allowed_past_the_deadline(clo
     # budget.expired() before another connect, so at most one such check
     # happens after the deadline.
     class AlwaysTimesOut(Air):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self.verify_timeouts = []
+
         def __call__(self, args, timeout=None):
             if "connect" in args:
                 self.connects += 1
@@ -2063,6 +2073,7 @@ def test_the_absolute_ceiling_covers_the_one_check_allowed_past_the_deadline(clo
                 self.clock.sleep(timeout)
                 raise NetworkError("Error: Timeout 43 sec expired.")
             if args[:4] == ["-t", "-f", "STATE", "general"]:
+                self.verify_timeouts.append(timeout)
                 self.clock.sleep(timeout if timeout is not None else 1)
                 return "disconnected\n"
             return super().__call__(args, timeout=timeout)
@@ -2073,8 +2084,18 @@ def test_the_absolute_ceiling_covers_the_one_check_allowed_past_the_deadline(clo
         NetworkManager(run=air).join(
             HOME, budget=netcfg.Budget(netcfg.BOOT_BUDGET_S, clock=clock), clock=clock)
     spent = clock() - started
-    ceiling = netcfg.BOOT_BUDGET_S + netcfg.VERIFY_OVERRUN_S
+    ceiling = netcfg.ABSOLUTE_CEILING_S
+    assert ceiling == netcfg.BOOT_BUDGET_S + netcfg.VERIFY_OVERRUN_S
     assert spent <= ceiling, f"ran {spent:.2f}s against an absolute ceiling of {ceiling}s"
-    assert ceiling <= 90, f"the absolute ceiling {ceiling}s breaks the site's promise"
-    assert all(t == netcfg.VERIFY_TIMEOUT_S
-               for t in air.timeouts if t == netcfg.VERIFY_TIMEOUT_S), "sanity"
+    # The overrun has to be REAL, or the line above is a ceiling nothing
+    # reaches and proves nothing about it.
+    assert spent > netcfg.BOOT_BUDGET_S, \
+        f"only {spent:.2f}s spent: the check past the deadline never happened"
+    # And the check that overran was granted VERIFY_TIMEOUT_S, which is what
+    # makes VERIFY_OVERRUN_S the right size. What stood here was
+    # `all(t == X for t in air.timeouts if t == X)` -- a tautology: it filters
+    # to the values equal to X and then asserts they equal X. It could not
+    # fail, not even against an empty list.
+    assert air.verify_timeouts, "joined() never asked NetworkManager anything"
+    assert all(t == netcfg.VERIFY_TIMEOUT_S for t in air.verify_timeouts), \
+        f"a verification query was granted {air.verify_timeouts}, not {netcfg.VERIFY_TIMEOUT_S}s"

@@ -77,10 +77,21 @@ ExecStart=/opt/scoreboard/.venv/bin/python -m scoreboard.netcfg
 # 88 s is still inside the "up to a minute and a half" that the download page
 # and the setup steps promise an owner watching a dark panel.
 #
-# 120 s rather than 90 leaves 32 s above even that absolute ceiling for
-# systemd's own overhead, and keeps a slow connect from being killed part-way through, which
-# would leave the setup file looking as though it had been ignored.
-# device/tests/test_pi_setup.py asserts that headroom.
+# Two headrooms, and BOTH are stated here so neither can be read as a
+# correction of the other. They are measurements of different things:
+#
+#   120 - 82 s (the enforced soft budget)  = 38 s of headroom
+#   120 - 88 s (the absolute ceiling)      = 32 s above it
+#
+# The spec quoted the first and this file quoted the second, which read as a
+# contradiction about one TimeoutStartSec. The number that has to clear
+# systemd's timeout is the ABSOLUTE ceiling, because systemd neither knows nor
+# cares that joined()'s overrun is deliberate. 120 s rather than 90 leaves the
+# room above for systemd's own overhead, and keeps a slow connect from being
+# killed part-way through -- which would leave the setup file looking as
+# though it had been ignored.
+# device/tests/test_pi_setup.py asserts both headrooms, against the absolute
+# ceiling, and fails if either number here stops matching the code.
 TimeoutStartSec=120
 
 [Install]
