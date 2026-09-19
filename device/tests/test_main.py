@@ -1406,6 +1406,47 @@ def test_the_help_screen_sleeps_like_everything_else():
                  display=night).show == MESSAGE
 
 
+def sleeping_help_screen(now_utc):
+    """What "cannot reach the service" does at one instant, with the owner's
+    night set and no grace left."""
+    return shown(now=48 * 3600.0, now_utc=now_utc, screen=screens.NO_SERVICE,
+                 display=Display(sleep=NIGHT)).show
+
+
+def test_the_help_screen_sleeps_at_both_edges_of_the_window():
+    # One test used to pin this whole rule, so deleting the branch cost
+    # exactly one failure. The edges are where a window rule is wrong if it
+    # is wrong at all: 23:00 to 07:00 means asleep AT 23:00 and awake AT
+    # 07:00, and it crosses midnight, which is the case an off-by-one in
+    # either direction survives.
+    assert sleeping_help_screen(datetime(2026, 10, 3, 5, 59, tzinfo=timezone.utc)) == MESSAGE
+    assert sleeping_help_screen(datetime(2026, 10, 3, 6, 0, tzinfo=timezone.utc)) == OFF
+    assert sleeping_help_screen(datetime(2026, 10, 3, 9, 0, tzinfo=timezone.utc)) == OFF
+    assert sleeping_help_screen(datetime(2026, 10, 2, 13, 59, tzinfo=timezone.utc)) == OFF
+    assert sleeping_help_screen(datetime(2026, 10, 2, 14, 0, tzinfo=timezone.utc)) == MESSAGE
+
+
+def test_the_help_screen_is_lit_all_day_outside_the_window():
+    # The other half of the same rule: the sleep window is the ONLY thing
+    # that darkens this screen, so it is up at every hour that is not in it.
+    for hour in (15, 18, 21, 0, 3):      # 08:00, 11:00, 14:00, 17:00, 20:00 PDT
+        assert sleeping_help_screen(
+            datetime(2026, 10, 2, hour, 0, tzinfo=timezone.utc)) == MESSAGE, hour
+
+
+def test_the_link_returning_inside_the_window_does_not_wake_the_panel():
+    # The way back from a sleeping help screen is the window ending or the
+    # link returning -- but the link returning at 3 a.m. hands the panel back
+    # to the ordinary rules, which say the same thing the help screen's own
+    # rule did. It is only a live game that gets to be lit at that hour.
+    night = Display(sleep=NIGHT)
+    assert sleeping_help_screen(AT_THREE_AM) == OFF
+    assert shown(now=48 * 3600.0, now_utc=AT_THREE_AM, screen=screens.SCOREBOARD,
+                 state=None, display=night).show == OFF
+    assert shown(now=48 * 3600.0, now_utc=AT_THREE_AM, screen=screens.SCOREBOARD,
+                 state=live_state(), state_age=0.0, display=night).show == GAME
+
+
 def test_the_help_screen_still_answers_during_the_grace_at_night():
     # An owner who has just pressed something at 3 a.m. still gets an answer.
     night = Display(sleep=NIGHT)
