@@ -102,7 +102,20 @@ install_appliance() {
   # Every Python dependency comes from the distribution's signed archive:
   # pygame for its kmsdrm driver, cryptography for enrollment, and paho-mqtt
   # because the service that imports it holds the panel's IoT private key.
-  apt-get install -y python3-pygame python3-gpiozero python3-venv network-manager polkitd python3-cryptography python3-paho-mqtt ca-certificates
+  #
+  # The four graphics packages at the end are the display path. They are here
+  # because SDL's kmsdrm backend dlopens them at runtime rather than linking
+  # them, so nothing in the image depends on libegl1 (libEGL.so.1),
+  # libegl-mesa0 (libEGL_mesa.so.0 plus glvnd's 50_mesa.json), libgles2
+  # (libGLESv2.so.2) or libgl1-mesa-dri (dri/vc4_dri.so and dri/v3d_dri.so,
+  # which in Mesa 25/26 are NOT in mesa-libgallium) -- and apt installs none
+  # of them on its own, since libsdl2-2.0-0 Recommends nothing at all. A
+  # desktop image hides the gap; a Lite appliance image does not. v0.1.1
+  # shipped without them and crash-looped on "EGL not initialized"
+  # (docs/hardware-checks.md, H5). Keep this list identical to
+  # tools/pi-gen/stage-scoreboard/00-packages/00-packages -- which
+  # device/tests/test_pi_gen_recipe.py enforces.
+  apt-get install -y python3-pygame python3-gpiozero python3-venv network-manager polkitd python3-cryptography python3-paho-mqtt ca-certificates libegl1 libegl-mesa0 libgles2 libgl1-mesa-dri
 
   echo "==> service account"
   getent passwd "$SERVICE_USER" >/dev/null || \

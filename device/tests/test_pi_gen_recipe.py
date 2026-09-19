@@ -50,9 +50,53 @@ def appliance_packages() -> set[str]:
     return set(line.split("apt-get install -y", 1)[1].split())
 
 
+PACKAGES_FILE = PIGEN / "stage-scoreboard" / "00-packages" / "00-packages"
+
+
+def image_packages() -> set[str]:
+    # pi-gen runs scripts/remove-comments.sed over an NN-packages file before
+    # apt ever sees it -- the substitution is s/#[^\n]*//g -- so a comment in
+    # that file is not a package. Read it the same way pi-gen does, or the
+    # agreement test below would compare comment words against pi-setup.sh's
+    # apt line and fail on two lists that are in fact identical.
+    return set(re.sub(r"#[^\n]*", "", PACKAGES_FILE.read_text()).split())
+
+
 def test_the_image_packages_are_exactly_what_appliance_mode_installs():
-    listed = set((PIGEN / "stage-scoreboard" / "00-packages" / "00-packages").read_text().split())
-    assert listed == appliance_packages()
+    assert image_packages() == appliance_packages()
+
+
+def test_the_image_package_list_is_read_the_way_pi_gen_reads_it():
+    # The list carries comments now -- they say why each runtime-loaded
+    # graphics package is there. If this repository read the file without
+    # stripping them, every comment word would look like a package name.
+    assert "#" in PACKAGES_FILE.read_text(), "the list no longer explains itself"
+    assert not any(name.startswith("#") for name in image_packages())
+
+
+# SDL's kmsdrm backend dlopens its graphics libraries by soname at runtime
+# instead of linking them, so nothing in the image Depends on them and apt
+# never pulls them in -- not even with Recommends honored, since
+# libsdl2-2.0-0 (2.32.4+dfsg-1) has no Recommends at all. v0.1.1 shipped
+# without them and scoreboard.service crash-looped on "EGL not initialized"
+# (docs/hardware-checks.md, H5).
+DISPLAY_PACKAGES = {"libegl1", "libegl-mesa0", "libgles2", "libgl1-mesa-dri"}
+
+
+def test_the_display_libraries_are_in_both_package_lists():
+    for where, packages in (("the image list", image_packages()),
+                            ("pi-setup.sh --appliance", appliance_packages())):
+        missing = DISPLAY_PACKAGES - packages
+        assert not missing, f"{where} is missing {sorted(missing)}; the panel would stay black"
+
+
+def test_the_display_libraries_are_explained_where_they_are_listed():
+    # A package nothing depends on, with no comment saying why it is there, is
+    # the first thing a future cleanup deletes -- and this set is invisible to
+    # every dependency the image has.
+    for name, text in (("the image list", PACKAGES_FILE.read_text()),
+                       ("pi-setup.sh", (REPO / "tools" / "pi-setup.sh").read_text())):
+        assert "at runtime" in text, f"{name} does not say why these packages are here"
 
 
 def test_only_the_scoreboard_stage_exports_an_image():

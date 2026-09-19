@@ -1,3 +1,9 @@
+# Exactly what tools/pi-setup.sh --appliance installs. pi-gen strips these
+# comments (scripts/remove-comments.sed) before apt sees the list, and
+# device/tests/test_pi_gen_recipe.py fails the build if the two lists drift.
+#
+# This file is NOT named 00-packages-nr, so pi-gen installs it WITH
+# Recommends -- but that is not what supplies the graphics libraries below.
 python3-pygame
 python3-gpiozero
 python3-venv
@@ -6,3 +12,40 @@ polkitd
 python3-cryptography
 ca-certificates
 python3-paho-mqtt
+
+# --- The display path (added 2026-09-18, after v0.1.1) ---
+#
+# SDL's kmsdrm backend dlopens these by soname at runtime rather than linking
+# them, so NOTHING in the image depends on them and apt installs none of them
+# on its own. Recommends would not have helped either: libsdl2-2.0-0
+# (2.32.4+dfsg-1) Depends on libdrm2, libgbm1 and libwayland-egl1, Suggests
+# only xdg-utils, and Recommends nothing at all. A desktop image hides the gap
+# because its desktop pulls the whole stack in for its own reasons; a Lite
+# appliance image does not. v0.1.1 shipped without them and crash-looped on
+# "EGL not initialized" (docs/hardware-checks.md, H5).
+#
+# libegl1          libEGL.so.1, the glvnd dispatcher SDL_egl.c opens by that
+#                  exact soname. Pulls libglvnd0 and libegl-mesa0.
+# libegl-mesa0     libEGL_mesa.so.0, the Mesa EGL vendor library the
+#                  dispatcher loads, plus /usr/share/glvnd/egl_vendor.d/
+#                  50_mesa.json, the vendor file without which the dispatcher
+#                  finds no driver. Named explicitly rather than left to
+#                  libegl1's Depends, so the vendor half cannot go missing
+#                  silently.
+# libgles2         libGLESv2.so.2, which SDL loads before EGL and retries as
+#                  GLES 2.0 when its desktop-GL attempt fails.
+# libgl1-mesa-dri  dri/vc4_dri.so and dri/v3d_dri.so -- the Pi 4's KMS display
+#                  and render drivers. In Mesa 25/26 mesa-libgallium ships
+#                  only libgallium-<ver>.so and the VA-API *_drv_video.so
+#                  entries; every *_dri.so entry point lives here, so without
+#                  it the image has no DRI driver at all (verified with
+#                  dpkg-deb -c on the trixie arm64 debs, 2026-09-18).
+#
+# libgbm1, mesa-libgallium and libdrm2 are already present as libsdl2-2.0-0's
+# own Depends, so they are not repeated here. tools/image-gate.sh asserts the
+# files all of these ship, by path, so a future apt change cannot quietly drop
+# one and still pass the gate.
+libegl1
+libegl-mesa0
+libgles2
+libgl1-mesa-dri
