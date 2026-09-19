@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
-import { emailVerified, gameChoices, gameLabel, messageFor, panelTitle } from "../assets/view.js";
+import { canResend, emailVerified, gameChoices, gameLabel, messageFor, panelTitle } from "../assets/view.js";
 
 const games = [
   { gameId: 1, away: "TOR", home: "MTL", start: "2026-10-08T23:00:00Z", state: "FUT" },
@@ -57,8 +57,28 @@ test("an unknown action or kind falls back to the general failure", () => {
   assert.equal(messageFor("nonsense", "failed"), messageFor("any", "failed"));
 });
 
+// A panel with no input device can only be told to show its game again from
+// here. The `change` event on the game picker cannot do it: re-selecting the
+// option that is already selected fires nothing, and with one game listed and
+// already followed there is no other option to pick. Without a button, the
+// device's "a live re-send means the owner wants it back" path cannot be
+// reached by a human at all.
+test("a panel's current game can be re-sent only when it has one", () => {
+  assert.equal(canResend({ thingName: "scoreboard-abc", gameId: 2026020001 }), true);
+  assert.equal(canResend({ thingName: "scoreboard-abc", gameId: 0 }), false);
+  assert.equal(canResend({ thingName: "scoreboard-abc" }), false);
+  assert.equal(canResend({ thingName: "scoreboard-abc", gameId: null }), false);
+  assert.equal(canResend({ thingName: "scoreboard-abc", gameId: "2026020001" }), false);
+  assert.equal(canResend(undefined), false);
+});
+
+test("re-sending a game has its own wording for a panel that has gone", () => {
+  assert.equal(messageFor("resend", "not-found"), messageFor("setGame", "not-found"));
+  assert.equal(messageFor("resend", "unavailable"), messageFor("any", "unavailable"));
+});
+
 test("every message is plain text", () => {
-  for (const action of ["claim", "setGame", "rename", "unbind", "list", "games", "any"]) {
+  for (const action of ["claim", "setGame", "resend", "rename", "unbind", "list", "games", "any"]) {
     for (const kind of ["unauthorized", "not-found", "bad-request", "unavailable", "failed"]) {
       const text = messageFor(action, kind);
       assert.equal(typeof text, "string");

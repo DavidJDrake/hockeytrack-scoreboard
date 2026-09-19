@@ -1,11 +1,18 @@
+from pathlib import Path
+
 import pygame
 import pytest
 
 from scoreboard import screens
 from scoreboard.assets import Assets
+from scoreboard.main import SHIFT_PATTERN
+from scoreboard.model import GameState
 from scoreboard.netcfg import Network
-from scoreboard.render import W, H, BG
+from scoreboard.render import W, H, BG, draw, shift_frame
 from scoreboard.settings import Settings
+
+FIX = Path(__file__).parent / "fixtures"
+SITE = "scoreboard.davidjdrake.com"
 
 
 @pytest.mark.parametrize("identity,network,want", [
@@ -226,3 +233,134 @@ def test_the_two_setup_screens_do_not_look_alike():
     problem = pygame.Surface((W, H))
     screens.draw_enroll_problem(problem, assets, "cannot reach the service", "test build")
     assert pygame.image.tostring(waiting, "RGB") != pygame.image.tostring(problem, "RGB")
+
+
+# --------------------------------------------------------------------------
+# Nothing the decision asks for comes out dark
+#
+# The other half of test_main's invariant. There, the rule: the panel is only
+# ever black when presentation says OFF, for one of four stated reasons.
+# Here, the consequence: every screen it can ask for INSTEAD of OFF really
+# does put something on the glass, shifted or not. A screen that decided to
+# stay on and then painted nothing would be the owner's original complaint
+# with extra steps.
+#
+# Stated as "something is lit", not "something differs from the background":
+# a frame filled with BG and nothing else is exactly the dead-looking panel
+# that was reported.
+# --------------------------------------------------------------------------
+
+
+def _lit(paint) -> int:
+    pygame.init()
+    surface = pygame.Surface((W, H))
+    paint(surface)
+    return sum(1 for x in range(0, W, 3) for y in range(0, H, 3)
+               if max(surface.get_at((x, y))[:3]) > max(BG) + 24)
+
+
+def _state(name: str, swap: str | None = None) -> GameState:
+    text = (FIX / name).read_text()
+    if swap:
+        text = text.replace('"state":"LIVE"', f'"state":"{swap}"')
+    return GameState.from_json(text)
+
+
+def _screens():
+    assets = Assets()
+    live = _state("state_live.json")
+    yield "live", lambda s: draw(s, live, live.as_of_ms + 20_000, assets)
+    yield "goal flash", lambda s: draw(s, live, live.last_goal[2] + 500, assets)
+    final = _state("state_live.json", "FINAL")
+    yield "final", lambda s: draw(s, final, final.as_of_ms, assets, link_ok=False)
+    off = _state("state_live.json", "OFF")
+    yield "off", lambda s: draw(s, off, off.as_of_ms, assets)
+    pre = _state("state_pre.json")
+    yield "countdown", lambda s: draw(s, pre, pre.as_of_ms, assets)
+    yield "countdown, six hours out", lambda s: draw(s, pre, pre.as_of_ms - 6 * 3600 * 1000, assets)
+    yield "countdown expired", lambda s: draw(s, pre, pre.as_of_ms + 24 * 3600 * 1000, assets)
+    # NO_GAME: what the grace period shows when nothing is selected, before
+    # the panel goes off.
+    yield "no game", lambda s: draw(s, None, 0, assets)
+    yield "unregistered", lambda s: screens.draw_unregistered(s, assets, "development build")
+    yield "offline", lambda s: screens.draw_offline(s, assets, "development build")
+    yield "pairing code", lambda s: screens.draw_waiting(
+        s, assets, "7K4M-9QX2", SITE, "friend@example.com", "development build")
+    yield "enroll problem", lambda s: screens.draw_enroll_problem(
+        s, assets, "cannot reach the service", "development build")
+    yield "cannot reach the service", lambda s: screens.draw_no_service(
+        s, assets, "development build")
+    yield "cannot draw", lambda s: screens.draw_cannot_draw(s, assets, "development build")
+    yield "settings", lambda s: screens.draw_settings(
+        s, assets, Settings(networks=[Network(ssid="HomeNet", signal=70, secured=True)]),
+        None, "development build")
+
+
+SCREENS = list(_screens())
+IDS = [name for name, _ in SCREENS]
+
+
+@pytest.mark.parametrize("name,paint", SCREENS, ids=IDS)
+def test_every_screen_the_decision_can_ask_for_is_lit(name, paint):
+    assert _lit(paint) > 20, f"{name} is a dark panel with nothing on it"
+
+
+@pytest.mark.parametrize("name,paint", SCREENS, ids=IDS)
+def test_no_frame_goes_dark_once_the_pixel_shift_has_moved_it(name, paint):
+    # The corners of the shift pattern, which are the only offsets that can
+    # move anything off an edge.
+    for offset in [o for o in SHIFT_PATTERN if abs(o[0]) == 4 or o[1] == -4]:
+        def painted(surface):
+            paint(surface)
+            shift_frame(surface, offset)
+
+        assert _lit(painted) > 20, f"{name} at {offset} is a dark panel with nothing on it"
+
+
+# --------------------------------------------------------------------------
+# Message screens fit the panel
+#
+# draw_message places its lines at a fixed size and never measured them.
+# That was survivable while every line was short; "This panel is on the
+# network but cannot reach the scoreboard service." is 1092 px in Barlow
+# Condensed and considerably wider in a fallback face, and a line that
+# overflows is one somebody cannot read the end of -- on the screen whose
+# entire job is to be read.
+# --------------------------------------------------------------------------
+
+
+MESSAGE_SCREENS = [
+    ("unregistered", lambda s, a: screens.draw_unregistered(s, a, BUILD_STAMP)),
+    ("offline", lambda s, a: screens.draw_offline(s, a, BUILD_STAMP)),
+    ("cannot reach the service", lambda s, a: screens.draw_no_service(s, a, BUILD_STAMP)),
+    ("cannot draw", lambda s, a: screens.draw_cannot_draw(s, a, BUILD_STAMP)),
+    ("enroll problem", lambda s, a: screens.draw_enroll_problem(
+        s, a, "the certificate service returned 503 Service Unavailable", BUILD_STAMP)),
+    ("pairing code", lambda s, a: screens.draw_waiting(
+        s, a, "7K4M-9QX2", SITE, "jonathan.fitzwilliam-smythe@averylongdomainname.co.uk", BUILD_STAMP)),
+]
+BUILD_STAMP = "image 2026-09-20, commit abc1234"
+
+
+@pytest.mark.parametrize("name,paint", MESSAGE_SCREENS, ids=[n for n, _ in MESSAGE_SCREENS])
+def test_every_message_screen_fits_the_panel_with_a_margin(name, paint):
+    pygame.init()
+    surface = pygame.Surface((W, H))
+    paint(surface, Assets())
+    top, bottom, left, right = _content_bounds(surface)
+    assert left is not None, f"{name} painted nothing"
+    assert left >= 20, f"{name} runs into the left edge at x={left}"
+    assert right <= W - 20, f"{name} runs off the right edge at x={right}"
+    assert top >= 10 and bottom <= H - 10, f"{name} runs off the top or bottom: {top}..{bottom}"
+
+
+def test_a_line_too_long_for_the_panel_is_shrunk_rather_than_clipped():
+    # The property, tested directly rather than only through the screens
+    # that happen to exist today.
+    pygame.init()
+    surface = pygame.Surface((W, H))
+    screens.draw_message(surface, Assets(), "A heading that goes on and on and on for ever",
+                         ["A line of body text that is far too long for any panel this size to show at "
+                          "its natural size, and then keeps going well past that point"])
+    top, bottom, left, right = _content_bounds(surface)
+    assert left >= 20 and right <= W - 20, f"{left}..{right}"

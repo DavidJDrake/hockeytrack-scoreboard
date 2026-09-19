@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -65,6 +66,31 @@ def test_pregame_countdown():
     assert s.seconds_to_start(1790897400000 - 90_000) == 90
     assert s.seconds_to_start(1790897400000 + 1) == 0
     assert live().seconds_to_start(0) is None  # not pre-game
+
+
+@pytest.mark.parametrize("start", [
+    "not a timestamp",
+    "23:30",                    # a time with no date
+    "2026-10-01T23:30:00+99:00",
+    "2026-13-45T99:99:99Z",
+    "2026-10-01T23:30:00",      # parses, but names no instant: it has no zone
+])
+def test_a_start_this_panel_cannot_read_is_not_a_countdown(start):
+    # `start` comes off the network and nothing validates it on the way in:
+    # from_json takes the string as it finds it. This used to raise
+    # ValueError out of datetime.fromisoformat, three frames below a render
+    # loop that has no handler -- the service died, systemd restarted it,
+    # and the panel crash-looped on a black screen. Nothing the network can
+    # say may raise from here.
+    doc = json.loads((FIX / "state_pre.json").read_text())
+    doc["start"] = start
+    assert GameState.from_json(json.dumps(doc)).seconds_to_start(1790897400000) is None
+
+
+def test_a_missing_start_is_not_a_countdown_either():
+    doc = json.loads((FIX / "state_pre.json").read_text())
+    doc["start"] = None
+    assert GameState.from_json(json.dumps(doc)).seconds_to_start(0) is None
 
 
 def test_parse_today():

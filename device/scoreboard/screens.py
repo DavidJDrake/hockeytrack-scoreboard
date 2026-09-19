@@ -12,15 +12,21 @@ from pathlib import Path
 import pygame
 
 from .assets import Assets
-from .render import W, H, BG, INK, MUTED
+from .render import W, H, BG, INK, MUTED, fit_px
 
 SCOREBOARD, UNREGISTERED, OFFLINE = "scoreboard", "unregistered", "offline"
-WAITING, ENROLL_PROBLEM = "waiting", "enroll-problem"
+WAITING, ENROLL_PROBLEM, NO_SERVICE = "waiting", "enroll-problem", "no-service"
+# Not a screen_for answer: the settings screen is opened by a keypress, not
+# decided from the panel's condition. It is named here so main can tell the
+# display decision "somebody is using this panel", which is one of the things
+# that is never switched off.
+SETTINGS = "settings"
 BUILD_FILE = Path("/etc/scoreboard-build")
 NETWORK_WINDOW = 5  # rows of the network list shown at once on the settings screen
 
 
-def screen_for(has_identity: bool, has_network: bool, enrollment=None) -> str:
+def screen_for(has_identity: bool, has_network: bool, enrollment=None,
+               link_down: bool = False, live_game: bool = False) -> str:
     """Which panel is showing.
 
     Identity first: a panel nobody has registered has nothing to say about
@@ -32,9 +38,38 @@ def screen_for(has_identity: bool, has_network: bool, enrollment=None) -> str:
     because a code the panel cannot refresh is worse than useless: it may have
     rotated already, and "no network" is the thing the person standing there
     can actually fix.
+
+    ``link_down`` says MQTT has been down long enough to be worth reporting
+    (main.needs_link_help owns "long enough"). It sits below OFFLINE, which
+    is the more specific fault and the one somebody standing there can act
+    on, and above the scoreboard -- with one exception, ``live_game``.
+
+    ``live_game`` is main.live_holds_panel: LIVE, *and* a document this
+    panel received less than two hours ago -- not "the last document said
+    LIVE", which had no bound at all and suppressed this screen for ever.
+    A live game keeps the panel, because the owner's rule is that a live
+    game wins and because the alternative throws away the one thing they
+    are watching. What makes that safe is that render.draw stops pretending
+    when the documents stop: the clock and the penalty clocks freeze at the
+    last document's own values instead of counting down from them, and a
+    band says how old the frame is AND whether the link is down. That band
+    says more than this screen would, over a scoreboard that is still true
+    as of a stated moment. Brief drops never get here at all; that is what
+    the threshold is for.
+
+    Note that this is the LONGER of the two live-game bounds, deliberately.
+    The shorter one (main.live_and_fresh, 30 s) decides whether the panel
+    may claim a game is happening, which is what beats sleep hours. Whether
+    the frozen frame still beats this screen is a different question, and a
+    third-period Wi-Fi hiccup must not cost the owner the score.
+
+    An unregistered panel never gets here: it has no link to lose, and its
+    own screens already say what is wrong.
     """
     if has_identity:
-        return SCOREBOARD if has_network else OFFLINE
+        if not has_network:
+            return OFFLINE
+        return NO_SERVICE if link_down and not live_game else SCOREBOARD
     if enrollment is None:
         return UNREGISTERED
     if not has_network:
@@ -69,14 +104,30 @@ def build_identity(path: Path = BUILD_FILE) -> str:
         return "development build"
 
 
+# How much of the panel a message screen may use across. The rest is margin:
+# a bezel eats some, overscan eats some, and a line whose end is under either
+# is a line somebody cannot read -- on the screens whose whole job is to be
+# read.
+MESSAGE_WIDTH = W - 160
+
+
 def draw_message(surface: pygame.Surface, assets: Assets, title: str, lines: list[str]) -> None:
+    """A heading and some lines, centred, each shrunk to fit the panel.
+
+    The shrinking is not decoration. These are the screens that carry the
+    longest sentences in the product ("This panel is on the network but
+    cannot reach the scoreboard service." is 1092 px in Barlow Condensed and
+    wider in a fallback face), and until this they were drawn at a fixed
+    size and blitted wherever they landed.
+    """
     surface.fill(BG)
     y = H // 2 - 120
-    heading = assets.font(96, True).render(title, True, INK)
+    heading = assets.font(fit_px(assets, title, 96, MESSAGE_WIDTH), True).render(title, True, INK)
     surface.blit(heading, heading.get_rect(midtop=(W // 2, y)))
     y += 118
     for line in lines:
-        img = assets.font(44, False).render(line, True, MUTED)
+        img = assets.font(fit_px(assets, line, 44, MESSAGE_WIDTH, bold=False, min_px=20),
+                          False).render(line, True, MUTED)
         surface.blit(img, img.get_rect(midtop=(W // 2, y)))
         y += 54
 
@@ -93,6 +144,39 @@ def draw_offline(surface: pygame.Surface, assets: Assets, build: str) -> None:
     draw_message(surface, assets, "No network", [
         "This panel cannot reach Wi-Fi.",
         "Press S for network settings.",
+        build,
+    ])
+
+
+def draw_no_service(surface: pygame.Surface, assets: Assets, build: str) -> None:
+    """Registered, on the network, and the broker is not answering.
+
+    The gap this closes: everything else about that panel looks healthy, so
+    with nothing due it would simply go dark on schedule -- and a dark panel
+    is the one thing its owner cannot tell from broken hardware. It is
+    deliberately about the *connection*, not about hockey: there is no game
+    on this screen because no game reached it.
+    """
+    draw_message(surface, assets, "Cannot reach the service", [
+        "This panel is on the network but cannot reach the scoreboard service.",
+        "Check the panel's internet connection. It will keep trying.",
+        "Press S for network settings.",
+        build,
+    ])
+
+
+def draw_cannot_draw(surface: pygame.Surface, assets: Assets, build: str) -> None:
+    """The frame that could not be drawn, said out loud.
+
+    main's render loop paints this when drawing raised -- text off the
+    network reaching the font renderer, most likely. It is not a screen
+    anybody should ever see; it exists so that the alternative (the service
+    exiting, systemd restarting it, a panel crash-looping on black) cannot
+    happen. Somebody reading this off a wall has something to report.
+    """
+    draw_message(surface, assets, "Display problem", [
+        "The panel could not draw the last update it received.",
+        "It will keep trying. The journal has the details.",
         build,
     ])
 

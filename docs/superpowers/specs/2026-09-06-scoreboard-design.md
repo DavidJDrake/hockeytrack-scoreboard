@@ -159,9 +159,43 @@ Cost: a heartbeat every 5 s per live game ≈ 720 invocations per game-hour;
   in the state file.
 - Reconnect with backoff; while disconnected, keep rendering the last state
   with a small "no link" glyph. The service restarts on crash.
-- Pre-game (`state: PRE`): puck-drop countdown from `start`. Post-game:
-  FINAL held with the final score. Screen blanks (backlight off via DPMS)
-  after a configurable idle period when no game is selected.
+- Pre-game (`state: PRE`): puck-drop countdown from `start`, shown once the
+  game is inside the countdown lead (default **12 h**) and never interrupted
+  while it runs. That window also closes 2 h after the scheduled start if no
+  LIVE document ever arrives, so a postponed or cancelled game does not
+  leave `PUCK DROP 00:00:00` on the wall indefinitely; a state this build
+  does not recognize is shown under the same bound — lit, then off, never
+  lit for ever. A `start` the panel cannot read, or a clock NTP has not set
+  yet, draws `--:--:--` rather than zeros and is bounded the same way — and
+  nothing a published document can contain may raise out of the render loop.
+  Post-game: FINAL held with the final score for the final
+  hold (default 3 h), measured from the moment this panel first saw the game
+  end. The screen is black outside those windows, when no game is selected
+  (after a five-minute grace, so whoever just chose one sees that the panel
+  heard them), and inside the owner's sleep hours — which a live
+  game overrides, and which are not in effect until NTP has set the clock.
+  The screens that ask the owner for something (not registered, pairing
+  code, enrollment failing, no network) are never switched off. A registered
+  panel whose MQTT link has been down two minutes on a working network shows
+  "cannot reach the service", which does obey sleep hours — nobody has to be
+  at the panel for it and it heals itself — and which a live game outranks
+  for as long as its document is worth showing: a live game keeps the panel,
+  with its clocks frozen at the last document's own values and a
+  "NO LINK / NO UPDATES - N MIN OLD" band in the gutter above the rule line,
+  rather than counting down from a moment that is receding. **"Live" is the
+  age of the document, not the state of the socket**, and there are two
+  bounds: 30 s without a document freezes the frame, draws the band and ends
+  the sleep-hours exemption; 2 h without one ends the game, and only then
+  does the help screen get the panel. Burn-in is
+  handled by a few pixels of whole-frame shift on a slow schedule, not by
+  blanking.
+  **Corrected 2026-09-19**, from "screen blanks (backlight off via DPMS)
+  after a configurable idle period when no game is selected": that rule was
+  found wrong on hardware — it blanked a running countdown, which nothing
+  could then bring back. See `docs/hardware-checks.md`, "Display behavior".
+  Whether the backlight itself can be put to sleep (DPMS under kmsdrm with
+  the hardened unit) is untested on this board and is carried there as a
+  follow-up; "off" means a black frame until it is.
 - Provisioning: `tools/provision.sh` creates the IoT thing and certificate
   and writes an image-ready `config/` directory; first boot needs only
   Wi-Fi credentials.
