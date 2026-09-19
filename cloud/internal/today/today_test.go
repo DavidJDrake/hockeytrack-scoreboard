@@ -51,3 +51,47 @@ func TestBuildPicksTodayAndCarriesLateGames(t *testing.T) {
 		t.Error("generatedAt unset")
 	}
 }
+
+// HockeyTrack's schedule page tells two games between the same clubs apart
+// by building, and marks the preseason. The picker copies that, so the
+// document has to carry what the schedule already knows.
+func TestBuildCarriesVenueAndType(t *testing.T) {
+	sched := []byte(`{"games":[
+	 {"id":2026010006,"date":"2026-09-19","start":"2026-09-19T23:00:00Z","away":"MTL","home":"TOR","type":1,"venue":"Scotiabank Arena"},
+	 {"id":2026010007,"date":"2026-09-19","start":"2026-09-19T23:00:00Z","away":"TOR","home":"MTL","type":1,"venue":"Centre Bell"},
+	 {"id":2026020001,"date":"2026-09-19","start":"2026-09-19T23:30:00Z","away":"BOS","home":"NYR"}]}`)
+	doc, err := Build(sched, nil, time.Date(2026, 9, 19, 20, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Games) != 3 {
+		t.Fatalf("games = %d, want 3", len(doc.Games))
+	}
+	if g := doc.Games[0]; g.Venue != "Scotiabank Arena" || g.Type != 1 {
+		t.Errorf("first game = %+v", g)
+	}
+	if g := doc.Games[2]; g.Venue != "" || g.Type != 0 {
+		t.Errorf("a schedule entry with neither field = %+v, want both empty", g)
+	}
+}
+
+// The venue is somebody else's text on its way to a web page. The page
+// escapes it; this keeps it a short single line regardless.
+func TestBuildBoundsTheVenue(t *testing.T) {
+	long := ""
+	for i := 0; i < 50; i++ {
+		long += "Aréna "
+	}
+	sched := []byte(`{"games":[{"id":1,"date":"2026-09-19","start":"2026-09-19T23:00:00Z","away":"A","home":"B","venue":"` + long + `"},
+	 {"id":2,"date":"2026-09-19","start":"2026-09-19T23:30:00Z","away":"A","home":"B","venue":"  Bell\n\tCentre\u0007 "}]}`)
+	doc, err := Build(sched, nil, time.Date(2026, 9, 19, 20, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len([]rune(doc.Games[0].Venue)); n > maxVenueRunes {
+		t.Errorf("venue is %d runes, want at most %d", n, maxVenueRunes)
+	}
+	if got := doc.Games[1].Venue; got != "Bell Centre" {
+		t.Errorf("venue = %q, want control characters gone and spaces collapsed", got)
+	}
+}

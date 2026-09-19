@@ -7,42 +7,40 @@ export function panelTitle(device) {
   return name || device.thingName;
 }
 
-// What kind of game an NHL game id names. The id is season (4 digits), type
-// (2), number (4): 01 preseason, 02 regular season, 03 playoffs. Anything we
-// cannot read is "regular", which is the kind that gets no label -- a wrong
-// word on the list is worse than a missing one.
-export function gameKind(gameId) {
-  const id = String(gameId ?? "");
-  if (!/^\d{10}$/.test(id)) return "regular";
-  return { "01": "preseason", "03": "playoffs" }[id.slice(4, 6)] ?? "regular";
+// Copied from HockeyTrack's schedule page, which already solved this: a row
+// there is the clubs, the building, and a "Pre" chip on preseason games. The
+// building is what tells a split-squad night apart -- MTL at TOR and TOR at
+// MTL at the same hour, which the owner first read as a bug in this list.
+//
+// `type` is the NHL's and comes through from HockeyTrack's schedule (1
+// preseason, 2 regular season, 3 playoffs). The same two digits sit in the
+// game id -- season (4), type (2), number (4) -- so a today document from an
+// API older than this page still gets its chip.
+export function gameType(game) {
+  if ([1, 2, 3].includes(game?.type)) return game.type;
+  const id = String(game?.gameId ?? "");
+  const fromId = /^\d{10}$/.test(id) ? Number(id.slice(4, 6)) : 0;
+  return [1, 2, 3].includes(fromId) ? fromId : 0;
 }
 
-const KIND_LABEL = { preseason: "Preseason", playoffs: "Playoffs" };
+const TYPE_CHIP = { 1: "Pre", 3: "Playoffs" };
 
-// The same two clubs twice on one list, each at home once: a split-squad
-// night. Both clubs ice two line-ups and play in both buildings at once, so
-// "MTL at TOR" beside "TOR at MTL" at the same hour is right, and looks like
-// a bug unless the list says so. Found by the owner on a real preseason night.
-function splitSquad(game, games) {
-  return games.some((other) => other.gameId !== game.gameId && other.away === game.home && other.home === game.away);
-}
-
-export function gameLabel(game, { timeZone, locale, games = [] } = {}) {
+export function gameLabel(game, { timeZone, locale } = {}) {
   const parts = [`${game.away} at ${game.home}`];
   const when = new Date(game.start);
   if (!Number.isNaN(when.getTime())) {
     parts.push(new Intl.DateTimeFormat(locale, { hour: "numeric", minute: "2-digit", timeZone }).format(when));
   }
-  const notes = [KIND_LABEL[gameKind(game.gameId)], splitSquad(game, games) ? "split squad" : ""].filter(Boolean);
-  const note = notes.join(", ");
-  if (note) parts.push(note[0].toUpperCase() + note.slice(1));
+  if (typeof game.venue === "string" && game.venue.trim()) parts.push(game.venue.trim());
+  const chip = TYPE_CHIP[gameType(game)];
+  if (chip) parts.push(chip);
   return parts.join(" · ");
 }
 
 export function gameChoices(device, games, options = {}) {
   const choices = games.map((game) => ({
     value: String(game.gameId),
-    label: gameLabel(game, { ...options, games }),
+    label: gameLabel(game, options),
     selected: game.gameId === device.gameId,
     disabled: false,
   }));

@@ -6,7 +6,9 @@ package today
 import (
 	"encoding/json"
 	"sort"
+	"strings"
 	"time"
+	"unicode"
 )
 
 type Game struct {
@@ -15,6 +17,12 @@ type Game struct {
 	Home   string `json:"home"`
 	Start  string `json:"start"`
 	State  string `json:"state"`
+	// Venue and Type are HockeyTrack's own, passed through so the picker can
+	// show what its schedule page shows. Type is the NHL's: 1 preseason,
+	// 2 regular season, 3 playoffs; 0 when the schedule did not say. Panels
+	// read neither (parse_today takes the keys it knows).
+	Venue string `json:"venue,omitempty"`
+	Type  int    `json:"type,omitempty"`
 }
 
 type Doc struct {
@@ -29,7 +37,28 @@ type schedule struct {
 		Start string `json:"start"`
 		Away  string `json:"away"`
 		Home  string `json:"home"`
+		Type  int    `json:"type"`
+		Venue string `json:"venue"`
 	} `json:"games"`
+}
+
+const maxVenueRunes = 60
+
+// cleanVenue makes a building's name one short printable line. It is text
+// from upstream of upstream, headed for a web page; the page escapes it, and
+// this does not rely on that.
+func cleanVenue(v string) string {
+	v = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, v)
+	v = strings.Join(strings.Fields(v), " ")
+	if r := []rune(v); len(r) > maxVenueRunes {
+		v = strings.TrimSpace(string(r[:maxVenueRunes]))
+	}
+	return v
 }
 
 var eastern = mustLoad("America/New_York")
@@ -70,7 +99,7 @@ func Build(scheduleJSON []byte, states map[int64]string, now time.Time) (Doc, er
 		if state == "" {
 			state = "PRE"
 		}
-		doc.Games = append(doc.Games, Game{GameID: g.ID, Away: g.Away, Home: g.Home, Start: g.Start, State: state})
+		doc.Games = append(doc.Games, Game{GameID: g.ID, Away: g.Away, Home: g.Home, Start: g.Start, State: state, Venue: cleanVenue(g.Venue), Type: g.Type})
 	}
 	sort.Slice(doc.Games, func(i, j int) bool { return doc.Games[i].Start < doc.Games[j].Start })
 	return doc, nil

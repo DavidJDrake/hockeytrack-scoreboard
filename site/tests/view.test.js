@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
-import { canResend, emailVerified, gameChoices, gameKind, gameLabel, messageFor, panelTitle } from "../assets/view.js";
+import { canResend, emailVerified, gameChoices, gameLabel, gameType, messageFor, panelTitle } from "../assets/view.js";
 
 const games = [
   { gameId: 1, away: "TOR", home: "MTL", start: "2026-10-08T23:00:00Z", state: "FUT" },
@@ -101,68 +101,46 @@ test("no script on this site turns a string into markup", () => {
 });
 
 // Found by the owner on a real preseason night: "MTL at TOR" and "TOR at MTL"
-// at the same hour looks like a bug. It is a split-squad night -- each club
-// ices two line-ups and they play each other in both buildings at once. The
-// list was accurate and gave no way to know that.
-const splitSquad = [
-  { gameId: 2026010006, away: "MTL", home: "TOR", start: "2026-09-19T23:00:00Z", state: "FUT" },
-  { gameId: 2026010007, away: "TOR", home: "MTL", start: "2026-09-19T23:00:00Z", state: "FUT" },
-  { gameId: 2026010008, away: "BOS", home: "NYR", start: "2026-09-19T23:00:00Z", state: "FUT" },
+// at the same hour looks like a bug. It is a split-squad night. HockeyTrack's
+// schedule page shows the building and a "Pre" chip; this list copies it.
+const night = [
+  { gameId: 2026010006, away: "MTL", home: "TOR", start: "2026-09-19T23:00:00Z", state: "FUT", type: 1, venue: "Scotiabank Arena" },
+  { gameId: 2026010007, away: "TOR", home: "MTL", start: "2026-09-19T23:00:00Z", state: "FUT", type: 1, venue: "Centre Bell" },
 ];
-const label = (game, all) => gameLabel(game, { timeZone: "America/Toronto", locale: "en-US", games: all });
+const label = (game) => gameLabel(game, { timeZone: "America/Toronto", locale: "en-US" });
 
-test("the kind of game is read from the NHL's own id", () => {
-  assert.equal(gameKind(2026010006), "preseason");
-  assert.equal(gameKind(2026020002), "regular");
-  assert.equal(gameKind(2026030111), "playoffs");
-  assert.equal(gameKind("2026010006"), "preseason", "an id that arrives as a string");
-  for (const odd of [undefined, null, 0, 12, "abc", 2026990001, 2026040001]) {
-    assert.equal(gameKind(odd), "regular", `an id we cannot read (${odd}) is not labelled at all`);
+test("a row is the clubs, the time, the building, and a Pre chip", () => {
+  assert.equal(label(night[0]), "MTL at TOR · 7:00 PM · Scotiabank Arena · Pre");
+  assert.equal(label(night[1]), "TOR at MTL · 7:00 PM · Centre Bell · Pre");
+});
+
+test("a regular-season game gets no chip, and a playoff game says so", () => {
+  assert.equal(label({ ...night[0], gameId: 2026020002, type: 2 }), "MTL at TOR · 7:00 PM · Scotiabank Arena");
+  assert.equal(label({ ...night[0], gameId: 2026030111, type: 3 }), "MTL at TOR · 7:00 PM · Scotiabank Arena · Playoffs");
+});
+
+test("the type is the schedule's, and the game id's when the schedule did not say", () => {
+  assert.equal(gameType({ gameId: 2026020002, type: 1 }), 1, "the schedule wins");
+  assert.equal(gameType({ gameId: 2026010006 }), 1, "an older API: read from the id");
+  assert.equal(gameType({ gameId: "2026030111" }), 3, "an id that arrives as a string");
+  for (const odd of [{}, null, undefined, { gameId: 12 }, { gameId: "abc" }, { gameId: 2026990001 }, { gameId: 5, type: 9 }]) {
+    assert.equal(gameType(odd), 0, `unreadable (${JSON.stringify(odd)}) gets no chip`);
   }
 });
 
-test("a preseason game says so, and a regular-season game says nothing", () => {
-  assert.equal(label(splitSquad[2], splitSquad), "BOS at NYR · 7:00 PM · Preseason");
-  const regular = { gameId: 2026020002, away: "MTL", home: "TOR", start: "2026-09-29T23:00:00Z", state: "FUT" };
-  assert.equal(label(regular, [regular]), "MTL at TOR · 7:00 PM");
-  const playoff = { gameId: 2026030111, away: "MTL", home: "TOR", start: "2027-04-20T23:00:00Z", state: "FUT" };
-  assert.equal(label(playoff, [playoff]), "MTL at TOR · 7:00 PM · Playoffs");
+test("a today document from before venues still makes a sensible row", () => {
+  const old = { gameId: 2026010006, away: "MTL", home: "TOR", start: "2026-09-19T23:00:00Z" };
+  assert.equal(label(old), "MTL at TOR · 7:00 PM · Pre");
+  assert.equal(label({ ...old, venue: "   " }), "MTL at TOR · 7:00 PM · Pre", "a blank venue");
+  assert.equal(label({ ...old, venue: 42 }), "MTL at TOR · 7:00 PM · Pre", "a venue that is not text");
+  assert.equal(label({ ...old, start: "soon" }), "MTL at TOR · Pre", "an unreadable start");
 });
 
-test("two clubs meeting twice on one list are marked as a split-squad night", () => {
-  assert.equal(label(splitSquad[0], splitSquad), "MTL at TOR · 7:00 PM · Preseason, split squad");
-  assert.equal(label(splitSquad[1], splitSquad), "TOR at MTL · 7:00 PM · Preseason, split squad");
-  assert.equal(label(splitSquad[2], splitSquad), "BOS at NYR · 7:00 PM · Preseason", "a club playing once is not marked");
-});
-
-test("the split-squad mark needs the other half to be on the list", () => {
-  assert.equal(label(splitSquad[0], [splitSquad[0]]), "MTL at TOR · 7:00 PM · Preseason");
-  assert.equal(label(splitSquad[0]), "MTL at TOR · 7:00 PM · Preseason", "no list given at all");
-  // A doubleheader against a different club is not a split squad.
-  const other = { gameId: 2026010009, away: "MTL", home: "OTT", start: "2026-09-19T17:00:00Z", state: "FUT" };
-  assert.equal(label(splitSquad[0], [splitSquad[0], other]), "MTL at TOR · 7:00 PM · Preseason");
-});
-
-test("the picker passes the whole list through, so the mark reaches the page", () => {
-  const device = { thingName: "scoreboard-abc", gameId: 2026010006 };
-  const choices = gameChoices(device, splitSquad, { timeZone: "America/Toronto", locale: "en-US" });
+test("the picker shows the same rows", () => {
+  const choices = gameChoices({ thingName: "scoreboard-abc", gameId: 2026010006 }, night, { timeZone: "America/Toronto", locale: "en-US" });
   assert.deepEqual(choices.map((c) => c.label), [
-    "MTL at TOR · 7:00 PM · Preseason, split squad",
-    "TOR at MTL · 7:00 PM · Preseason, split squad",
-    "BOS at NYR · 7:00 PM · Preseason",
+    "MTL at TOR · 7:00 PM · Scotiabank Arena · Pre",
+    "TOR at MTL · 7:00 PM · Centre Bell · Pre",
   ]);
   assert.equal(choices[0].selected, true);
-});
-
-test("a game with an unreadable start still says what kind it is", () => {
-  const g = { gameId: 2026010006, away: "MTL", home: "TOR", start: "soon" };
-  assert.equal(label(g, [g]), "MTL at TOR · Preseason");
-});
-
-test("a split-squad mark with no kind before it still starts with a capital", () => {
-  const pair = [
-    { gameId: 2026020006, away: "MTL", home: "TOR", start: "2026-10-19T23:00:00Z" },
-    { gameId: 2026020007, away: "TOR", home: "MTL", start: "2026-10-19T23:00:00Z" },
-  ];
-  assert.equal(label(pair[0], pair), "MTL at TOR · 7:00 PM · Split squad");
 });
