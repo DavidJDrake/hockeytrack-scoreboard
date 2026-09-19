@@ -9,8 +9,9 @@ import pytest  # noqa: E402
 from scoreboard.assets import Assets  # noqa: E402
 from scoreboard.main import SHIFT_PATTERN  # noqa: E402
 from scoreboard.model import GameState  # noqa: E402
-from scoreboard.render import (BANNER_H, BANNER_TOP, BG, H, RED,  # noqa: E402
-                               STALE_FRAME_S, W, draw, fit_px, shift_frame)
+from scoreboard.render import (BANNER_H, BANNER_TOP, BG, H, INK,  # noqa: E402
+                               RED, RULE, STALE_FRAME_S, W, draw, fit_px,
+                               shift_frame)
 
 FIX = Path(__file__).parent / "fixtures"
 
@@ -251,6 +252,12 @@ def live():
     return GameState.from_json((FIX / "state_live.json").read_bytes())
 
 
+def banners(drawn):
+    """Every string the band drew. They all end in OLD; which prefix each
+    one carries -- NO LINK or NO UPDATES -- is its own test below."""
+    return [text for text in drawn if text.endswith("OLD")]
+
+
 def drawn_with(link_ok=True, stale_s=None, at=None, state=None):
     state = state or live()
     surf, assets = surface(), Spy()
@@ -281,11 +288,10 @@ def test_the_clock_unfreezes_on_a_fresh_document_not_on_the_link_coming_back():
     _, socket_down = drawn_with(link_ok=False, stale_s=11 * 60)
     _, socket_back = drawn_with(link_ok=True, stale_s=11 * 60)
     assert "14:32" in socket_down and "14:32" in socket_back, socket_back
-    assert any("NO UPDATES" in t for t in socket_back), \
-        "the link coming back is not a document arriving"
+    assert banners(socket_back), "the link coming back is not a document arriving"
     # ...and the document that follows it is what actually unfreezes the frame.
     _, arrived = drawn_with(link_ok=True, stale_s=0.0)
-    assert "9:32" in arrived and not any("NO UPDATES" in t for t in arrived)
+    assert "9:32" in arrived and not banners(arrived)
 
 
 def test_a_socket_that_is_up_while_the_cloud_says_nothing_still_freezes():
@@ -294,7 +300,7 @@ def test_a_socket_that_is_up_while_the_cloud_says_nothing_still_freezes():
     # only evidence the panel has, and it is enough.
     _, drawn = drawn_with(link_ok=True, stale_s=11 * 60)
     assert "14:32" in drawn
-    assert any("NO UPDATES" in t and "11 MIN" in t for t in drawn), drawn
+    assert any("11 MIN" in t for t in banners(drawn)), drawn
 
 
 def test_a_stalled_penalty_does_not_expire_by_itself():
@@ -308,7 +314,7 @@ def test_a_stalled_penalty_does_not_expire_by_itself():
 
 def test_the_banner_says_how_old_the_frame_is():
     _, stalled = drawn_with(stale_s=4 * 60)
-    assert any("NO UPDATES" in text and "4 MIN" in text for text in stalled), stalled
+    assert any("4 MIN" in text for text in banners(stalled)), stalled
 
 
 def test_a_missed_heartbeat_or_two_is_not_a_stall():
@@ -317,22 +323,22 @@ def test_a_missed_heartbeat_or_two_is_not_a_stall():
     # throw a banner across the panel mid-play.
     for age in (0.0, 5.0, 12.0, STALE_FRAME_S - 1):
         _, drawn = drawn_with(stale_s=age)
-        assert not any("NO UPDATES" in t for t in drawn), (age, drawn)
+        assert not banners(drawn), (age, drawn)
         assert "9:32" in drawn, age
     _, stalled = drawn_with(stale_s=STALE_FRAME_S)
-    assert any("NO UPDATES" in t for t in stalled), stalled
+    assert banners(stalled), stalled
 
 
 def test_a_frame_less_than_a_minute_old_does_not_say_zero_minutes():
     _, stalled = drawn_with(stale_s=40)
-    assert any("NO UPDATES" in text for text in stalled), stalled
+    assert banners(stalled), stalled
     assert not any("0 MIN" in text for text in stalled), stalled
 
 
 def test_a_frame_that_is_being_updated_draws_no_banner():
     for link_ok in (True, False):
         _, ok = drawn_with(link_ok=link_ok, stale_s=0.0)
-        assert not any("NO UPDATES" in text for text in ok), ok
+        assert not banners(ok), ok
 
 
 def test_the_dot_says_only_that_the_socket_is_down():
@@ -356,7 +362,7 @@ def test_a_stale_frame_never_flashes_a_goal():
     surf, assets = surface(), Spy()
     draw(surf, s, s.last_goal[2] + 500, assets, stale_s=11 * 60)
     assert not any(t.startswith("GOAL") for t in assets.drawn), assets.drawn
-    assert any("NO UPDATES" in t for t in assets.drawn), assets.drawn
+    assert banners(assets.drawn), assets.drawn
 
 
 # --- where the band sits ---------------------------------------------------
@@ -432,15 +438,55 @@ def test_the_banner_stays_inside_the_margins_the_shift_uses():
 
 
 def test_the_banner_text_is_sized_to_the_band_it_sits_in():
-    # The band is 48 px in the 1920x480 drawing space, which lands as about
-    # 32 physical px on the 400x1280 panel. The text has to fit that and
-    # still read across a room, so it is fitted rather than fixed.
+    # The band is BANNER_H px in the 1920x480 drawing space, which lands as
+    # about 30 physical px on the 400x1280 panel. Both wordings have to fit
+    # it and still read across a room, so they are fitted rather than fixed.
     assets = Assets()
-    longest = "NO UPDATES - 1440 MIN OLD"
-    px = fit_px(assets, longest, 40, W - 160)
-    assert assets.font(px, True).size(longest)[1] <= BANNER_H, \
-        "the banner text is taller than the band"
-    assert px >= 32, "the banner text has been shrunk past reading across a room"
+    for longest in ("NO UPDATES - 1440 MIN OLD", "NO LINK - UNDER A MINUTE OLD"):
+        px = fit_px(assets, longest, 40, W - 160)
+        assert assets.font(px, True).size(longest)[0] <= W - 160, longest
+        assert px >= 32, f"{longest} was shrunk past reading across a room"
+
+
+def test_the_band_says_which_kind_of_silence_it_is():
+    # The band is the only place the owner learns the link is down during
+    # the stale window -- the help screen does not get the panel while a
+    # game is still worth showing, and the dot is 8 px. So the band carries
+    # the link fact: the socket being down and the cloud going quiet with
+    # the socket up look identical from the frame's own clocks, but not to
+    # somebody deciding whether to go and look at the router.
+    _, socket_down = drawn_with(link_ok=False, stale_s=11 * 60)
+    assert any("NO LINK - 11 MIN OLD" == t for t in banners(socket_down)), socket_down
+    assert not any("NO UPDATES" in t for t in socket_down)
+    _, cloud_quiet = drawn_with(link_ok=True, stale_s=11 * 60)
+    assert any("NO UPDATES - 11 MIN OLD" == t for t in banners(cloud_quiet)), cloud_quiet
+    assert not any("NO LINK" in t for t in cloud_quiet)
+
+
+def test_the_band_reads_as_a_notice_and_not_as_a_thicker_rule():
+    # It sat directly on top of the rule line in the same colour, so the two
+    # merged into one 50 px bar. A notice has to look like a notice.
+    surf, _ = drawn_with(stale_s=600)
+    assert surf.get_at((100, BANNER_TOP + 2))[:3] != RULE, \
+        "the band is the same colour as the rule line it sits above"
+    gap = [y for y in range(BANNER_TOP + BANNER_H, 372)
+           if all(surf.get_at((x, y))[:3] == BG for x in range(60, W - 60))]
+    assert len(gap) >= 2, f"no gap between the band and the rule line: {gap}"
+    assert surf.get_at((100, 372))[:3] == RULE, "the rule line stopped being drawn"
+
+
+def test_the_banner_text_stays_inside_its_band():
+    # Measured on the frame rather than from the font metrics: the band is
+    # the tightest space on the panel, and text that overhangs it reads as
+    # a mistake whichever end it comes out of.
+    surf, _ = drawn_with(stale_s=600)
+    # Up to the rule line only: the first penalty row's text starts at
+    # y=380, and it is not what this test is about.
+    ink = [y for y in range(BANNER_TOP - 12, 372)
+           if any(surf.get_at((x, y))[:3] == INK for x in range(60, W - 60))]
+    assert ink, "the band drew no text at all"
+    assert min(ink) >= BANNER_TOP and max(ink) < BANNER_TOP + BANNER_H, \
+        f"the banner text runs from y={min(ink)} to y={max(ink)}"
 
 
 def test_a_countdown_with_no_link_keeps_counting():
@@ -452,7 +498,7 @@ def test_a_countdown_with_no_link_keeps_counting():
                           state=GameState.from_json((FIX / "state_pre.json").read_bytes()),
                           at=1790897400000 - 3600_000)
     assert "01:00:00" in drawn, drawn
-    assert not any("NO UPDATES" in t for t in drawn), \
+    assert not banners(drawn), \
         "a pre-game document is not republished; its age says nothing"
 
 
@@ -463,4 +509,4 @@ def test_a_final_that_has_stopped_updating_is_not_stale():
     final = GameState.from_json((FIX / "state_live.json").read_text()
                                 .replace('"state":"LIVE"', '"state":"FINAL"'))
     _, drawn = drawn_with(link_ok=False, stale_s=3 * 3600, state=final)
-    assert not any("NO UPDATES" in t for t in drawn), drawn
+    assert not banners(drawn), drawn

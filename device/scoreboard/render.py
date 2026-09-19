@@ -37,8 +37,17 @@ STALE_FRAME_S = 30
 #
 # Inset to the same 60 px as the rule line rather than bled to the edges, so
 # the +-4 px burn-in shift cannot clip it. On the real 400x1280 panel the
-# 1920x480 frame lands at 1280x320, so this band is about 32 physical px.
-BANNER_TOP, BANNER_H = 324, 48
+# 1920x480 frame lands at 1280x320, so this band is about 30 physical px.
+#
+# 44 px rather than the gutter's full 48, leaving four rows of background
+# between it and the rule line at y=372: drawn down to the line in the
+# line's own colour, the two merged into a single 50 px bar that read as a
+# thicker rule rather than as a notice. BANNER_BG is the other half of that
+# fix -- a dim amber, the same family as main.LAST_RESORT, so that the one
+# band on this frame that is telling the owner something does not look like
+# part of the furniture.
+BANNER_TOP, BANNER_H = 324, 44
+BANNER_BG = (96, 60, 12)
 
 # The states whose documents are expected to keep arriving. A pre-game
 # document is written once and a final one stops for good -- that is what a
@@ -143,23 +152,30 @@ def _penalty_rows(surface, assets, state, now_ms, y, limit=2):
             _text(surface, assets, f"#{p.number}  {p.team}  {fmt_clock(p.seconds)}", 40, INK, x0, ry - 6, "topleft", bold=False)
 
 
-def _stale_banner(surface, assets, stale_s: float | None) -> None:
-    """How old this frame is, in the gutter above the rule line.
+def _stale_banner(surface, assets, stale_s: float | None, link_ok: bool) -> None:
+    """How old this frame is, and why, in the gutter above the rule line.
 
     Said in minutes, and never in zeroes: "0 MIN OLD" reads as a rounding
     error rather than as news, so anything under a minute says so in words.
 
-    "NO UPDATES" rather than "NO LINK", because the socket is only one of the
-    ways this happens: the reducer can be erroring, the feed can be dead, or
-    the broker can have replayed a retained document that was already old,
-    with MQTT perfectly healthy throughout. What the panel can actually see
-    is that nothing has arrived, and that is what it says. The socket has its
-    own 8 px dot.
+    The band carries the link fact because it is the only place the owner
+    can learn it while this is on screen: a live game holds the panel for
+    its whole stale window, so "cannot reach the service" does not get a
+    turn, and the dot in the corner is 8 px. "NO LINK" when the socket is
+    down; "NO UPDATES" when the socket is up and nothing is arriving anyway
+    -- the reducer erroring, the feed dead, or a reconnect that landed on a
+    retained document which was already old. The two look identical from
+    this frame's clocks, but not at all alike to somebody deciding whether
+    to go and look at the router.
+
+    Both wordings go through fit_px, because the second is the longer one
+    and the band is the tightest space on the panel.
     """
     minutes = int((stale_s or 0) // 60)
     age = f"{minutes} MIN OLD" if minutes else "UNDER A MINUTE OLD"
-    pygame.draw.rect(surface, RULE, (60, BANNER_TOP, W - 120, BANNER_H))
-    _text_fit(surface, assets, f"NO UPDATES - {age}", 40, W - 160, INK,
+    why = "NO UPDATES" if link_ok else "NO LINK"
+    pygame.draw.rect(surface, BANNER_BG, (60, BANNER_TOP, W - 120, BANNER_H))
+    _text_fit(surface, assets, f"{why} - {age}", 40, W - 160, INK,
               W // 2, BANNER_TOP + BANNER_H // 2, "center")
 
 
@@ -182,7 +198,8 @@ def draw(surface: pygame.Surface, state: GameState | None, now_ms: int, assets: 
     say what is unknown.
 
     ``link_ok`` says one thing and only one thing: whether the MQTT socket is
-    up. It draws the 8 px dot. It used to drive the freeze as well, which was
+    up. It draws the 8 px dot, and chooses the band's first two words. It
+    used to drive the freeze as well, which was
     wrong in both directions -- the link comes back one round trip BEFORE the
     retained document does, so the clock unfroze and the banner vanished
     while the frame on the glass was still eleven minutes old; and a socket
@@ -263,6 +280,6 @@ def draw(surface: pygame.Surface, state: GameState | None, now_ms: int, assets: 
         _penalty_rows(surface, assets, state, clock_ms, 386)
 
     if stale:
-        _stale_banner(surface, assets, stale_s)
+        _stale_banner(surface, assets, stale_s, link_ok)
     if not link_ok:
         pygame.draw.circle(surface, RED, (W - 24, 24), 8)

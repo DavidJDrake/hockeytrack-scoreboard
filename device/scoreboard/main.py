@@ -470,9 +470,8 @@ def _complain_once(key: str, message: str, *args) -> None:
 def live_and_fresh(state: GameState | None, state_age: float | None) -> bool:
     """Is there a live game on this panel *right now*?
 
-    The one predicate behind "a live game wins": it is what earns the
-    exemption from sleep hours, and what screens.screen_for is given as
-    ``live_game``. Both used to be told "state.state in IN_PLAY", with
+    The narrower of the two live-game bounds, and the one that earns the
+    exemption from sleep hours. It used to be "state.state in IN_PLAY", with
     nothing at all bounding how old that document was, so a LIVE document
     left behind by a Wi-Fi drop in the second period pinned the panel lit at
     3 a.m. for as many nights as it took somebody to notice.
@@ -483,6 +482,27 @@ def live_and_fresh(state: GameState | None, state_age: float | None) -> bool:
     """
     return (state is not None and state.state in IN_PLAY
             and state_age is not None and state_age < STALE_FRAME_S)
+
+
+def live_holds_panel(state: GameState | None, state_age: float | None) -> bool:
+    """Does this LIVE document still hold the screen against a help screen?
+
+    The longer of the two bounds, and a deliberately different question from
+    live_and_fresh. Freshness is about whether the panel may claim a game is
+    happening -- that is what beats sleep hours, and 30 s of silence ends
+    it. This is about whether the frozen frame is still the most useful
+    thing on the wall, and for the whole two hours it is: the score on it is
+    true, and the band says in words how old it is and whether the link is
+    down. That is more than "cannot reach the service" says, over the one
+    picture the owner actually wants. A Wi-Fi hiccup in the third period
+    must not throw the score away (ruling, 2026-09-19).
+
+    Past STALE_AFTER_S there is nothing due at all, and the help screen --
+    if the link has been down long enough to have earned one -- gets its
+    turn. This is what screens.screen_for is given as ``live_game``.
+    """
+    return (state is not None and state.state in IN_PLAY
+            and state_age is not None and state_age < STALE_AFTER_S)
 
 
 def presentation(now: float, now_utc: datetime | None, screen: str,
@@ -1012,18 +1032,18 @@ def main() -> None:
             # off mid-sentence -- presentation exempts everything that is not
             # the scoreboard.
             # A live game keeps the panel even when the link has gone -- the
-            # frozen frame and its banner say everything the help screen
-            # would, over a scoreboard that is still true as of a stated
-            # moment -- but only while its document is fresh. With the link
-            # down the document can only get older, so the exemption expires
-            # by itself and the help screen gets its turn. See
-            # screens.screen_for.
+            # frozen frame and its band say more than the help screen would,
+            # over the one picture the owner wants -- for the whole two
+            # hours the document is worth showing, NOT only while it is
+            # fresh. Freshness is the sleep-hours question and is decided in
+            # presentation; this is the "is there something better to show"
+            # question. See live_holds_panel and screens.screen_for.
             showing = (screens.SETTINGS if panel is not None else
                        screens.screen_for(cfg is not None or bool(fixture),
                                           net_ok or bool(fixture), enroll_state,
                                           needs_link_help(link_down_since, mono,
                                                           LINK_HELP_AFTER_S),
-                                          live_and_fresh(current, state_age)))
+                                          live_holds_panel(current, state_age)))
             now_showing = presentation(mono, now_utc, showing, current, state_age,
                                        final_seen, last_change, display)
             # The guard of last resort. Everything inside is drawing, and

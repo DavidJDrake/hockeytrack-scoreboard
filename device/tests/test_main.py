@@ -17,6 +17,7 @@ from scoreboard.main import (COUNTDOWN, FINAL, GAME, GRACE_S, IGNORE,
                              SELECT, STALE_AFTER_S, Display, Sleep, asleep,
                              carry_out, changed_at, clock_synced,
                              config_action, final_seen_at, live_and_fresh,
+                             live_holds_panel,
                              needs_link_help, presentation, shift_at)
 from scoreboard.model import GameState
 from scoreboard.render import H, STALE_FRAME_S, W
@@ -195,15 +196,54 @@ def test_the_owners_re_send_brings_a_stale_live_game_back_for_the_grace():
                  last_change=old).show == OFF
 
 
-def test_a_stale_live_game_does_not_suppress_the_help_screen_for_ever():
-    # screen_for's live_game argument is now "LIVE and fresh". With the link
-    # down the document can only get older, so the exemption expires and the
-    # panel says "cannot reach the service" instead of holding a frozen frame
-    # for ever.
+def test_a_stalled_live_game_keeps_the_panel_for_its_whole_stale_window():
+    # The ruling, 2026-09-19: a Wi-Fi hiccup in the third period must not
+    # throw the score away. Two predicates, two jobs. FRESH (30 s) is what
+    # beats sleep hours. What holds the screen against the help screen is
+    # the longer bound: the frozen frame's score is true and its band says
+    # what is unknown, which is more use across a room than a generic
+    # "cannot reach the service". Only past STALE_AFTER_S -- nothing due at
+    # all -- does the help screen get its turn.
+    assert live_holds_panel(live_state(), 0.0)
+    assert live_holds_panel(live_state(), STALE_FRAME_S)
+    assert live_holds_panel(live_state(), STALE_AFTER_S - 1)
+    assert not live_holds_panel(live_state(), STALE_AFTER_S)
+    assert not live_holds_panel(live_state(), None), "no document has arrived at all"
+    assert not live_holds_panel(final_state(), 0.0)
+    assert not live_holds_panel(None, 0.0)
+
+
+def test_the_help_screen_gets_its_turn_once_there_is_nothing_due():
     assert screens.screen_for(True, True, link_down=True, live_game=True) == screens.SCOREBOARD
     assert screens.screen_for(True, True, link_down=True, live_game=False) == screens.NO_SERVICE
-    assert shown(now=3600.0, screen=screens.NO_SERVICE, state=live_state(),
-                 state_age=3600.0).show == MESSAGE
+    assert shown(now=3 * 3600.0, screen=screens.NO_SERVICE, state=live_state(),
+                 state_age=3 * 3600.0).show == MESSAGE
+
+
+def test_the_help_screen_never_replaces_a_game_still_worth_showing():
+    # Swept rather than sampled: this is a precedence rule, and the way one
+    # of those fails is a combination nobody thought to write down.
+    swept = 0
+    for state in (None, live_state(), pregame_state(), final_state(),
+                  off_state(), odd_state()):
+        for age in (None, 0.0, STALE_FRAME_S, STALE_AFTER_S - 1,
+                    STALE_AFTER_S, 48 * 3600.0):
+            for link_down in (False, True):
+                swept += 1
+                screen = screens.screen_for(True, True, link_down=link_down,
+                                            live_game=live_holds_panel(state, age))
+                worth_showing = (state is not None and state.state in main_module.IN_PLAY
+                                 and age is not None and age < STALE_AFTER_S)
+                if worth_showing:
+                    assert screen == screens.SCOREBOARD, \
+                        f"the help screen replaced a game {age} s old"
+                elif link_down:
+                    assert screen == screens.NO_SERVICE, (state, age)
+                else:
+                    assert screen == screens.SCOREBOARD, (state, age)
+    # 6 states x 6 document ages x 2 link states, stated so that a sweep
+    # which quietly stops covering something fails.
+    assert swept == 6 * 6 * 2 == 72, swept
 
 
 # --------------------------------------------------------------------------
@@ -1355,13 +1395,10 @@ def test_the_help_screen_outranks_the_scoreboard_but_not_no_network():
     assert screens.screen_for(True, True, link_down=False) == screens.SCOREBOARD
 
 
-def test_a_live_game_with_the_link_pulled_hands_over_to_the_help_screen(tmp_path, monkeypatch):
+def test_a_live_game_with_the_link_pulled_keeps_the_panel_until_it_expires(tmp_path, monkeypatch):
     # N-1 through the real loop, as it happens in a house: a live game is on
-    # the wall and the Wi-Fi goes. While the document is fresh the game keeps
-    # the panel (the banner says how old the frame is). Once it is not, the
-    # exemption is gone and the panel says what is actually wrong -- instead
-    # of holding a frozen mid-game frame at full brightness until somebody
-    # unplugs it.
+    # the wall and the Wi-Fi goes. Three stages, with the link down
+    # throughout and the help screen's own threshold already passed.
     monkeypatch.setattr(main_module, "LINK_HELP_AFTER_S", 0.0)
     live = (FIX / "state_live.json").read_bytes()
     script = {0: [("on_state", (2026020001, live))]}
@@ -1372,11 +1409,22 @@ def test_a_live_game_with_the_link_pulled_hands_over_to_the_help_screen(tmp_path
     assert fresh[1]["screen"] == screens.SCOREBOARD, \
         "a live game that is still arriving lost the panel to the help screen"
 
-    monkeypatch.setattr(main_module, "STALE_FRAME_S", -1.0)   # every document is old
+    # Stale, but inside the two hours: the frozen frame keeps the screen.
+    # Its band already says the link is down, and the score it shows is true
+    # -- a third-period blip must not cost the owner the game.
+    monkeypatch.setattr(main_module, "STALE_FRAME_S", -1.0)
     stalled = a_loop_that_receives(monkeypatch, tmp_path, script, connect=False)
     assert stalled[1]["state"].state == "LIVE"
-    assert stalled[1]["screen"] == screens.NO_SERVICE, \
-        "a stalled live game suppressed the help screen"
+    assert stalled[1]["screen"] == screens.SCOREBOARD, \
+        "the help screen replaced a stalled game that was still worth showing"
+
+    # Past the two hours there is nothing due, and the help screen is what
+    # is left to say.
+    monkeypatch.setattr(main_module, "STALE_AFTER_S", -1.0)
+    expired = a_loop_that_receives(monkeypatch, tmp_path, script, connect=False)
+    assert expired[1]["state"].state == "LIVE"
+    assert expired[1]["screen"] == screens.NO_SERVICE, \
+        "nothing was due and the panel still did not say why"
 
 
 def test_a_panel_with_no_identity_yet_is_unaffected():

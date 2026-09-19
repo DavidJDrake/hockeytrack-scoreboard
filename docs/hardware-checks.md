@@ -1500,7 +1500,7 @@ anybody touching the panel:
 | The final hold has run out | the owner presses **Show on panel**, or the game's state changes |
 | No game is selected, past the grace period | the owner chooses a game |
 | A state this build does not recognize has been up for 2 h | the state changes, or the owner presses **Show on panel** |
-| A **LIVE** document that nobody has refreshed for 2 h | **any** fresh document arriving, or the owner presses **Show on panel** (which gives it the five-minute grace, then dark again if still nothing has arrived) |
+| A **LIVE** document that nobody has refreshed for 2 h (and the link is up, so there is no help screen to show instead) | **any** fresh document arriving, or the owner presses **Show on panel** (which gives it the five-minute grace, then dark again if still nothing has arrived) |
 | Inside sleep hours, on a LIVE document more than 30 s old | a fresh document (a live game beats the window again at once), or the window ending |
 | The clock has never been set and 2 h have passed | NTP sets the clock **and the game is then inside the 12 h window** (if it is not, the panel stays dark for the ordinary reason), the state changes, or the owner presses **Show on panel** |
 | Inside the owner's sleep hours | the window ends, or a live game starts |
@@ -1611,29 +1611,42 @@ Four further rules that are the panel's own, not settings:
   reporting a connection, so without that it would burn a help screen at
   full brightness every night the outage lasted.) Precedence: **below "No
   network"**, the more specific fault and the one the person there can act
-  on; **above the scoreboard** — except that **a live game whose document is
-  still arriving keeps the panel**, which is the next rule. With the link
-  down a document can only get older, so that exemption expires by itself:
-  the frozen frame holds the panel for its first half-minute or so and then
-  this screen takes over, rather than a mid-game frame being held for ever.
+  on; **above the scoreboard** — except that **a live game keeps the panel
+  for as long as its document is worth showing**, which is the next rule.
+  That exemption is bounded rather than unbounded: it used to be granted by
+  the state name alone, so a stalled LIVE document suppressed this screen for
+  ever, and it now ends two hours after the last document arrived. Inside
+  those two hours the frozen frame wins, and it is the band — not this
+  screen — that tells the owner the link is down.
 - **A live game keeps the panel, stops pretending, and ends by itself.** The
   owner's rule is that a live game wins, and it wins over the help screen and
   over sleep hours — but "a live game" means a document that is *arriving*,
   not a document that once said LIVE. **Stale is the age of the document, not
-  the state of the socket** (the socket has only the 8 px dot in the corner).
-  The cloud republishes a live game's clock about every five seconds,
-  intermissions included, so there are two thresholds:
+  the state of the socket** (the socket has only the 8 px dot in the corner,
+  and the band's first two words). The cloud republishes a live game's clock
+  about every five seconds, intermissions included, so there are two
+  thresholds, and they answer two different questions:
 
   | Age of the LIVE document | What the panel does |
   |---|---|
-  | under **30 s** | a live game: clocks run, no band, beats sleep hours |
-  | 30 s to **2 h** | frozen at the document's own numbers, **`NO UPDATES - N MIN OLD`** in the gutter above the rule line, both penalty rows kept — and no longer beats sleep hours, so the overnight case is dark |
-  | past **2 h** | nothing due: off, like anything else with nothing true to show |
+  | under **30 s** | a live game: clocks run, no band, and it **beats sleep hours** |
+  | 30 s to **2 h** | frozen at the document's own numbers, **`NO LINK - N MIN OLD`** (socket down) or **`NO UPDATES - N MIN OLD`** (socket up, nothing arriving) in the gutter above the rule line, both penalty rows kept. It **keeps the screen**, including over "cannot reach the service" — but it no longer beats sleep hours, so the overnight case is dark |
+  | past **2 h** | nothing due: off — or "cannot reach the service" if the link has been down long enough to have earned it, which itself obeys sleep hours |
 
   Thirty seconds is six missed heartbeats — well above jitter, a retry or a
   broker hiccup, and far below the two minutes the old rule waited, which was
   two minutes of the panel making up a hockey game. Two hours is the same
   bound that already means "too long to be real" everywhere else here.
+
+  **Why two thresholds and not one** (ruling, 2026-09-19). They answer
+  different questions. *May the panel claim a game is happening, at 3 a.m.,
+  against the owner's own sleep hours?* — only while documents are actually
+  arriving, so 30 s. *Is this frozen frame still the best thing on the
+  wall?* — for the whole two hours, because the score on it is true and the
+  band says in words how old it is and whether the link is down, which is
+  more than a generic "cannot reach the service" says and over the one
+  picture the owner wants. A Wi-Fi hiccup in the third period must not throw
+  the score away.
 
   Why it matters: every clock on the scoreboard is derived as
   `seconds − (now − asOf)`, so a frame nobody is updating counts a period
@@ -1649,22 +1662,30 @@ Four further rules that are the panel's own, not settings:
   not from its `asOf` against the panel's wall clock: this band has to be
   right on a panel whose clock is wrong, which is exactly the panel somebody
   is squinting at when a frame has gone stale. Two consequences worth
-  knowing. The band says **NO UPDATES**, not NO LINK, because a socket that
-  stays up while the reducer errors or the feed dies looks identical from
-  here. And the clock unfreezes **on a document, not on the link**:
+  knowing. The band distinguishes the two silences — **NO LINK** when the
+  socket is down, **NO UPDATES** when the socket is up and the reducer is
+  erroring or the feed is dead — because they look identical from the
+  frame's own clocks but not at all alike to somebody deciding whether to go
+  and look at the router. That distinction is on the band because the band
+  is the only place it appears while a game holds the screen. And the clock
+  unfreezes **on a document, not on the link**:
   `Link._on_connect` reports the link up immediately after issuing SUBSCRIBE,
   so the retained document is at least one round trip behind it, and keying
   the freeze on the socket meant several frames of a plausible *wrong*
   running clock with the warning already removed.
 
-  Where the band sits: y 324..371 in the 1920×480 drawing space, the gutter
-  between the period label and the rule line, measured empty on live,
-  intermission and final frames with two penalties a side. It used to sit at
-  y 436..471, which is where the *second* penalty row is drawn — so a stall
-  hid a penalty that had been on screen a moment before, exactly when nothing
-  was arriving to say whether it had ended. Both rows are kept now. It is
-  inset to the same 60 px as the rule line so the burn-in shift cannot clip
-  it, and it is about **32 physical px** tall on the real 400x1280 panel.
+  Where the band sits: y 324..367 in the 1920×480 drawing space, in the
+  gutter (324..371) between the period label and the rule line at y=372,
+  measured empty on live, intermission and final frames with two penalties a
+  side. It used to sit at y 436..471, which is where the *second* penalty row
+  is drawn — so a stall hid a penalty that had been on screen a moment
+  before, exactly when nothing was arriving to say whether it had ended. Both
+  rows are kept now. It is inset to the same 60 px as the rule line so the
+  burn-in shift cannot clip it, and it is about **30 physical px** tall on
+  the real 400x1280 panel. It stops four rows short of the rule line and is
+  filled in a dim amber rather than the rule's own grey: drawn to the line in
+  the line's colour, the two merged into one 50 px bar that read as a thicker
+  rule instead of as a notice.
 
   What does *not* freeze: a countdown (computed from the clock against the
   document's own `start`, so a stall takes nothing from it), and a final (a
@@ -1742,15 +1763,16 @@ step the clock hours forward after boot.
    becomes urgent, or "off" needs to become something else.
 10. **A live game with the link pulled.** Mid-game, pull the internet: the
    score must stay, the clock must **stop** within about half a minute
-   rather than run down, and the `NO UPDATES - N MIN OLD` band must appear
-   in the gutter above the rule line and count up, with **both** penalty
-   rows still on screen. About two minutes in, the panel should hand over to
-   **Cannot reach the service** — the frozen game does not hold the panel
-   indefinitely any more. Plug it back in and the game should resume by
-   itself. Watch for the band covering anything it should not on the real
-   panel, where the frame is scaled to 1280x320 and the band is only about
-   32 physical px, and check the text is readable across the room at that
-   size.
+   rather than run down, and the `NO LINK - N MIN OLD` band must appear in
+   the gutter above the rule line and count up, with **both** penalty rows
+   still on screen. The game must **keep the screen** — "Cannot reach the
+   service" must not replace it, for two hours. Plug it back in and the game
+   should resume by itself, and the band should go when the first document
+   lands rather than when the link comes up. Watch for the band covering
+   anything it should not on the real panel, where the frame is scaled to
+   1280x320 and the band is only about 30 physical px; check the text is
+   readable across the room at that size, and that the amber band reads as a
+   notice rather than as part of the layout.
 11. **A live game with the link pulled, left overnight.** The direct test of
    the defect this round fixed, and the one that needs no equipment: start
    it as above, then leave the panel alone. With sleep hours set it must be

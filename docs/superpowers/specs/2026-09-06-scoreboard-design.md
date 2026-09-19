@@ -179,13 +179,14 @@ Cost: a heartbeat every 5 s per live game ≈ 720 invocations per game-hour;
   panel whose MQTT link has been down two minutes on a working network shows
   "cannot reach the service", which does obey sleep hours — nobody has to be
   at the panel for it and it heals itself — and which a live game outranks
-  while its document is still arriving: a live game keeps the panel, with
-  its clocks frozen at the last document's own values and a
-  "NO UPDATES - N MIN OLD" band in the gutter above the rule line, rather
-  than counting down from a moment that is receding. **"Live" is the age
-  of the document, not the state of the socket**: 30 s without one freezes
-  the frame, draws the band and ends the sleep-hours exemption, and 2 h
-  without one ends the game. Burn-in is
+  for as long as its document is worth showing: a live game keeps the panel,
+  with its clocks frozen at the last document's own values and a
+  "NO LINK / NO UPDATES - N MIN OLD" band in the gutter above the rule line,
+  rather than counting down from a moment that is receding. **"Live" is the
+  age of the document, not the state of the socket**, and there are two
+  bounds: 30 s without a document freezes the frame, draws the band and ends
+  the sleep-hours exemption; 2 h without one ends the game, and only then
+  does the help screen get the panel. Burn-in is
   handled by a few pixels of whole-frame shift on a slow schedule, not by
   blanking.
   **Corrected 2026-09-19**, from "screen blanks (backlight off via DPMS)

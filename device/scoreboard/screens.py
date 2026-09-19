@@ -44,22 +44,24 @@ def screen_for(has_identity: bool, has_network: bool, enrollment=None,
     is the more specific fault and the one somebody standing there can act
     on, and above the scoreboard -- with one exception, ``live_game``.
 
-    ``live_game`` means LIVE *and* a document that is actually arriving --
-    main.live_and_fresh, not "the last document said LIVE". A live game
-    keeps the panel, because the owner's rule is that a live game wins and
-    because the alternative throws away the one thing they are watching.
-    What makes that safe is that render.draw stops pretending when the
-    documents stop: the clock and the penalty clocks freeze at the last
-    document's own values instead of counting down from them, and a band
-    says how old the frame is. That band says everything this screen would
-    have said, over a scoreboard that is still true as of a stated moment.
-    Brief drops never get here at all; that is what the threshold is for.
+    ``live_game`` is main.live_holds_panel: LIVE, *and* a document this
+    panel received less than two hours ago -- not "the last document said
+    LIVE", which had no bound at all and suppressed this screen for ever.
+    A live game keeps the panel, because the owner's rule is that a live
+    game wins and because the alternative throws away the one thing they
+    are watching. What makes that safe is that render.draw stops pretending
+    when the documents stop: the clock and the penalty clocks freeze at the
+    last document's own values instead of counting down from them, and a
+    band says how old the frame is AND whether the link is down. That band
+    says more than this screen would, over a scoreboard that is still true
+    as of a stated moment. Brief drops never get here at all; that is what
+    the threshold is for.
 
-    What the freshness test adds is an end to it. The exemption used to be
-    granted by the state name alone, so a stalled LIVE document suppressed
-    this screen for ever -- and with the link down a document can only get
-    older, so within a couple of minutes of the link help threshold the
-    panel stops holding a frozen frame and says what is wrong instead.
+    Note that this is the LONGER of the two live-game bounds, deliberately.
+    The shorter one (main.live_and_fresh, 30 s) decides whether the panel
+    may claim a game is happening, which is what beats sleep hours. Whether
+    the frozen frame still beats this screen is a different question, and a
+    third-period Wi-Fi hiccup must not cost the owner the score.
 
     An unregistered panel never gets here: it has no link to lose, and its
     own screens already say what is wrong.
