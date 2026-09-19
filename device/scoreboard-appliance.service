@@ -67,6 +67,29 @@ Environment=SDL_FRAMEBUFFER_ACCELERATION=opengles2
 Environment=SDL_RENDER_DRIVER=opengles2
 Environment=PYTHONUNBUFFERED=1
 Environment=SCOREBOARD_CONFIG_DIR=/var/lib/scoreboard
+# Where lgpio may create its notification FIFO. Without this the optional
+# GPIO buttons are silently dead under this unit, and v0.1.2's journal says
+# so four times on every start:
+#
+#   xCreatePipe: Can't set permissions (436) for /opt/scoreboard/.lgd-nfy0,
+#       No such file or directory
+#   PinFactoryFallback: Falling back from lgpio: [Errno 2] No such file or
+#       directory: '.lgd-nfy-3'
+#
+# lgpio builds that path as "%s/.lgd-nfy%d" from lguGetWorkDir() (lgNotify.c:
+# 131), and lguGetWorkDir() reads getenv("LG_WD") and otherwise falls back to
+# getcwd() (lgUtil.c:181, and lgpio.h:39 for the name). getcwd() here is
+# WorkingDirectory=/opt/scoreboard, which ProtectSystem=strict has made
+# read-only -- so the mkfifo fails, and 436 in the message is 0664, the mode
+# xCreatePipe asks for.
+#
+# /var/lib/scoreboard because it is already the one path in ReadWritePaths
+# below, so this cannot be right here and wrong in the sandbox. Note that
+# lguGetWorkDir() also chdir()s to it; nothing in device/scoreboard/ uses a
+# relative path (assets resolve from __file__, the config dir is absolute),
+# so that is harmless, and device/tests/test_pi_setup.py checks LG_WD stays
+# inside a writable path.
+Environment=LG_WD=/var/lib/scoreboard
 ExecStart=/opt/scoreboard/.venv/bin/python -m scoreboard.main
 Restart=always
 RestartSec=3
@@ -104,6 +127,28 @@ RestrictSUIDSGID=yes
 DeviceAllow=char-drm rw
 DeviceAllow=char-input r
 DeviceAllow=/dev/tty1 rw
+# The optional GPIO buttons. v0.1.2's journal ended the lgpio fallback chain
+# at "unable to open /dev/gpiomem or /dev/mem", which is gpiozero's LAST
+# factory; the first one, lgpio, opens /dev/gpiochip%d (lgGpio.c:724) and
+# gpiozero picks chip 0 on a Pi 4 (gpiozero/pins/lgpio.py:67). Nothing here
+# allowed it. The kernel registers that char-device class as "gpiochip"
+# (drivers/gpio/gpiolib.h:23), which is the name systemd matches against
+# /proc/devices, so this is the class rather than a path -- and a path would
+# be wrong anyway, since which chip number a board presents is not fixed.
+#
+# Safe if it ever resolves to nothing: systemd logs "Device allow list
+# pattern ... did not match anything" at DEBUG and carries on
+# (src/core/bpf-devices.c). Unlike SupplementaryGroups=, an unresolvable name
+# here does not fail the unit.
+#
+# The group half was already in place: raspberrypi-sys-mods' 99-com.rules has
+# SUBSYSTEM=="gpio", GROUP="gpio", MODE="0660", and install_appliance adds the
+# service account to gpio when that group exists.
+#
+# UNPROVEN ON HARDWARE. This panel has no buttons fitted, so the next boot can
+# show the four PinFactoryFallback warnings are gone but cannot show a button
+# working. Recorded under H1 in docs/hardware-checks.md.
+DeviceAllow=char-gpiochip rw
 
 [Install]
 WantedBy=multi-user.target

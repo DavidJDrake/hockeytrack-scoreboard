@@ -248,6 +248,58 @@ def test_appliance_unit_can_write_its_identity_directory(checkout):
     assert "ReadWritePaths=/var/lib/scoreboard" in out
 
 
+def test_the_appliance_unit_lets_the_gpio_buttons_reach_the_gpio(checkout):
+    # Seen in v0.1.2's journal on every start, four times:
+    #
+    #   xCreatePipe: Can't set permissions (436) for /opt/scoreboard/.lgd-nfy0,
+    #       No such file or directory
+    #   PinFactoryFallback: Falling back from lgpio: [Errno 2] No such file or
+    #       directory: '.lgd-nfy-3'
+    #   ... rpigpio ... pigpio ... native: unable to open /dev/gpiomem or /dev/mem
+    #
+    # Nothing visible broke, because this panel has no buttons. But the
+    # hardened unit had silently switched them off, and the journal is now the
+    # panel's only diagnosis surface, so four warnings a start is a real cost
+    # even when the hardware is absent.
+    #
+    # Two causes, both read from source rather than guessed at.
+    #
+    # 1. lgpio makes a notification FIFO in its working directory:
+    #    lgNotify.c:131 builds "%s/.lgd-nfy%d" from lguGetWorkDir(), which
+    #    (lgUtil.c:181) returns getenv(LG_WD) and otherwise falls back to
+    #    getcwd(). LG_WD is the literal "LG_WD" (lgpio.h:39). With nothing
+    #    set, getcwd() here is WorkingDirectory=/opt/scoreboard, which
+    #    ProtectSystem=strict makes read-only -- hence the exact permission
+    #    in the message, 436 == 0664, which is the mode xCreatePipe passes.
+    #
+    # 2. Even with somewhere to write, the process could not open the chip:
+    #    lgpio opens /dev/gpiochip%d (lgGpio.c:724) and gpiozero's factory
+    #    picks chip 0 on a Pi 4 (gpiozero/pins/lgpio.py:67). The unit's
+    #    DeviceAllow list named char-drm, char-input and /dev/tty1 and
+    #    nothing else. The kernel registers that char device class as
+    #    "gpiochip" (drivers/gpio/gpiolib.h:23), which is the name systemd
+    #    matches against /proc/devices, so char-gpiochip is the class.
+    #
+    # The group half was already right: raspberrypi-sys-mods' 99-com.rules
+    # has SUBSYSTEM=="gpio", GROUP="gpio", MODE="0660", and pi-setup.sh's
+    # install_appliance adds the service account to gpio when it exists.
+    out = run(checkout, "--appliance", "--print-unit").stdout
+    fields = unit(out)
+    assert "DeviceAllow=char-gpiochip rw" in out, \
+        "lgpio cannot open /dev/gpiochip0 under this unit"
+    assert "Environment=LG_WD=" in out, \
+        "lgpio will fall back to getcwd(), which ProtectSystem=strict has made read-only"
+    # And wherever it is pointed has to be somewhere the service can write,
+    # or the setting moves the failure rather than fixing it.
+    lg_wd = next(line.split("=", 2)[2] for line in out.splitlines()
+                 if line.startswith("Environment=LG_WD="))
+    writable = [line.split("=", 1)[1] for line in out.splitlines()
+                if line.startswith("ReadWritePaths=")]
+    assert any(lg_wd == p or lg_wd.startswith(p.rstrip("/") + "/") for p in writable), \
+        f"LG_WD={lg_wd} is not under any ReadWritePaths= ({writable}); the FIFO still cannot be made"
+    assert fields["WorkingDirectory"] != lg_wd or "ProtectSystem=strict" not in out
+
+
 def test_appliance_unit_does_not_declare_supplementary_groups(checkout):
     # Group membership belongs to install_appliance now, not the unit: the
     # two used to list the same four groups and disagree about which were
