@@ -368,16 +368,23 @@ RASPI_TIMEOUT_S = 10
 # good. Refusing to ask because the clock ran out would reintroduce exactly
 # the bug the check exists to prevent.
 #
-# Bounded rather than open-ended. status() makes three queries, so one check
-# costs at most 3 x VERIFY_TIMEOUT_S = 6 s -- and at most ONE check can happen
-# with the budget already spent, because join()'s next iteration breaks on
-# budget.expired() before reaching another connect. So the absolute ceiling is
-# BOOT_BUDGET_S + 6 s = 88 s, still inside the "minute and a half" the site
-# promises and 32 s inside the unit's TimeoutStartSec. Two seconds is ample:
-# a panel that IS connected answers this instantly, and the timeout is only
-# there for a wedged nmcli.
+# Bounded rather than open-ended, and bounded by construction rather than by
+# this comment. status() makes three queries at VERIFY_TIMEOUT_S, so one check
+# costs at most 3 x 2 = 6 s -- but that arithmetic holds only while status()
+# makes exactly three queries, and nothing used to say so. joined() therefore
+# opens a Budget(VERIFY_OVERRUN_S) of its own and hands it to status(), which
+# spends the three queries from it: a fourth query would get what is left of
+# the six seconds rather than six more. VERIFY_OVERRUN_S is the enforced
+# number, not a note about one.
+#
+# At most ONE such check can happen with the boot budget already spent,
+# because join()'s next iteration breaks on budget.expired() before reaching
+# another connect. So the ABSOLUTE ceiling is BOOT_BUDGET_S + VERIFY_OVERRUN_S.
+# Two seconds a query is ample: a panel that IS connected answers instantly,
+# and the timeout is only there for a wedged nmcli.
 VERIFY_TIMEOUT_S = 2
-VERIFY_OVERRUN_S = 3 * VERIFY_TIMEOUT_S
+STATUS_QUERIES = 3
+VERIFY_OVERRUN_S = STATUS_QUERIES * VERIFY_TIMEOUT_S
 
 # --- The budget -----------------------------------------------------------
 #
@@ -406,29 +413,67 @@ VERIFY_OVERRUN_S = 3 * VERIFY_TIMEOUT_S
 # call therefore cannot finish past the deadline.
 #
 #   set_country -> raspi-config                 RASPI_TIMEOUT_S    10 s
+#     OR, when the file has no country= line and /proc/cmdline has no
+#     regdom either, the other half of the same slot:
+#     regulatory_domain -> iw reg get           RASPI_TIMEOUT_S   (10 s)
 #   radio_on    -> nmcli radio wifi on          FAST_TIMEOUT_S      5 s
 #   wait_for_wifi (device-state queries + naps) WIFI_READY_S       10 s
-#   wait_for_ssid (rescans + list polls + naps) SCAN_BUDGET_S      12 s
+#   wait_for_ssid (rescans + list polls + naps) SCAN_BUDGET_S      15 s
 #                                                                  ----
-#                                        before the first connect  37 s
+#                                        before the first connect  40 s
 #   the first connect                           CONNECT_TIMEOUT_S  45 s
 #                                                                  ----
-#                                        BOOT_BUDGET_S             82 s
+#                                        BOOT_BUDGET_S             85 s
 #
-# The sum is exact on purpose: 37 + 45 = 82, so even when every earlier step
+#   joined(), once, past the deadline            VERIFY_OVERRUN_S   6 s
+#                                                                  ----
+#                                        ABSOLUTE_CEILING_S        91 s
+#
+# The first row is an either/or, never both: apply_boot_file takes exactly one
+# of those two branches. The iw call was off this table for a round and
+# unclamped, which was harmless only because QUERY_TIMEOUT_S happens to equal
+# RASPI_TIMEOUT_S -- an arithmetic coincidence rather than a construction, and
+# the third time a call on this path had been left off the table it bounds.
+#
+# The sum is exact on purpose: 40 + 45 = 85, so even when every earlier step
 # runs to its cap the first connect is still granted a full CONNECT_TIMEOUT_S.
 # That is arranged, not asserted -- and MIN_CONNECT_S below enforces the same
 # thing for the retries, which have no such arithmetic guarantee.
+#
+# It read 37 + 45 = 82 for one round, with SCAN_BUDGET_S cut from 15 to 12 to
+# get there. The cut went the wrong way: the scan wait is sized on the only
+# hardware evidence there is (two journals bounding the first completed scan
+# at 5.82 s), and the race with that first scan is what actually failed on a
+# Pi 4, twice. So the evidence keeps its 2.5x margin and the TOTAL moves
+# instead -- 85 s rather than 82, with the first connect's 45 s untouched
+# because that guarantee is the point of the arithmetic.
 #
 # The rescans are inside SCAN_BUDGET_S rather than beside it: wait_for_ssid
 # asks for the scan itself, at the start and again every SCAN_REISSUE_S, all
 # from its own sub-budget. A hidden network skips both that wait and its
 # rescans (see join), so its path is shorter, not longer.
 #
-# 82 s is inside the "up to a minute and a half" the download page and the
-# setup steps promise an owner watching a dark panel, and leaves 38 s of
-# headroom under the unit's TimeoutStartSec=120 for systemd's own overhead.
-BOOT_BUDGET_S = 82
+# 85 s leaves 35 s of headroom under the unit's TimeoutStartSec=120; the
+# absolute ceiling below leaves 29 s. Both numbers are stated in the unit
+# file too, because quoting one of them there and the other in the spec is
+# how they came to look like a contradiction.
+BOOT_BUDGET_S = 85
+
+# The number to compare TimeoutStartSec against, and the one the site's
+# promise has to cover. BOOT_BUDGET_S is the soft budget -- what every step
+# draws from -- and joined() is allowed VERIFY_OVERRUN_S past it, once (see
+# VERIFY_TIMEOUT_S above). Named rather than written out in each of the places
+# that quote it, because the two numbers were drifting apart already: the
+# spec's "38 s of headroom" was measured from the soft budget and the unit's
+# "32 s" from this one, and read side by side they looked like a contradiction
+# rather than two true statements about different numbers.
+#
+# 91 s is over the "up to a minute and a half" both site pages used to
+# promise, by one second, and the pages now say "up to two minutes" instead.
+# That is the honest figure in any case: 90 s only ever covered THIS service,
+# and the owner is watching a dark panel until scoreboard.service has started,
+# initialized SDL and painted a frame after it.
+ABSOLUTE_CEILING_S = BOOT_BUDGET_S + VERIFY_OVERRUN_S
 
 # How long to let a Wi-Fi interface settle after the radio is switched on,
 # before trying to connect through it.
@@ -462,7 +507,16 @@ WIFI_READY_POLL_S = 2
 # a pending action is exactly what delays "manager: startup complete" -- so
 # startup complete cannot be logged mid-scan. It came 5.82 s and 5.81 s after
 # wlan0 reached "disconnected" on the two boots, which therefore bounds when
-# the first scan had finished. Twelve seconds is a little over twice that.
+# the first scan had finished. Fifteen seconds is two and a half times that.
+#
+# It was cut to twelve for one round, to buy back three seconds of boot
+# budget, and the test guarding it was relaxed from 2.5x to 2x in the same
+# commit to keep it green. That is the wrong way round: the guard exists
+# because the only hardware evidence is two journals, and a margin chosen to
+# fit an unrelated total is not a margin. The race with the first scan is the
+# exact thing that failed on real hardware, twice. Fifteen is restored, the
+# guard with it, and BOOT_BUDGET_S absorbs the three seconds rather than the
+# evidence doing it.
 #
 # SCAN_REISSUE_S is what stops the rest of the wait polling a frozen list. One
 # scan at the start and nothing after it is one look stretched out, not a
@@ -471,7 +525,7 @@ WIFI_READY_POLL_S = 2
 # _scan_kickoff() and returns no error, so re-asking costs one D-Bus round
 # trip -- and it is also what lets a refused first rescan (the device not yet
 # ready) heal inside the same attempt instead of wasting it.
-SCAN_BUDGET_S = 12
+SCAN_BUDGET_S = 15
 SSID_POLL_S = 2
 SCAN_REISSUE_S = 6
 
@@ -694,6 +748,18 @@ DECODE = {"encoding": "utf-8", "errors": "replace"}
 def _run_nmcli(args: list[str], timeout: float | None = QUERY_TIMEOUT_S) -> str:
     # A list, never a string, and never shell=True: an SSID is attacker-chosen
     # text from the air, and a password is whatever the user typed.
+    #
+    # None means "the default", NOT "wait forever". subprocess.run(timeout=None)
+    # blocks until the child exits, and no caller here wants that: every one is
+    # either on a boot deadline or on a render loop. The coercion is here
+    # rather than only in the signature because passing the parameter through
+    # is how the bug arrives -- status() took ``timeout: float | None = None``
+    # and handed that straight down, which overrode this function's own default
+    # and left the render loop's network poll unbounded, with the panel's first
+    # paint queued behind it. A default value only defends the callers that
+    # omit the argument; this also defends the ones that pass it.
+    if timeout is None:
+        timeout = QUERY_TIMEOUT_S
     timed_out = False
     try:
         result = subprocess.run(["nmcli", *args], capture_output=True, timeout=timeout,
@@ -749,8 +815,19 @@ def _run_iw_reg_get(timeout: float = QUERY_TIMEOUT_S) -> str:
     return result.stdout
 
 
-def regulatory_domain(run_iw=None) -> str | None:
+def regulatory_domain(run_iw=None, budget: "Budget | None" = None) -> str | None:
     """The Wi-Fi regulatory domain this panel already has, or None.
+
+    **This is on the boot path, so it is on the budget.** apply_boot_file
+    calls it whenever the setup file carries no ``country=`` line, and the
+    ``iw reg get`` below is then a subprocess like any other. It was off the
+    table and unclamped for a round, and harmless only by arithmetic accident:
+    QUERY_TIMEOUT_S happens to equal RASPI_TIMEOUT_S, and this branch happens
+    to be the else of the set_country branch, so the total came out right.
+    Neither of those is construction, and the unit file's claim that "every
+    call on the path is on that table" was simply false. It now takes the
+    budget and draws RASPI_TIMEOUT_S from it -- the same slot as
+    raspi-config, because it is the alternative to raspi-config, never both.
 
     Two sources, because they answer slightly different questions and neither
     alone is enough:
@@ -789,8 +866,12 @@ def regulatory_domain(run_iw=None) -> str | None:
                     return code
     except OSError:
         pass
+    # min(its own cap, time remaining), exactly like every other call, and
+    # passed to the injected runner too so a test can see the bound rather
+    # than take it on trust.
     try:
-        out = (run_iw or _run_iw_reg_get)()
+        out = (run_iw or _run_iw_reg_get)(
+            timeout=budget.allow(RASPI_TIMEOUT_S) if budget else RASPI_TIMEOUT_S)
     except NetworkError:
         return None
     for line in out.splitlines():
@@ -898,6 +979,22 @@ class NetworkManager:
         six tries two seconds apart was really up to about seventy seconds.
         The deadline is re-checked after every query returns.
 
+        **An empty device list is waited out, not given up on.** This used to
+        return False the moment nmcli listed no `wifi`-type row, commented "no
+        Wi-Fi device at all; waiting cannot help". That is right for an
+        Ethernet-only panel and wrong for the boot this method exists for: the
+        unit is `After=NetworkManager.service`, which means NetworkManager has
+        been *started*, not that it has finished enumerating its devices --
+        and until it has, `nmcli -t -f DEVICE,TYPE,STATE device` lists no
+        wlan0 at all rather than listing it as "unavailable". Treating the two
+        cases differently meant the one boot where the radio came up a moment
+        ago could fall straight through to a connect that fails, which is the
+        whole failure this method was added to prevent. The two states are
+        indistinguishable from here, so they get the same treatment: poll
+        until the deadline. The Ethernet-only panel pays the WIFI_READY_S wait
+        it used to skip, on a boot where its setup file was going to fail
+        anyway.
+
         Never raises. A false return is not fatal; the caller goes on and lets
         the connect's own error be the one that gets reported.
         """
@@ -910,8 +1007,8 @@ class NetworkManager:
                 return False
             states = [f[2] for f in (split_terse(l) for l in out.splitlines())
                       if len(f) >= 3 and f[1] == "wifi"]
-            if not states:
-                return False  # no Wi-Fi device at all; waiting cannot help
+            # No row yet is "not enumerated yet" as often as it is "no adapter",
+            # and nothing here can tell them apart -- so keep looking.
             if any(s not in ("unavailable", "unmanaged") for s in states):
                 return True
             # After the call, not before it: the query is where the time went.
@@ -923,8 +1020,22 @@ class NetworkManager:
             if own.expired():
                 return False
 
-    def scan(self) -> list[Network]:
-        out = self._run(["-t", "-f", "SSID,SIGNAL,SECURITY", "device", "wifi", "list"])
+    def scan(self, timeout: float = QUERY_TIMEOUT_S) -> list[Network]:
+        # The settings screen's scan, not the boot path's: it is off the
+        # budget because the render loop, not apply_boot_file, is what calls
+        # it. The cap is named here rather than left to the runner's own
+        # default for the same reason status() names one -- a bound a caller
+        # can see is a bound, and this call is between a keypress and a frame.
+        # It omits --rescan no deliberately -- a person has just asked to see
+        # the networks, so nmcli's own scan-and-wait is what they want -- and
+        # that wait can be up to 15 s (devices.c:3554-3576), which a 10 s cap
+        # clips. That is the existing behavior, written down rather than
+        # changed here: the clipped call raises, the settings screen says it
+        # could not scan, and the person presses the key again. Raising the
+        # cap to 16 s would be the honest fix and belongs with a look at what
+        # a 16 s freeze does to the render loop, not in this round.
+        out = self._run(["-t", "-f", "SSID,SIGNAL,SECURITY", "device", "wifi", "list"],
+                        timeout=timeout)
         best: dict[str, Network] = {}
         for line in out.splitlines():
             fields = split_terse(line)
@@ -939,8 +1050,14 @@ class NetworkManager:
                 best[found.ssid] = found
         return sorted(best.values(), key=lambda n: n.signal, reverse=True)
 
-    def rescan(self, budget: "Budget | None" = None, clock=None) -> bool:
+    def rescan(self, budget: "Budget | None" = None) -> bool:
         """Ask NetworkManager for a fresh scan. True if it accepted.
+
+        It took a ``clock=`` it never read. One call, no loop and no nap, so
+        there is nothing here for a clock to move -- the caller's budget is
+        already carrying one. A parameter that is only ever passed and never
+        used reads as "this is on the fake clock" to the next person, which
+        is exactly the kind of thing that makes a timing test look sound.
 
         Not fatal when refused, but the reasoning first written here was
         wrong and is worth correcting rather than deleting. It said a refusal
@@ -1037,7 +1154,7 @@ class NetworkManager:
         while True:
             if asked_at is None or own.elapsed() - asked_at >= SCAN_REISSUE_S:
                 asked_at = own.elapsed()
-                if self.rescan(budget=own, clock=clock):
+                if self.rescan(budget=own):
                     speak.say("rescan requested")
             try:
                 polls += 1
@@ -1074,7 +1191,7 @@ class NetworkManager:
             args += ["hidden", "yes"]
         self._run(args, timeout=timeout)
 
-    def joined(self, ssid: str) -> bool:
+    def joined(self, ssid: str, clock=None) -> bool:
         """Is this panel actually on that network right now?
 
         Asked after a connect that timed out, because a timeout is not a
@@ -1087,13 +1204,23 @@ class NetworkManager:
         Any failure here is False rather than an exception: this is a second
         opinion, and one that cannot be obtained is not a success.
 
-        It uses VERIFY_TIMEOUT_S outright rather than drawing from the budget,
-        because a spent budget is precisely when this matters most and a
-        timeout of zero would answer "no" without asking. See VERIFY_OVERRUN_S
-        for why that is bounded and what it costs.
+        It uses VERIFY_TIMEOUT_S outright rather than drawing from the BOOT
+        budget, because a spent budget is precisely when this matters most and
+        a timeout of zero would answer "no" without asking. What bounds it
+        instead is a budget of its own, VERIFY_OVERRUN_S wide, started here.
+
+        That deadline is the whole of the difference between BOOT_BUDGET_S and
+        the absolute ceiling, and it is now enforced rather than argued. It
+        used to be arithmetic in a comment -- "status() makes three queries at
+        VERIFY_TIMEOUT_S, so the overrun is 3 x 2 = 6 s" -- which is true only
+        for as long as status() makes exactly three queries, and nothing
+        anywhere said so. Adding a fourth would have moved the ceiling with
+        nothing to notice. With the budget, a fourth query gets whatever is
+        left of the six seconds and the ceiling does not move.
         """
+        check = Budget(VERIFY_OVERRUN_S, clock=clock)
         try:
-            now = self.status(timeout=VERIFY_TIMEOUT_S)
+            now = self.status(timeout=VERIFY_TIMEOUT_S, budget=check)
         except NetworkError as e:
             log.debug("could not check whether the join worked: %s", e)
             return False
@@ -1199,7 +1326,7 @@ class NetworkManager:
                     # The client was killed; the daemon was not. Ask.
                     budget.say("attempt %d ran out of time; asking NetworkManager "
                                "what actually happened", attempt)
-                    if self.joined(settings.ssid):
+                    if self.joined(settings.ssid, clock=clock):
                         budget.say("NetworkManager finished the job anyway: "
                                    "connected to %r", settings.ssid)
                         return
@@ -1241,25 +1368,42 @@ class NetworkManager:
                 # By UUID: a connection name can contain anything at all.
                 self._run(["connection", "delete", "uuid", fields[0]])
 
-    def status(self, timeout: float | None = None) -> Status:
+    def status(self, timeout: float = QUERY_TIMEOUT_S,
+               budget: "Budget | None" = None) -> Status:
         """What this panel is connected to, if anything.
 
-        ``timeout`` is passed through so the boot path can ask this question
-        inside its deadline; the render loop leaves it alone and gets the
-        runner's own default.
+        ``timeout`` bounds EACH of the three queries below. The default is
+        QUERY_TIMEOUT_S, spelled out here rather than left to the runner: this
+        parameter was ``float | None = None`` for one round, and passing None
+        down does not mean "use the runner's default" -- it reaches
+        ``subprocess.run(timeout=None)``, which waits forever. That mattered
+        because main.py's render loop calls this with no argument, before the
+        first ``screens.draw_*``, on every pass where MQTT is not connected --
+        which is every first boot. scoreboard.service has Restart=always but
+        no WatchdogSec, so a render loop blocked in here is never recovered:
+        the panel stays black for good.
+
+        The boot path passes a smaller number (see joined()); the render loop
+        gets 10 s per query by default.
+
+        ``budget`` bounds the three queries TOGETHER, which is a different
+        question from bounding each one. joined() passes a VERIFY_OVERRUN_S
+        budget so that the one check allowed to run past the boot deadline
+        cannot exceed that number however many queries this method grows.
         """
+        each = (lambda: budget.allow(timeout)) if budget is not None else (lambda: timeout)
         online = self._run(["-t", "-f", "STATE", "general"],
-                           timeout=timeout).strip() == "connected"
+                           timeout=each()).strip() == "connected"
         ssid = None
         for line in self._run(["-t", "-f", "ACTIVE,SSID", "device", "wifi"],
-                              timeout=timeout).splitlines():
+                              timeout=each()).splitlines():
             fields = split_terse(line)
             if len(fields) >= 2 and fields[0] == "yes":
                 ssid = fields[1]
                 break
         ip = None
         for line in self._run(["-t", "-f", "IP4.ADDRESS", "device", "show"],
-                              timeout=timeout).splitlines():
+                              timeout=each()).splitlines():
             fields = split_terse(line)
             value = fields[-1] if fields else ""
             if value:
@@ -1329,7 +1473,11 @@ def apply_boot_file(path: Path | None = None, nm: "NetworkManager | None" = None
         # file by hand, or a card written before the line existed, and taking
         # it offline over a missing line of text would be a worse bug than the
         # one this check exists to prevent.
-        country = regulatory_domain()
+        #
+        # On the budget, and in the SAME slot as set_country above: exactly
+        # one of these two branches runs, so the table's raspi-config line
+        # covers whichever it is.
+        country = regulatory_domain(budget=budget)
         if country is None:
             raise ValueError(MISSING_COUNTRY)
         budget.say("no country= line, but this panel is already set to %s; "

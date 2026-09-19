@@ -138,16 +138,38 @@ def test_the_network_unit_states_its_own_start_budget():
     assert "TimeoutStartSec" in fields, "the unit inherits DefaultTimeoutStartSec without saying so"
     budget = systemd_seconds(fields["TimeoutStartSec"])
     worst_case = netcfg.BOOT_BUDGET_S
-    assert budget > worst_case, f"TimeoutStartSec={budget}s cannot cover the {worst_case}s budget"
+    # The number systemd has to clear is the ABSOLUTE ceiling, not the soft
+    # budget. joined() is allowed VERIFY_OVERRUN_S past the deadline -- once,
+    # deliberately, because answering "no" without asking strands a cleartext
+    # password on the boot partition -- and systemd does not know or care that
+    # the overrun is intentional. The unit's own comment has always said this
+    # test asserts the headroom "above even that absolute ceiling"; it
+    # asserted it above the soft budget, which is a different and easier
+    # number. Corrected here rather than in the comment: the comment was
+    # describing the test worth having.
+    ceiling = netcfg.ABSOLUTE_CEILING_S
+    assert ceiling > worst_case, "the absolute ceiling is not above the budget it extends"
+    assert budget > ceiling, \
+        f"TimeoutStartSec={budget}s cannot cover the {ceiling}s absolute ceiling"
     assert budget <= 300, f"TimeoutStartSec={budget}s leaves the panel dark too long when Wi-Fi fails"
-    # Room for systemd's own overhead above a budget the code enforces, rather
-    # than a figure that merely happens to clear it by a second.
-    assert budget - worst_case >= 30, \
-        f"only {budget - worst_case}s between the enforced budget and the unit's timeout"
-    # And the number the unit's own comment states, so the comment is a
-    # tripwire rather than a decoration.
+    # Room for systemd's own overhead above a ceiling the code enforces,
+    # rather than a figure that merely happens to clear it by a second.
+    # systemd's own start-up accounting, a slow SD card and the exec of a
+    # Python interpreter all land in this gap.
+    assert budget - ceiling >= 25, \
+        f"only {budget - ceiling}s between the absolute ceiling and the unit's timeout"
+    # And the numbers the unit's own comment states, so the comment is a
+    # tripwire rather than a decoration. BOTH headrooms are named there,
+    # because quoting only one of them is how the unit came to say 32 s while
+    # the spec said 38 s about the same TimeoutStartSec.
     assert f"{worst_case} s" in text, \
         f"the unit's comment no longer states the {worst_case}s budget it is sized against"
+    assert f"{ceiling} s" in text, \
+        f"the unit's comment no longer states the {ceiling}s absolute ceiling"
+    assert f"{int(budget - worst_case)} s of headroom" in text, \
+        f"the unit's comment no longer states the {int(budget - worst_case)}s above the soft budget"
+    assert f"{int(budget - ceiling)} s above" in text, \
+        f"the unit's comment no longer states the {int(budget - ceiling)}s above the absolute ceiling"
 
 
 def test_appliance_unit_runs_as_its_own_account(checkout):

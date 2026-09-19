@@ -139,7 +139,7 @@ def test_the_note_the_panel_writes_is_accepted_once_it_is_filled_in(tmp_path, mo
     path = tmp_path / "scoreboard-setup.txt"
     path.write_text("ssid=HomeNet\npsk=supersecret\ncountry=GB\nrotate=270\n"
                     "owner=friend@example.com\n")
-    monkeypatch.setattr(netcfg, "regulatory_domain", lambda: None)
+    monkeypatch.setattr(netcfg, "regulatory_domain", lambda budget=None: None)
     first = FakeNmcli()
     assert apply_boot_file(
         path, nm=NetworkManager(run=first, run_raspi_config=NO_RASPI_CONFIG),
@@ -178,7 +178,7 @@ def test_the_note_records_the_domain_relied_on_when_the_file_had_no_country(
     # self-sufficient even though this one was not.
     path = tmp_path / "scoreboard-setup.txt"
     path.write_text("ssid=HomeNet\npsk=supersecret\n")
-    monkeypatch.setattr(netcfg, "regulatory_domain", lambda: "CA")
+    monkeypatch.setattr(netcfg, "regulatory_domain", lambda budget=None: "CA")
     assert apply_boot_file(
         path, nm=NetworkManager(run=FakeNmcli(), run_raspi_config=NO_RASPI_CONFIG),
         now=lambda: "NOW") is True
@@ -370,15 +370,24 @@ from scoreboard.netcfg import (NetworkManager, NetworkError, Network, Status,
 
 
 class FakeNmcli:
-    """Stands in for nmcli. Records calls; returns canned output per subcommand."""
+    """Stands in for nmcli. Records calls; returns canned output per subcommand.
+
+    It records ``timeout=`` as well as argv, and that is not bookkeeping. This
+    fake ignored the timeout entirely for one round, so it could not tell a
+    call that was bounded from one that was not -- which is precisely how
+    ``status(timeout=None)`` reached the render loop with no bound at all.
+    A fake that drops the argument under test cannot fail the test.
+    """
 
     def __init__(self, outputs=None, fail_on=None):
         self.outputs = outputs or {}
         self.fail_on = fail_on
         self.calls = []
+        self.timeouts = []
 
     def __call__(self, args, timeout=None):
         self.calls.append(list(args))
+        self.timeouts.append(timeout)
         if self.fail_on is not None and self.fail_on in args:
             raise NetworkError("nmcli said no")
         for key, value in self.outputs.items():
@@ -458,6 +467,117 @@ def test_status_reports_the_active_network():
     assert got == Status(online=True, ssid="HomeNet", ip="192.168.1.20")
 
 
+def status_fake():
+    return FakeNmcli({"general": "connected\n",
+                      "wifi": "no:Neighbour\nyes:HomeNet\n",
+                      "show": "192.168.1.20/24\n"})
+
+
+def test_the_render_loops_own_status_call_is_bounded():
+    # The call main.py makes: nm.status(), no arguments, on every pass of the
+    # render loop where MQTT is not connected -- which is every first boot --
+    # and BEFORE the pass's screens.draw_*. It took `timeout: float | None =
+    # None` for one round and handed that straight to subprocess.run, which
+    # waits forever. scoreboard.service has Restart=always but no
+    # WatchdogSec, so a render loop blocked in there is never recovered: the
+    # panel is black and stays black.
+    #
+    # The assertion is on the value the runner RECEIVED. "It does not hang"
+    # is not testable in a unit test and "it passes something" is what the
+    # old fake could see; the number is the only honest check.
+    fake = status_fake()
+    NetworkManager(run=fake).status()
+    assert fake.timeouts, "status() made no calls"
+    assert all(t == netcfg.QUERY_TIMEOUT_S for t in fake.timeouts), \
+        f"the render loop's status() granted {fake.timeouts}, not {netcfg.QUERY_TIMEOUT_S}s a query"
+    assert None not in fake.timeouts, "a query was left unbounded"
+
+
+def test_every_query_status_makes_is_bounded_not_just_the_first():
+    # Three nmcli calls, not one. Bounding only the first would leave the
+    # other two able to hang the same render loop.
+    fake = status_fake()
+    NetworkManager(run=fake).status()
+    assert len(fake.timeouts) == 3, f"status() made {len(fake.timeouts)} calls, expected 3"
+
+
+def test_the_boot_paths_verification_still_gets_its_own_shorter_timeout():
+    # joined() must keep passing VERIFY_TIMEOUT_S rather than inheriting the
+    # render loop's default: it runs with the budget already spent, and the
+    # absolute ceiling is sized on three queries of two seconds.
+    fake = status_fake()
+    assert NetworkManager(run=fake).joined("HomeNet") is True
+    assert fake.timeouts, "joined() made no calls"
+    assert all(t == netcfg.VERIFY_TIMEOUT_S for t in fake.timeouts), \
+        f"joined() granted {fake.timeouts}, not {netcfg.VERIFY_TIMEOUT_S}s a query"
+
+
+def test_the_overrun_past_the_deadline_is_enforced_not_just_asserted():
+    # VERIFY_OVERRUN_S is the whole of the gap between BOOT_BUDGET_S and
+    # ABSOLUTE_CEILING_S, and it used to be arithmetic in a comment: "status()
+    # makes three queries at VERIFY_TIMEOUT_S, so 3 x 2 = 6". True only while
+    # status() makes exactly three queries, with nothing anywhere saying so.
+    # joined() now opens a budget of its own and hands it down, so the queries
+    # SHARE the six seconds rather than each being granted two of them.
+    assert netcfg.ABSOLUTE_CEILING_S == netcfg.BOOT_BUDGET_S + netcfg.VERIFY_OVERRUN_S
+
+    ticking = FakeClock()
+    fake = status_fake()
+
+    class Slow(FakeNmcli):
+        def __call__(self, args, timeout=None):
+            out = super().__call__(args, timeout=timeout)
+            ticking.sleep(timeout)   # every query runs to its kill
+            return out
+
+    slow = Slow(fake.outputs)
+    started = ticking()
+    NetworkManager(run=slow).joined("HomeNet", clock=ticking)
+    assert ticking() - started <= netcfg.VERIFY_OVERRUN_S, \
+        f"the check ran {ticking() - started}s past the deadline, over {netcfg.VERIFY_OVERRUN_S}s"
+
+
+def test_a_fourth_status_query_could_not_widen_the_overrun():
+    # The property the budget buys, stated as a test rather than as a hope:
+    # a status() that grew another query would draw it from the same six
+    # seconds instead of adding two more to the absolute ceiling.
+    ticking = FakeClock()
+
+    class FourQueries(FakeNmcli):
+        def __call__(self, args, timeout=None):
+            super().__call__(args, timeout=timeout)
+            ticking.sleep(timeout)
+            return "connected\n" if "general" in args else ""
+
+    nm = NetworkManager(run=FourQueries())
+    check = netcfg.Budget(netcfg.VERIFY_OVERRUN_S, clock=ticking)
+    started = ticking()
+    for _ in range(4):
+        nm.status(timeout=netcfg.VERIFY_TIMEOUT_S, budget=check)
+    assert ticking() - started <= netcfg.VERIFY_OVERRUN_S, \
+        f"{ticking() - started}s spent against a {netcfg.VERIFY_OVERRUN_S}s budget"
+
+
+def test_a_runner_handed_no_timeout_still_bounds_the_call(monkeypatch):
+    # The other half of the same defect. A default only defends the callers
+    # that omit the argument; _run_nmcli also has to defend the ones that
+    # pass None explicitly, because that is what reaches subprocess.run and
+    # subprocess.run(timeout=None) blocks until the child exits.
+    seen = {}
+
+    class Done:
+        returncode, stdout, stderr = 0, "", ""
+
+    def capture(argv, **kwargs):
+        seen.update(kwargs)
+        return Done()
+
+    monkeypatch.setattr(netcfg.subprocess, "run", capture)
+    netcfg._run_nmcli(["-t", "-f", "STATE", "general"], timeout=None)
+    assert seen["timeout"] == netcfg.QUERY_TIMEOUT_S, \
+        f"an explicit None became timeout={seen['timeout']!r}"
+
+
 def test_apply_boot_file_applies_then_consumes(tmp_path):
     path = tmp_path / "scoreboard-wifi.txt"
     path.write_text("ssid=HomeNet\npsk=supersecret\ncountry=US\n")
@@ -503,7 +623,7 @@ def test_a_fresh_panel_refuses_a_file_with_no_country(tmp_path, monkeypatch):
     # rather than proceed to an nmcli call that cannot succeed.
     path = tmp_path / "scoreboard-setup.txt"
     path.write_text("ssid=HomeNet\npsk=supersecret\n")
-    monkeypatch.setattr(netcfg, "regulatory_domain", lambda: None)
+    monkeypatch.setattr(netcfg, "regulatory_domain", lambda budget=None: None)
     with pytest.raises(ValueError, match="country"):
         apply_boot_file(path, nm=NetworkManager(run=FakeNmcli(), run_raspi_config=NO_RASPI_CONFIG))
     assert "psk=supersecret" in path.read_text(), "the user's only copy was destroyed"
@@ -514,7 +634,7 @@ def test_the_missing_country_message_says_what_to_add(tmp_path, monkeypatch):
     # lands in the journal and nowhere else, so it has to stand on its own.
     path = tmp_path / "scoreboard-setup.txt"
     path.write_text("ssid=HomeNet\npsk=supersecret\n")
-    monkeypatch.setattr(netcfg, "regulatory_domain", lambda: None)
+    monkeypatch.setattr(netcfg, "regulatory_domain", lambda budget=None: None)
     with pytest.raises(ValueError) as caught:
         apply_boot_file(path, nm=NetworkManager(run=FakeNmcli(), run_raspi_config=NO_RASPI_CONFIG))
     message = str(caught.value)
@@ -532,7 +652,7 @@ def test_a_panel_that_already_has_a_domain_does_not_go_dark_over_a_missing_line(
     # take a working panel offline over a missing line of text.
     path = tmp_path / "scoreboard-setup.txt"
     path.write_text("ssid=HomeNet\npsk=supersecret\n")
-    monkeypatch.setattr(netcfg, "regulatory_domain", lambda: "GB")
+    monkeypatch.setattr(netcfg, "regulatory_domain", lambda budget=None: "GB")
     fake = FakeNmcli()
     with caplog.at_level(logging.INFO, logger="scoreboard.netcfg"):
         assert apply_boot_file(
@@ -548,7 +668,7 @@ def test_regulatory_domain_reads_the_kernel_command_line(tmp_path, monkeypatch):
     cmdline = tmp_path / "cmdline"
     cmdline.write_text("console=serial0,115200 cfg80211.ieee80211_regdom=CA rootwait\n")
     monkeypatch.setattr(netcfg, "PROC_CMDLINE", cmdline)
-    assert netcfg.regulatory_domain(run_iw=lambda: "country 00: DFS-UNSET\n") == "CA"
+    assert netcfg.regulatory_domain(run_iw=lambda timeout=None: "country 00: DFS-UNSET\n") == "CA"
 
 
 def test_regulatory_domain_falls_back_to_iw_within_the_same_boot(tmp_path, monkeypatch):
@@ -557,7 +677,7 @@ def test_regulatory_domain_falls_back_to_iw_within_the_same_boot(tmp_path, monke
     cmdline = tmp_path / "cmdline"
     cmdline.write_text("console=serial0,115200 rootwait\n")
     monkeypatch.setattr(netcfg, "PROC_CMDLINE", cmdline)
-    assert netcfg.regulatory_domain(run_iw=lambda: "global\ncountry DE: DFS-ETSI\n") == "DE"
+    assert netcfg.regulatory_domain(run_iw=lambda timeout=None: "global\ncountry DE: DFS-ETSI\n") == "DE"
 
 
 def test_regulatory_domain_treats_the_world_domain_as_unset(tmp_path, monkeypatch):
@@ -568,7 +688,7 @@ def test_regulatory_domain_treats_the_world_domain_as_unset(tmp_path, monkeypatc
     cmdline = tmp_path / "cmdline"
     cmdline.write_text("console=serial0,115200 rootwait\n")
     monkeypatch.setattr(netcfg, "PROC_CMDLINE", cmdline)
-    assert netcfg.regulatory_domain(run_iw=lambda: "global\ncountry 00: DFS-UNSET\n") is None
+    assert netcfg.regulatory_domain(run_iw=lambda timeout=None: "global\ncountry 00: DFS-UNSET\n") is None
 
 
 def test_regulatory_domain_ignores_a_self_managed_phy_block(tmp_path, monkeypatch):
@@ -582,7 +702,7 @@ def test_regulatory_domain_ignores_a_self_managed_phy_block(tmp_path, monkeypatc
     monkeypatch.setattr(netcfg, "PROC_CMDLINE", cmdline)
     out = ("global\ncountry 00: DFS-UNSET\n"
            "\nphy#0 (self-managed)\ncountry US: DFS-FCC\n")
-    assert netcfg.regulatory_domain(run_iw=lambda: out) is None
+    assert netcfg.regulatory_domain(run_iw=lambda timeout=None: out) is None
 
 
 def test_regulatory_domain_reads_the_global_block_whatever_follows_it(tmp_path, monkeypatch):
@@ -593,7 +713,7 @@ def test_regulatory_domain_reads_the_global_block_whatever_follows_it(tmp_path, 
     monkeypatch.setattr(netcfg, "PROC_CMDLINE", cmdline)
     out = ("global\ncountry US: DFS-FCC\n"
            "\nphy#0 (self-managed)\ncountry DE: DFS-ETSI\n")
-    assert netcfg.regulatory_domain(run_iw=lambda: out) == "US"
+    assert netcfg.regulatory_domain(run_iw=lambda timeout=None: out) == "US"
 
 
 def test_regulatory_domain_treats_the_drivers_own_default_as_unset(tmp_path, monkeypatch):
@@ -603,7 +723,7 @@ def test_regulatory_domain_treats_the_drivers_own_default_as_unset(tmp_path, mon
     cmdline = tmp_path / "cmdline"
     cmdline.write_text("console=serial0,115200 rootwait\n")
     monkeypatch.setattr(netcfg, "PROC_CMDLINE", cmdline)
-    assert netcfg.regulatory_domain(run_iw=lambda: "global\ncountry 99: DFS-UNSET\n") is None
+    assert netcfg.regulatory_domain(run_iw=lambda timeout=None: "global\ncountry 99: DFS-UNSET\n") is None
 
 
 def test_regulatory_domain_is_none_when_nothing_can_be_read(tmp_path, monkeypatch):
@@ -611,10 +731,60 @@ def test_regulatory_domain_is_none_when_nothing_can_be_read(tmp_path, monkeypatc
     # refused with an explanation rather than applied into a radio that is off.
     monkeypatch.setattr(netcfg, "PROC_CMDLINE", tmp_path / "does-not-exist")
 
-    def boom():
+    def boom(timeout=None):
         raise NetworkError("iw is not installed")
 
     assert netcfg.regulatory_domain(run_iw=boom) is None
+
+
+def test_the_iw_call_is_clamped_by_the_budget_like_every_other(tmp_path, monkeypatch):
+    # regulatory_domain() runs `iw reg get`, a subprocess, on the boot path --
+    # whenever the setup file has no country= line and /proc/cmdline has no
+    # regdom. It was off the budget table and unclamped, and harmless only
+    # because QUERY_TIMEOUT_S happens to equal RASPI_TIMEOUT_S and this is the
+    # else-branch of the raspi-config slot. Arithmetic coincidence is not a
+    # bound, and the unit file claims every call on the path is on the table.
+    monkeypatch.setattr(netcfg, "PROC_CMDLINE", tmp_path / "does-not-exist")
+    seen = []
+
+    def record(timeout=None):
+        seen.append(timeout)
+        return "global\ncountry GB: DFS-ETSI\n"
+
+    # Its own cap when there is plenty of budget left.
+    plenty = netcfg.Budget(netcfg.BOOT_BUDGET_S)
+    assert netcfg.regulatory_domain(run_iw=record, budget=plenty) == "GB"
+    assert seen == [netcfg.RASPI_TIMEOUT_S], \
+        f"the iw call was granted {seen}, not its own {netcfg.RASPI_TIMEOUT_S}s cap"
+
+    # What is left, when that is less -- which is the whole point of a clamp.
+    seen.clear()
+    nearly_spent = netcfg.Budget(3, clock=lambda: 1000.0)
+    assert netcfg.regulatory_domain(run_iw=record, budget=nearly_spent) == "GB"
+    assert seen == [3], f"the iw call was granted {seen} against 3s of budget"
+    assert seen[0] <= netcfg.RASPI_TIMEOUT_S
+
+
+def test_a_panel_with_no_country_line_puts_its_iw_call_on_the_budget(tmp_path, monkeypatch):
+    # End to end through apply_boot_file, so the call site is covered and not
+    # only the function. A budget with nothing left must grant nothing.
+    monkeypatch.setattr(netcfg, "PROC_CMDLINE", tmp_path / "does-not-exist")
+    path = tmp_path / "scoreboard-setup.txt"
+    path.write_text("ssid=HomeNet\npsk=supersecret\n")
+    seen = []
+
+    def record(timeout=None):
+        seen.append(timeout)
+        return "global\ncountry GB: DFS-ETSI\n"
+
+    monkeypatch.setattr(netcfg, "_run_iw_reg_get", record)
+    fake = FakeNmcli()
+    nm = NetworkManager(run=fake, run_raspi_config=NO_RASPI_CONFIG)
+    assert apply_boot_file(path, nm=nm, now=lambda: "NOW") is True
+    assert seen, "apply_boot_file never asked for the regulatory domain"
+    assert seen[0] is not None, "the iw call on the boot path was left unbounded"
+    assert seen[0] <= netcfg.RASPI_TIMEOUT_S, \
+        f"the iw call was granted {seen[0]}s, over the {netcfg.RASPI_TIMEOUT_S}s slot"
 
 
 def test_the_radio_is_switched_on_before_connecting(tmp_path, monkeypatch):
@@ -683,15 +853,49 @@ def test_waiting_for_the_radio_gives_up_rather_than_hanging_the_boot(monkeypatch
     assert nm.wait_for_wifi() is False
 
 
-def test_waiting_for_the_radio_does_not_wait_when_there_is_no_wifi_device(monkeypatch):
-    # An Ethernet-only panel, or one whose adapter is unplugged. There is
-    # nothing here that waiting can change, and waiting would only delay a
-    # connect that is going to fail with a message worth reading.
-    slept = []
-    monkeypatch.setattr(netcfg.time, "sleep", slept.append)
+def test_an_empty_device_list_is_waited_out_rather_than_given_up_on(monkeypatch, clock):
+    # The corrected case. This used to return False the instant nmcli listed
+    # no `wifi`-type row, commented "no Wi-Fi device at all; waiting cannot
+    # help". That is true of an Ethernet-only panel and false of the boot this
+    # method exists for: the unit is After=NetworkManager.service, which means
+    # NetworkManager has been STARTED, not that it has enumerated its devices,
+    # and until it has, wlan0 is absent from the list rather than listed as
+    # "unavailable". The two look identical from here, so the one that can be
+    # fixed by waiting decides the behavior for both.
     nm = NetworkManager(run=lambda args, timeout=None: "eth0:ethernet:connected\n")
-    assert nm.wait_for_wifi() is False
-    assert slept == [], "waited for a Wi-Fi device that does not exist"
+    started = clock()
+    assert nm.wait_for_wifi(clock=clock) is False
+    spent = clock() - started
+    assert spent > 0, "an empty device list was still given up on at once"
+    assert spent <= netcfg.WIFI_READY_S, \
+        f"waited {spent}s for a device to appear, past the {netcfg.WIFI_READY_S}s budget"
+
+
+def test_a_device_that_appears_late_is_still_found(monkeypatch, clock):
+    # And the reason the wait is worth paying: NetworkManager listing nothing
+    # on the first poll is a state the next poll can leave.
+    polls = {"n": 0}
+
+    def late(args, timeout=None):
+        polls["n"] += 1
+        clock.sleep(0.05)
+        if polls["n"] < 3:
+            return "eth0:ethernet:connected\n"
+        return "eth0:ethernet:connected\nwlan0:wifi:disconnected\n"
+
+    assert NetworkManager(run=late).wait_for_wifi(clock=clock) is True
+    assert polls["n"] >= 3, "the device was found without ever re-polling"
+
+
+def test_waiting_for_a_device_that_never_appears_still_respects_the_parent(clock):
+    # The Ethernet-only panel now pays WIFI_READY_S it used to skip. That has
+    # to stay inside the boot budget like everything else, or the correction
+    # above would have bought a race fix with a budget overrun.
+    budget = netcfg.Budget(4, clock=clock)
+    nm = NetworkManager(run=lambda args, timeout=None: "eth0:ethernet:connected\n")
+    started = clock()
+    assert nm.wait_for_wifi(budget=budget, clock=clock) is False
+    assert clock() - started <= 4, "the device wait stepped past its parent's deadline"
 
 
 def test_waiting_for_the_radio_survives_nmcli_failing(monkeypatch):
@@ -1221,7 +1425,11 @@ def test_connecting_gets_a_longer_timeout_than_a_query():
     manager.apply(WifiSettings(ssid="HomeNet", psk="supersecret"))
     manager.scan()
     assert seen["connect"] == netcfg.CONNECT_TIMEOUT_S
-    assert seen["-t"] is None  # scan leaves the runner's own default in place
+    # The scan names its cap rather than leaving it to the runner's default.
+    # It used to pass None, which read as "the default" and is not: None is
+    # what reaches subprocess.run, and subprocess.run(timeout=None) waits
+    # forever. Every call off the boot path now says its own number.
+    assert seen["-t"] == netcfg.QUERY_TIMEOUT_S
     assert netcfg.CONNECT_TIMEOUT_S > netcfg.QUERY_TIMEOUT_S
 
 
@@ -1321,12 +1529,15 @@ def test_a_slow_scan_query_does_not_throw_away_the_rest_of_the_budget(clock):
 
 
 def test_every_scan_query_is_capped_by_what_is_left_of_the_budget(clock):
+    # Named from the constant rather than typed in: the literal 12.0 here
+    # outlived SCAN_BUDGET_S being 12, and a test whose budget no longer
+    # matches the code's is testing something nobody asked for.
     air = Air(clock=clock, slow=True)
-    budget = netcfg.Budget(12.0, clock=clock)
+    budget = netcfg.Budget(netcfg.SCAN_BUDGET_S, clock=clock)
     NetworkManager(run=air).wait_for_ssid("ExampleNet", budget=budget, clock=clock)
     assert air.list_timeouts, "no list query was made"
-    assert sum(air.list_timeouts) <= 12.0 + netcfg.QUERY_TIMEOUT_S, \
-        f"the polls were granted {air.list_timeouts}s against a 12s budget"
+    assert sum(air.list_timeouts) <= netcfg.SCAN_BUDGET_S + netcfg.QUERY_TIMEOUT_S, \
+        f"the polls were granted {air.list_timeouts}s against a {netcfg.SCAN_BUDGET_S}s budget"
     assert all(t <= netcfg.QUERY_TIMEOUT_S for t in air.list_timeouts)
 
 
@@ -1380,11 +1591,26 @@ def test_the_whole_boot_path_is_bounded_when_every_call_runs_to_its_timeout(tmp_
         f"only {spent:.2f}s of the {netcfg.BOOT_BUDGET_S}s budget was reachable"
 
 
+# What site/index.html and site/download/index.html promise an owner watching
+# a dark panel: "up to two minutes". It used to be "up to a minute and a half",
+# which the absolute ceiling now exceeds by a second -- and which only ever
+# covered THIS service anyway, with scoreboard.service's own start, SDL init
+# and first paint still to come after it. site/tests/pages.test.js guards the
+# wording; this guards the number behind it.
+SITE_DARK_WINDOW_S = 120
+
+
 def test_the_enforced_budget_fits_the_unit_and_the_site(clock):
     # One number now, enforced by construction rather than added up from
     # intentions: BOOT_BUDGET_S covers raspi-config and every nmcli call.
-    assert netcfg.BOOT_BUDGET_S <= 90, \
-        f"a first boot can be dark for {netcfg.BOOT_BUDGET_S}s; the site promises 90"
+    #
+    # The comparison is against the ABSOLUTE ceiling, not the soft budget.
+    # What an owner experiences is the longest this unit can take, and
+    # joined()'s deliberate overrun is part of that.
+    assert netcfg.ABSOLUTE_CEILING_S <= SITE_DARK_WINDOW_S, \
+        (f"a first boot can be dark for {netcfg.ABSOLUTE_CEILING_S}s before this "
+         f"service even exits; the pages promise {SITE_DARK_WINDOW_S}")
+    assert netcfg.BOOT_BUDGET_S < netcfg.ABSOLUTE_CEILING_S
     # And the parts have to fit inside it, or a step is dead code.
     # Every call on the path, named -- the composition is checked in full by
     # test_the_budget_table_names_every_call_on_the_path.
@@ -1399,7 +1625,14 @@ def test_the_scan_budget_clears_a_hard_upper_bound_on_the_first_scan():
     # action delays "manager: startup complete". So startup complete cannot be
     # logged mid-scan, and the journals' 5.82 s and 5.81 s are a hard upper
     # bound on the first scan finishing, not merely the nearest marker.
-    assert netcfg.SCAN_BUDGET_S >= 2 * 5.82, \
+    #
+    # Back to 2.5x. It was relaxed to 2x in the same commit that cut
+    # SCAN_BUDGET_S from 15 to 12 -- the guard moved to fit the number instead
+    # of the number answering to the guard. Two journals are the only evidence
+    # there is for this figure, and losing the race with the first scan is the
+    # thing that actually failed on a Pi 4, twice; a margin chosen to balance
+    # an unrelated total is not a margin.
+    assert netcfg.SCAN_BUDGET_S >= 2.5 * 5.82, \
         f"SCAN_BUDGET_S={netcfg.SCAN_BUDGET_S}s leaves no room over a 5.82s bound"
 
 
@@ -1413,7 +1646,7 @@ def test_a_refused_rescan_means_the_device_is_not_ready_and_says_so(clock, caplo
     air = Air(visible=["ExampleNet"], clock=clock)
     air.rescan_error = SCAN_REFUSED
     with caplog.at_level(logging.INFO, logger="scoreboard.netcfg"):
-        assert NetworkManager(run=air).rescan(clock=clock) is False
+        assert NetworkManager(run=air).rescan() is False
     assert any(r.levelno == logging.INFO and "rescan refused" in r.getMessage()
                for r in caplog.records), "a refused rescan left nothing at INFO"
     assert "not ready" in caplog.text.lower()
@@ -1582,7 +1815,7 @@ def test_the_instant_calls_are_not_given_the_slow_default(clock):
     budget = netcfg.Budget(netcfg.BOOT_BUDGET_S, clock=clock)
     nm = NetworkManager(run=air)
     nm.radio_on(budget=budget)
-    nm.rescan(budget=budget, clock=clock)
+    nm.rescan(budget=budget)
     assert air.timeouts, "no calls were made"
     assert all(t <= netcfg.FAST_TIMEOUT_S for t in air.timeouts), air.timeouts
     assert netcfg.FAST_TIMEOUT_S < netcfg.QUERY_TIMEOUT_S
@@ -1603,8 +1836,13 @@ def test_the_first_connect_is_guaranteed_a_full_association_even_at_the_worst(cl
         f"the first connect was granted {air.connect_timeouts[0]}s, not a full association"
     # The figure this guarantees, stated rather than left to the reader: with
     # raspi-config, radio_on, the device wait and the scan wait all running to
-    # their caps, 82 - 37 is exactly 45.
+    # their caps, 85 - 40 is exactly 45.
     assert netcfg.CONNECT_TIMEOUT_S == 45
+    before_connect = (netcfg.RASPI_TIMEOUT_S + netcfg.FAST_TIMEOUT_S
+                      + netcfg.WIFI_READY_S + netcfg.SCAN_BUDGET_S)
+    assert netcfg.BOOT_BUDGET_S - before_connect == netcfg.CONNECT_TIMEOUT_S, \
+        (f"{before_connect}s before the connect leaves "
+         f"{netcfg.BOOT_BUDGET_S - before_connect}s, not a full association")
 
 
 def test_a_connect_too_short_to_succeed_is_not_attempted(clock):
@@ -1616,8 +1854,14 @@ def test_a_connect_too_short_to_succeed_is_not_attempted(clock):
     budget = netcfg.Budget(netcfg.MIN_CONNECT_S - 1, clock=clock)
     with pytest.raises(NetworkError):
         NetworkManager(run=air).join(HOME, budget=budget, clock=clock)
-    assert all(t >= netcfg.MIN_CONNECT_S for t in air.connect_timeouts), \
-        f"an attempt was made with {air.connect_timeouts}s, under the {netcfg.MIN_CONNECT_S}s floor"
+    # Assert the connect was NOT MADE. `all(t >= MIN_CONNECT_S for t in
+    # air.connect_timeouts)` was what stood here, and it is vacuously true --
+    # no connect is attempted, so the list is empty and all([]) is True. The
+    # test passed whether the floor worked or not.
+    assert air.connects == 0, \
+        f"{air.connects} connect(s) were attempted under the {netcfg.MIN_CONNECT_S}s floor"
+    assert air.connect_timeouts == [], \
+        f"an attempt was granted {air.connect_timeouts}s, under the floor"
 
 
 def test_the_floor_is_long_enough_to_associate_and_get_a_lease():
@@ -1848,6 +2092,10 @@ def test_the_absolute_ceiling_covers_the_one_check_allowed_past_the_deadline(clo
     # budget.expired() before another connect, so at most one such check
     # happens after the deadline.
     class AlwaysTimesOut(Air):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self.verify_timeouts = []
+
         def __call__(self, args, timeout=None):
             if "connect" in args:
                 self.connects += 1
@@ -1855,6 +2103,7 @@ def test_the_absolute_ceiling_covers_the_one_check_allowed_past_the_deadline(clo
                 self.clock.sleep(timeout)
                 raise NetworkError("Error: Timeout 43 sec expired.")
             if args[:4] == ["-t", "-f", "STATE", "general"]:
+                self.verify_timeouts.append(timeout)
                 self.clock.sleep(timeout if timeout is not None else 1)
                 return "disconnected\n"
             return super().__call__(args, timeout=timeout)
@@ -1865,8 +2114,18 @@ def test_the_absolute_ceiling_covers_the_one_check_allowed_past_the_deadline(clo
         NetworkManager(run=air).join(
             HOME, budget=netcfg.Budget(netcfg.BOOT_BUDGET_S, clock=clock), clock=clock)
     spent = clock() - started
-    ceiling = netcfg.BOOT_BUDGET_S + netcfg.VERIFY_OVERRUN_S
+    ceiling = netcfg.ABSOLUTE_CEILING_S
+    assert ceiling == netcfg.BOOT_BUDGET_S + netcfg.VERIFY_OVERRUN_S
     assert spent <= ceiling, f"ran {spent:.2f}s against an absolute ceiling of {ceiling}s"
-    assert ceiling <= 90, f"the absolute ceiling {ceiling}s breaks the site's promise"
-    assert all(t == netcfg.VERIFY_TIMEOUT_S
-               for t in air.timeouts if t == netcfg.VERIFY_TIMEOUT_S), "sanity"
+    # The overrun has to be REAL, or the line above is a ceiling nothing
+    # reaches and proves nothing about it.
+    assert spent > netcfg.BOOT_BUDGET_S, \
+        f"only {spent:.2f}s spent: the check past the deadline never happened"
+    # And the check that overran was granted VERIFY_TIMEOUT_S, which is what
+    # makes VERIFY_OVERRUN_S the right size. What stood here was
+    # `all(t == X for t in air.timeouts if t == X)` -- a tautology: it filters
+    # to the values equal to X and then asserts they equal X. It could not
+    # fail, not even against an empty list.
+    assert air.verify_timeouts, "joined() never asked NetworkManager anything"
+    assert all(t == netcfg.VERIFY_TIMEOUT_S for t in air.verify_timeouts), \
+        f"a verification query was granted {air.verify_timeouts}, not {netcfg.VERIFY_TIMEOUT_S}s"
