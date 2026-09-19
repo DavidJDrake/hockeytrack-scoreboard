@@ -50,10 +50,12 @@ HockeyTrack bus ──rule──▶ scoreboard reducer (Lambda) ──publish─
 | Power | 5 V / 3 A supply (or two 5 V/2 A) | Zero 2 W ≈ 0.5 A, the monitor ≈ 1 A at full brightness |
 | Buttons | Two momentary buttons on GPIO (optional) | Game select and brightness; the v2 web selector makes them optional |
 
-Bar panels like these report themselves over HDMI as **480×1920 portrait**,
-not landscape. Under KMS neither the firmware's `display_rotate` nor SDL will
-turn the picture, so the device software does: it always draws a 1920×480
-frame, then turns and scales it to whatever the display reports. The same
+Bar panels like these report themselves over HDMI as **portrait** — taller
+than they are wide — not landscape. The exact size varies, and is not assumed
+anywhere: the first panel this ran on came up as 400×1280 rather than the
+480×1920 on the box. Under KMS neither the firmware's `display_rotate` nor
+SDL will turn the picture, so the device software does: it always draws a
+1920×480 frame, then turns and scales it to whatever the display reports. The same
 code letterboxes it on an ordinary TV, which is how the device can be
 bench-tested before the panel exists.
 

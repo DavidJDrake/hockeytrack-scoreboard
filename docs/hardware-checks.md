@@ -7,19 +7,20 @@ Spec: `docs/superpowers/specs/2026-09-12-device-image-design.md`
 
 | ID | Check | Pass criterion | Result |
 |---|---|---|---|
-| H1 | systemd hardening against kmsdrm | The panel renders with the hardened unit | still unanswered, 2026-09-18 — v0.1.1 never reached the point where hardening could matter |
+| H1 | systemd hardening against kmsdrm | The panel renders with the hardened unit | **PASS on a Pi 4, 2026-09-19 (v0.1.2)** — the hardened unit opened the display and drew for 15 minutes. One finding: it silently disabled the GPIO buttons |
 | H2 | polkit grant | The `scoreboard` account applies a connection | not yet run |
 | H3 | Real `nmcli` scan and apply | Networks list; joining one succeeds | not yet run |
-| H4 | Imager customisation on a custom image | The dialog is offered and the settings take effect | not yet run |
-| H5 | Image boots | Both boards boot and the panel lights up | failed on v0.1.0 and v0.1.1, 2026-09-18 — wizard, then missing EGL libraries; both fixed for the next build |
-| H6 | CMA on the Zero 2 W | 480×1920 renders without CMA exhaustion | not yet run |
+| H4 | Imager customisation on a custom image | The dialog is offered and the settings take effect | observed 2026-09-18 — no dialog offered, nothing written to the boot partition |
+| H5 | Image boots | Both boards boot and the panel lights up | **PASS on a Pi 4, 2026-09-19 (v0.1.2)** — boots unattended and the panel lights up. Failed on v0.1.0 and v0.1.1. The Zero 2 W is still unrun |
+| H6 | CMA on the Zero 2 W | A bar panel renders without CMA exhaustion | not yet run |
 | H7 | Keyboard under kmsdrm | A USB keyboard drives the settings screen | not yet run |
 | H8 | A panel enrolls itself | Pairing, claim and restart all work end to end against real AWS | not yet run |
 
 H4, H5 and H6 need an image, so they belong to B2. H1, H2, H3 and H7 can be run
 as soon as this plan is installed on a Pi. H8 needs the enrollment path this
 plan builds, plus two invited Google accounts: the owner's, and a second one
-for step 4.
+for step 4. **H8 is still open**, and cannot be attempted until a panel joins
+a network — which is defect 2 under H5.
 
 ## Reading a failed panel
 
@@ -58,6 +59,101 @@ Take both parameters back out once the panel works. They are a diagnosis tool,
 not a setting: the console output would otherwise fight the panel for tty1
 every time anything logs.
 
+`max_level_console` is **`info`, not `notice`.** An earlier draft here said
+`notice`, and it hid the one line that mattered: a service's stdout and stderr
+go to the journal at `info` by default, so the program's own
+`INFO:scoreboard:...` lines — including the one naming the driver, the display
+size and the rotation — are dropped at `notice`.
+
+### Trying an environment variable without rebuilding
+
+Added 2026-09-19. This is what turned the black-screen defect below from a
+guess into an experiment, and it costs one reboot rather than a 35-minute
+build.
+
+`cmdline.txt` on the boot partition can set an environment variable for every
+service systemd starts. Append to the same single line:
+
+    systemd.setenv=SDL_FRAMEBUFFER_ACCELERATION=opengles2 systemd.setenv=SDL_RENDER_DRIVER=opengles2
+
+systemd puts these in its own environment and so in every unit's, which is
+blunt — it reaches units that have nothing to do with the question — but for
+a one-variable experiment on an appliance that runs one program it is exactly
+right. Two boots of one image, differing only in that line, is what proved the
+render-driver fix before it was committed. Put the variable in the unit once
+it is settled; the kernel command line is for finding out, not for keeping.
+
+### Reading the card when `wsl --mount` refuses the reader
+
+Added 2026-09-19, and this is what actually worked for v0.1.2. `wsl --mount`
+would not attach the USB SD reader (above), so the card was read by copying
+the front of it to a file from Windows and then working on that file with
+unprivileged Linux tools. No partition is mounted at any point, so nothing can
+write to the card.
+
+**1. Copy the first 5 GB, read-only, from an elevated PowerShell.** The
+version below refuses to read a disk that is not USB or is larger than the
+card — the whole risk in this step is naming the wrong `PHYSICALDRIVE` and
+reading (or worse, later writing) the machine's own disk:
+
+```powershell
+$n = 2                      # the disk number from `Get-Disk`
+$out = "$HOME\panel.img"
+$max = 5GB
+
+$disk = Get-Disk -Number $n
+if ($disk.BusType -ne 'USB')   { throw "disk $n is $($disk.BusType), not USB — refusing" }
+if ($disk.Size -gt 128GB)      { throw "disk $n is $($disk.Size) bytes — too big to be the card" }
+if ($max -gt $disk.Size)       { $max = $disk.Size }
+
+$src = New-Object IO.FileStream "\\.\PHYSICALDRIVE$n", 'Open', 'Read', 'ReadWrite'
+$dst = New-Object IO.FileStream $out, 'Create', 'Write'
+try {
+    $buf  = New-Object byte[] (4MB)
+    $done = 0L
+    while ($done -lt $max) {
+        $got = $src.Read($buf, 0, [Math]::Min($buf.Length, $max - $done))
+        if ($got -le 0) { break }
+        $dst.Write($buf, 0, $got)
+        $done += $got
+        Write-Progress -Activity 'Copying card' -PercentComplete (100 * $done / $max)
+    }
+} finally { $dst.Dispose(); $src.Dispose() }
+```
+
+`'Read'` is the access mode and `'ReadWrite'` is the *share* mode — the second
+is what lets the copy run while Windows still has the disk open, and neither
+opens the device for writing.
+
+**2. Find the root partition's byte offset**, with no privileges at all:
+
+    sfdisk -d panel.img
+
+The `start=` field is in 512-byte sectors, so the offset is `start * 512`. For
+a stock image the second partition began at sector 1050624, i.e. 537919488.
+
+**3. Pull the journal out of the ext4 image**, again unprivileged — `debugfs`
+reads the filesystem itself, so there is no loop device and no mount:
+
+    debugfs -c -R "rdump /var/log/journal ./panel-journal" "panel.img?offset=537919488"
+
+**4. Read it:**
+
+    journalctl -D ./panel-journal/journal --list-boots
+    journalctl -D ./panel-journal/journal -b -1 -o short-monotonic
+
+`-o short-monotonic` is worth the extra characters: seconds since boot are
+what let two boots be compared, and every timing claim in the defects below
+came from it.
+
+**Why 5 GB was enough — an observation, not a guarantee.** The card is 64 GB
+and the root partition had been resized to fill it, so the copy covered less
+than a tenth of the filesystem. It worked because ext4 lays out `/var/log/`
+early, in the low block groups, and a journal capped at 50 MB on a nearly
+empty appliance image never grows past them. Nothing enforces that. If
+`debugfs` reports missing blocks, copy more; the step is restartable and the
+only cost is time.
+
 ## H1 — systemd hardening against kmsdrm
 
     sudo systemctl restart scoreboard && journalctl -u scoreboard -f
@@ -78,14 +174,92 @@ the symptom that justified it** — a hardened unit that does not render is wort
 less than a plain one that does, but an undocumented removal is worth least of
 all.
 
-**2026-09-18 — still unanswered, and v0.1.1 did not answer it.** The image ran
-the hardened unit on a real Pi 4 and the service failed — but not at anything
-the hardening does. It died inside `pygame.display.set_mode` because the EGL,
-GLES and DRI libraries were not in the image at all (H5 below). The program
-never reached the point where `ProtectSystem=strict`, `DeviceAllow`,
-`ProtectHome` or the group memberships could have mattered, so nothing here is
-confirmed and nothing here is cleared. Re-run this check in full on the next
-image.
+**2026-09-19 — PASS on a Pi 4, v0.1.2.** The hardened unit opened the display
+and kept it. `scoreboard.service` started **once** and ran for fifteen minutes
+without restarting, with `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`,
+`NoNewPrivileges`, `ProtectKernelTunables`, `ProtectControlGroups`,
+`RestrictSUIDSGID` and the `DeviceAllow` list all in place, and nothing
+removed. Its own line:
+
+    INFO:scoreboard:pygame 2.6.1, SDL 2.32.4, KMSDRM driver, display 400x1280;
+    frame turned 90° and drawn at 320x1280
+
+The kernel's graphics messages showed no errors either — `[drm] Initialized
+v3d 1.0.0 for fec00000.v3d on minor 0` and `[drm] Initialized vc4 0.0.0 for
+gpu on minor 1`, both clean. So `char-drm rw` plus the `video` and `render`
+memberships are enough for `/dev/dri/card*`, and the cursor-plane work behind
+`pygame.mouse.set_visible(False)` is happy under kmsdrm. Those were the two
+open questions and both are now answered.
+
+**Note the size: 400×1280, not the 480×1920 these documents were written
+against.** Nothing in the code assumes a size — `placement()` scales to
+whatever is reported — but several sentences did, and they have been softened
+rather than re-asserted with a new number.
+
+What this check does *not* clear: the panel was black for those fifteen
+minutes anyway, for a reason that has nothing to do with hardening (defect 1
+under H5 below). "The hardened unit opens the display" is what passed here.
+
+**Finding, 2026-09-19: the hardened unit silently disabled the GPIO buttons.**
+Four warnings on every start, in a journal that is now the panel's only
+diagnosis surface:
+
+    xCreatePipe: Can't set permissions (436) for /opt/scoreboard/.lgd-nfy0,
+        No such file or directory
+    PinFactoryFallback: Falling back from lgpio: [Errno 2] No such file or
+        directory: '.lgd-nfy-3'
+    PinFactoryFallback: Falling back from rpigpio: ... '.lgd-nfy-3'
+    PinFactoryFallback: Falling back from pigpio: No module named 'pigpio'
+    PinFactoryFallback: Falling back from native: unable to open /dev/gpiomem
+        or /dev/mem; upgrade your kernel or run as root
+
+This panel has no buttons fitted, so nothing visible broke — but every panel
+that does have them would have had them quietly switched off. Two causes,
+both established from source:
+
+- **lgpio had nowhere to put its notification FIFO.** It builds the path as
+  `"%s/.lgd-nfy%d"` from `lguGetWorkDir()` (`lgNotify.c:131`), and that
+  returns `getenv("LG_WD")` or falls back to `getcwd()` (`lgUtil.c:181`;
+  the name is defined in `lgpio.h:39`). `getcwd()` here is
+  `WorkingDirectory=/opt/scoreboard`, which `ProtectSystem=strict` makes
+  read-only. The `436` in the message is `0664` in decimal — the exact mode
+  `xCreatePipe` asks for — which is what identifies the call.
+- **And it could not have opened the chip either.** lgpio opens
+  `/dev/gpiochip%d` (`lgGpio.c:724`) and gpiozero's factory picks chip 0 on a
+  Pi 4 (`gpiozero/pins/lgpio.py:67`). The unit's `DeviceAllow` named
+  `char-drm`, `char-input` and `/dev/tty1` and nothing else. The kernel
+  registers that char-device class as `"gpiochip"`
+  (`drivers/gpio/gpiolib.h:23`), which is the name systemd matches against
+  `/proc/devices`, so `char-gpiochip` is the class. (`/dev/gpiomem` in the
+  last message is gpiozero's *native* factory, the end of the chain, not the
+  one that matters.)
+
+Fixed in the unit: `Environment=LG_WD=/var/lib/scoreboard` (already the one
+`ReadWritePaths` entry, and a test asserts `LG_WD` stays inside one) and
+`DeviceAllow=char-gpiochip rw`. Safe even if that class ever resolves to
+nothing — systemd logs "Device allow list pattern … did not match anything"
+at debug and carries on (`src/core/bpf-devices.c`), unlike
+`SupplementaryGroups=`, which fails a unit outright. The group half was
+already right: `raspberrypi-sys-mods`' `99-com.rules` has
+`SUBSYSTEM=="gpio", GROUP="gpio", MODE="0660"`, and `install_appliance` adds
+the account to `gpio` when it exists.
+
+**Unproven, and only the next boot can settle it.** This panel has no buttons,
+so the next boot can show the four warnings are gone — which is the whole
+observable — but cannot show a button press arriving. Treat "no
+`PinFactoryFallback` lines" as the pass for this fix and leave the buttons
+themselves unchecked until a panel has some.
+
+**On quieting those warnings honestly.** They are not noise to suppress: they
+*are* the symptom. gpiozero tries its factories in order and warns once per
+failure, so if lgpio now succeeds it stops at the first and all four
+disappear by themselves. If they do not, the honest way to get one line
+instead of four is `GPIOZERO_PIN_FACTORY=lgpio`, which makes gpiozero try
+that factory alone and raise `BadPinFactory` rather than warn and fall
+through — `buttons.attach()` already catches it and returns `False`. What
+would *not* be honest is a warnings filter: it would hide the difference
+between "the buttons work" and "the buttons are off", which is the only thing
+this journal has to say about them.
 
 What was reasoned about while fixing H5, so the next run has somewhere to
 start. None of it is a hardware result, and each is worth a minute of
@@ -122,11 +296,16 @@ start. None of it is a hardware result, and each is worth a minute of
   shim for the X server. It was kept for one release because being wrong cost
   a 35-minute build and a reflash. Once this check renders a panel, remove the
   package, rebuild, and confirm the panel still renders; then delete this
-  bullet and the note in spec §9.2.
-- The remaining uncertainty is where it always was: `DeviceAllow=char-drm rw`
-  plus the `video` and `render` memberships against `/dev/dri/card*` and
-  `/dev/dri/renderD128`, and whether the cursor-plane work behind
-  `pygame.mouse.set_visible(False)` is happy under kmsdrm.
+  bullet and the note in spec §9.2. **Still open after 2026-09-19:** the panel
+  did render, with the package installed, so the precondition is met and the
+  experiment has not been run. Do it on the next build that is not carrying a
+  fix — one variable at a time is the whole reason the render-driver defect
+  below was settled in two boots.
+- ~~The remaining uncertainty is `DeviceAllow=char-drm rw` plus the `video`
+  and `render` memberships, and whether `pygame.mouse.set_visible(False)` is
+  happy under kmsdrm.~~ **Answered 2026-09-19:** both fine. The panel opened
+  the display under the hardened unit and held it for fifteen minutes with
+  every directive in place.
 
 ## H2 — polkit grant
 
@@ -207,6 +386,182 @@ Flash and boot on a Pi 4 and a Zero 2 W. Pass: both reach the "Not registered"
 screen. Note the time to first pixel on the Zero — it is the number that decides
 whether anything needs optimising.
 
+**2026-09-19 — PASS on a Pi 4, v0.1.2.** The image booted unattended, with no
+keyboard and nothing on screen asking for anything, and `scoreboard.service`
+started once and ran. The Zero 2 W has still not been run, so this is half of
+H5, not all of it.
+
+Three defects came out of that boot. None of them stopped it; all three are
+fixed on branch `first-light`, and each is written up below because the
+evidence is worth more than the fix.
+
+### Defect 1 — a black screen with the program drawing onto it
+
+The first boot showed solid black for fifteen minutes while the draw loop ran
+and the journal filled up normally. The second boot of the **same image**
+changed exactly two things — two environment variables on the kernel command
+line (see "Trying an environment variable without rebuilding" above) — and the
+panel showed its "no network" screen:
+
+    systemd.setenv=SDL_FRAMEBUFFER_ACCELERATION=opengles2 systemd.setenv=SDL_RENDER_DRIVER=opengles2
+
+So the fix is known to work on this hardware. The explanation, from SDL
+2.32.4's own source:
+
+- pygame's non-OpenGL `set_mode` ends in `SDL_GetWindowSurface`, which calls
+  `SDL_CreateWindowFramebuffer` (`src/video/SDL_video.c:2708`). On kmsdrm
+  `ShouldAttemptTextureFramebuffer()` returns true — the driver is not the
+  dummy one, and none of the x11, windows or emscripten special cases apply —
+  so the window surface is *emulated with a 2D renderer* by
+  `SDL_CreateWindowTexture` (`SDL_video.c:230`).
+- With neither `SDL_FRAMEBUFFER_ACCELERATION` nor `SDL_RENDER_DRIVER` set,
+  that function walks `render_drivers[]` in registration order
+  (`src/render/SDL_render.c:100`) and takes the first accelerated
+  non-`"software"` one. `GL_RenderDriver` (`"opengl"`) is listed before
+  `GLES2_RenderDriver` (`"opengles2"`), so `"opengl"` is always tried first.
+- The image ships no `libGL.so.1`, deliberately.
+  `SDL_EGL_LoadLibraryInternal` loads `DEFAULT_OGL` = `libGL.so.1` whenever
+  the profile is not ES (`src/video/SDL_egl.c:370`) and otherwise returns
+  "Could not initialize OpenGL / GLES library"; `KMSDRM_CreateWindow` catches
+  that and retries as GLES 2.0 (`src/video/kmsdrm/SDL_kmsdrmvideo.c:1552`),
+  which succeeds and leaves `gl_config.profile_mask` at
+  `SDL_GL_CONTEXT_PROFILE_ES`. **That retry is why leaving `libgl1` out was
+  safe for window creation, and it is exactly as far as it goes.**
+- `GL_CreateRenderer` tests that profile mask (`src/render/SDL_render_gl.c:
+  1717`), finds ES where it wants desktop GL, and calls `SDL_RecreateWindow`.
+  On kmsdrm that destroys the window: `KMSDRM_DestroySurfaces` points the CRTC
+  back at the original TTY buffer, and `KMSDRM_GBMDeinit` destroys the GBM
+  device and drops DRM master. The renderer fails anyway and its error path
+  calls `SDL_RecreateWindow` a second time (`SDL_render_gl.c:1943`). Only then
+  does the loop reach `"opengles2"`, which works.
+
+**Which part is inference.** That the failed `"opengl"` attempt is what left
+the scanout black is inference. What the source *establishes* is that the
+attempt is unavoidable when nothing names a renderer, that it must fail on
+this image, and that it tears the kmsdrm window down and back up twice. The
+source also shows the first swap afterwards calling `drmModeSetCrtc` again
+(`src/video/kmsdrm/SDL_kmsdrmopengles.c:151`), so *why* the picture does not
+come back on this hardware is not settled by reading it. What is settled is
+the experiment: two boots, one variable pair, black and not black.
+
+**Fixed** by setting both variables in `device/scoreboard-appliance.service`
+and in `device/scoreboard.service`. Either alone would satisfy
+`SDL_CreateWindowTexture`, which reads the first and falls back to the second;
+both are set because both together are what the boot proved, and checking
+whether one would do costs a build and a reflash and buys nothing. The
+checkout template carries them too because H1, H3 and H7 are run through it
+against the same SDL on the same hardware. `libgl1` is still **not**
+installed — the hint is the proven fix, and spec §9.2's rationale for leaving
+the package out has been corrected rather than reversed.
+
+### Defect 2 — Wi-Fi never joined: the connect raced the scan
+
+Both boots, identically:
+
+    [14.083] Starting scoreboard-netcfg.service …
+    [14.815] ERROR:scoreboard.netcfg:could not apply
+             /boot/firmware/scoreboard-setup.txt:
+             Error: No network with SSID 'ExampleNet' found.
+
+(SSID replaced. The real one is in the journals and in no file here.)
+
+On the first boot `netcfg` set the country and switched the radio on —
+NetworkManager logged `rfkill: Wi-Fi now enabled by radio killswitch` at
+14.584 — and `wlan0` went `unavailable -> disconnected (reason
+'supplicant-available')` at 14.736. The connect failed **79 ms later**. On the
+second boot the radio was on from the start (`cfg80211.ieee80211_regdom=US`
+was in the command line by then) and it still failed 679 ms after the service
+began.
+
+`wait_for_wifi()` had done its job both times: it waits for the *device* to
+leave `unavailable`, which had happened. It does not wait for the *network* to
+have been seen, and `nmcli device wifi connect <ssid>` checks its own AP list
+and fails immediately when the SSID is not in it — before any activation
+(`src/nmcli/devices.c:3927` at 1.52.1). Nothing retried.
+
+**The budget, from the journals.** NetworkManager logs no scan at info level,
+so the only marker available is `manager: startup complete`, which came
+**5.82 s** and **5.81 s** after `wlan0` reached `disconnected` on the two
+boots. Reading that as "the first scan's results had landed by then" is
+inference, so the new wait is set clear of it rather than beside it:
+
+| step | budget |
+|---|---|
+| `raspi-config` setting the regulatory domain | 10 s |
+| waiting for the Wi-Fi device (6 × 2 s, was 10 × 2 s) | 12 s |
+| waiting for the network to appear in a scan (new) | 20 s |
+| every connect attempt, together | 45 s |
+| **worst case** | **87 s** |
+
+That replaces the old 75 s, and still fits `TimeoutStartSec=120` and the "up
+to a minute and a half" both site pages promise. The device wait shrank
+because the same journals show that step taking 152 ms and 266 ms — eighty
+times less than its old budget — and those eight seconds were better spent on
+the step that was actually short. `device/tests/test_netcfg.py` asserts the
+arithmetic, so a changed constant fails a test rather than a panel.
+
+**Fixed** in `device/scoreboard/netcfg.py`: `join()` rescans, waits for the
+SSID, connects, and on "No network with SSID" rescans and retries — but never
+on a secrets failure, which NetworkManager reports differently ("Error:
+Connection activation failed: Secrets were required, but not provided.", and
+the `802.1X supplicant …` family, from `src/libnmc-base/nm-client-utils.c`).
+Retrying a wrong password joins nothing and costs another 45 s of dark panel.
+A refused rescan is not fatal: NetworkManager answers `NOT_ALLOWED` while a
+scan is running or was recent, which means results are already coming.
+
+**Hidden networks** are not waited for at all — a hidden SSID never appears in
+`device wifi list`, so the wait could only ever expire — but they are still
+connected to, with nmcli's own `hidden yes`, which asks NetworkManager for a
+directed probe of that exact name (`src/nmcli/devices.c:3878`) and then
+reports what it found. The same applies to a network that simply never turns
+up: the wait is a courtesy, not a gate, and nmcli's own message says more than
+"we gave up waiting" would.
+
+### Defect 3 — the picture was upside down, and there was no way to say so
+
+This bar panel is mounted the other way round from what `display.placement()`
+assumes: it turns a portrait display's frame 90° when `rotate` is `None`, and
+this one needs 270. So the picture was upside down — and so was the pairing
+code, which is the one screen an owner has to be able to read.
+
+`rotate` existed, and had no writer. It reaches the program only through
+`device.json`, which `identity.write_identity()` writes with a thing name and
+an endpoint and nothing else; `cloud/cmd/enroll/handler.go` has no rotation
+concept, and no MQTT config message carries one (`parse_config` reads
+`gameId` alone). **So as of v0.1.2 an owner could not set the rotation of a
+claimed panel by any means the product offers**, and before enrollment there
+was no `device.json` at all.
+
+**Fixed** with an optional `rotate=` line in `scoreboard-setup.txt`, read by
+the main program before the display is placed, the same non-consuming way
+`owner_hint` reads `owner=`. It takes exactly what `config.parse_rotate`
+takes; an unusable value is logged and ignored rather than fatal, because
+this is the only one of the three sources a person edits blind and turning
+"the picture is upside down" into "the panel does not start" would be worse
+than the bug. `netcfg.consume()` carries the line through when it rewrites
+the file — there is nowhere else on the card to keep it. Precedence, stated
+in `main.chosen_rotation` and tested: `SCOREBOARD_ROTATE`, then `device.json`,
+then the card, then the display's shape.
+
+The site's setup file now ships the line commented out, with wording somebody
+can act on without knowing what "uncomment" means. The image gate is
+unaffected — its boot-partition rule is `[ ! -e ]` on the filename.
+
+**Still open for the cloud:** giving `device.json` a rotation writer, so a
+claimed panel can be turned from the admin site rather than by pulling its
+card. Not in this branch.
+
+### What only the next boot can settle
+
+- Whether the panel paints with the variables in the **unit** rather than on
+  the kernel command line. The mechanism is the same, but it has been proven
+  only the second way.
+- Whether the Wi-Fi actually joins. The scan race is the failure that was
+  *observed*; a wrong password or a 5 GHz-only network would look different.
+- Whether `rotate=270` turns the picture the right way up, as against 90.
+- Whether the four `PinFactoryFallback` warnings are gone.
+- The Zero 2 W, which has not been booted at all.
+
 **2026-09-18 — failed on v0.1.0.** The image was flashed and booted on a real
 Pi and never reached the "Not registered" screen. The console showed Raspberry
 Pi OS's first-boot user-creation wizard instead: `userconf-pi`'s
@@ -240,7 +595,7 @@ the useful invocation. An on-screen failure painter is a follow-up, recorded in
 spec §9.12.
 
 **2026-09-18 — failed on v0.1.1, further along.** The wizard is gone: the
-image booted unattended on a Pi 4 with a 480×1920 bar panel on HDMI, with
+image booted unattended on a Pi 4 with a bar panel on HDMI, with
 nothing on screen asking for anything. It still never reached the "Not
 registered" screen. `scoreboard.service` crash-looped with `status=1`, and the
 program's own lines were:
@@ -311,7 +666,8 @@ take effect; on a panel that does boot, check
 
     dmesg | grep -i cma
 
-Pass: the panel renders at 480×1920 with no CMA allocation failures. Fail: add
+Pass: the panel renders at whatever portrait mode it reports — 400×1280 on
+the one measured so far — with no CMA allocation failures. Fail: add
 `dtoverlay=vc4-kms-v3d,cma-128` under a `[pi02]` or `[all]` filter in
 `config.txt` and re-check.
 
