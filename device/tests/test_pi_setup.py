@@ -3,6 +3,7 @@ real script and unit template are exercised without touching this machine.
 Only --print-unit and --preflight are run here; both are read-only."""
 import os
 import pwd
+import re
 import shlex
 import shutil
 import subprocess
@@ -81,16 +82,56 @@ def test_preflight_refuses_a_checkout_with_no_device_config(checkout):
 NETCFG_UNIT = REPO / "device" / "scoreboard-netcfg.service"
 
 
+# systemd time spans are a sequence of value+unit pairs, and a bare number is
+# seconds. Only the units that could sensibly appear here are handled -- if
+# somebody writes "1h" this raises rather than silently mis-measuring, which
+# is the failure mode the round-1 review caught in the old `int(...rstrip("s"))`.
+SPAN_UNITS = {"": 1, "s": 1, "sec": 1, "secs": 1, "second": 1, "seconds": 1,
+              "m": 60, "min": 60, "mins": 60, "minute": 60, "minutes": 60}
+
+
+def systemd_seconds(span: str) -> float:
+    total, number = 0.0, ""
+    for part in re.findall(r"\d+(?:\.\d+)?|[A-Za-z]+", span.strip()):
+        if part[0].isdigit():
+            if number:
+                total += float(number)  # a bare number already seen: seconds
+            number = part
+        else:
+            assert part in SPAN_UNITS, f"unhandled systemd time unit {part!r} in {span!r}"
+            total += float(number or 0) * SPAN_UNITS[part]
+            number = ""
+    return total + float(number or 0)
+
+
+def test_systemd_seconds_reads_the_spans_this_file_accepts():
+    # The helper above is the thing being trusted by the next test, so it is
+    # checked rather than assumed.
+    assert systemd_seconds("120") == 120
+    assert systemd_seconds("120s") == 120
+    assert systemd_seconds("2min") == 120
+    assert systemd_seconds("1min 30s") == 90
+    with pytest.raises(AssertionError):
+        systemd_seconds("1h")
+
+
 def test_the_network_unit_states_its_own_start_budget():
     # It is Before=scoreboard.service, so everything it does is time the panel
-    # spends showing nothing. Its worst case is now raspi-config (10 s), the
-    # settle wait for the radio (20 s) and one connect (45 s) -- 75 s, close
-    # enough to systemd's 90 s default that inheriting it silently would mean
-    # the first slow connect gets killed part-way through and the setup file
-    # is left looking as though it had been ignored.
+    # spends showing nothing. Its worst case is raspi-config (10 s), the settle
+    # wait for the radio (20 s) and one connect (45 s) = 75 s -- close enough
+    # to systemd's 90 s default that inheriting it silently would mean the
+    # first slow connect gets killed part-way through, leaving the setup file
+    # looking as though it had been ignored.
+    #
+    # The bound is the reasoning, not a round number: it must exceed the 75 s
+    # worst case with room to spare, and stay small enough that a panel which
+    # cannot connect still reaches the screen in reasonable time.
     fields = unit(NETCFG_UNIT.read_text())
     assert "TimeoutStartSec" in fields, "the unit inherits DefaultTimeoutStartSec without saying so"
-    assert int(fields["TimeoutStartSec"].rstrip("s")) >= 90
+    budget = systemd_seconds(fields["TimeoutStartSec"])
+    worst_case = 10 + 20 + 45
+    assert budget > worst_case, f"TimeoutStartSec={budget}s cannot cover the {worst_case}s worst case"
+    assert budget <= 300, f"TimeoutStartSec={budget}s leaves the panel dark too long when Wi-Fi fails"
 
 
 def test_appliance_unit_runs_as_its_own_account(checkout):

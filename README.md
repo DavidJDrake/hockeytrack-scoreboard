@@ -123,12 +123,23 @@ on the card's boot partition (the one Windows and macOS can see):
 
     ssid=YourNetworkName
     psk=YourWiFiPassword
+    country=US
     owner=you@example.com
 
 The panel reads it on every boot, connects, and then removes the password from
 the file — it is the one partition any computer mounts automatically. The owner
 line stays, and is what makes the pairing code claimable by you and nobody
 else. Leave it out and any invited user can claim the panel.
+
+`country` is the two-letter code for where the panel is used — `US`, `CA`,
+`GB`. It is not optional on a panel that has never been set up: the image
+ships with the Wi-Fi radio switched off until it knows its regulatory domain,
+so without this line nothing can connect and the panel refuses the file,
+saying so in `journalctl -u scoreboard-netcfg`. A panel that already has a
+domain set keeps working without it. Downloading the setup file from the site
+while signed in fills in the owner line, and prefills this one from your
+browser's locale — check it, since that is the language you read in rather
+than necessarily where the panel will live.
 
 The first line the service logs (`journalctl -u scoreboard -f`) names the
 video driver, the display size and the rotation it chose. If the picture is

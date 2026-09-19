@@ -10,6 +10,7 @@ a first-run convenience.
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 import sys
 import time
@@ -29,6 +30,20 @@ MIN_PSK_CHARS, MAX_PSK_CHARS = 8, 63
 # owner_hint() puts this straight into the enrollment POST body, and nothing
 # upstream of it caps the length of a line on a FAT partition anyone can edit.
 MAX_OWNER_BYTES = 256
+
+# The kernel command line, where raspi-config leaves cfg80211.ieee80211_regdom=
+# so a regulatory domain survives a reboot. A module-level name so tests can
+# point it somewhere harmless.
+PROC_CMDLINE = Path("/proc/cmdline")
+
+# What a panel with no regulatory domain is told when its setup file has no
+# country line. This is the entire diagnosis for whoever is holding the card:
+# it reaches the journal and nothing else, so it has to stand on its own.
+MISSING_COUNTRY = (
+    "there is no country= line, and this panel's Wi-Fi radio stays switched "
+    "off until it knows which country it is in. Add a line such as country=US "
+    "(a two-letter code: US, CA, GB) and restart the panel"
+)
 
 
 @dataclass(frozen=True)
@@ -138,28 +153,15 @@ def parse_wifi_file(text: str) -> WifiSettings | None:
             "for an open network."
         )
 
+    # Whether a MISSING country is fatal is not a question about this text: it
+    # depends on whether the panel already has a regulatory domain, which only
+    # apply_boot_file can know. This function stays pure and validates the
+    # shape of what is here; see MISSING_COUNTRY for the other half.
     country = values.get("country") or None
-    if country is None:
-        # Not optional, and not a nicety. The image ships with the Wi-Fi radio
-        # switched OFF: raspberrypi-sys-mods sets rfkill.default_state=0, and
-        # pi-gen's stage2/02-net-tweaks/01-run.sh writes
-        # /var/lib/NetworkManager/NetworkManager.state with
-        # WirelessEnabled=false whenever WPA_COUNTRY is unset -- which it is
-        # for this image and must stay so, because an image downloaded by
-        # strangers cannot know which country any of them is in. Setting the
-        # regulatory domain is what turns the radio on, so without this line
-        # the connect below cannot succeed. Say so here, where the message can
-        # explain itself, rather than let nmcli fail with something nobody
-        # could trace back to a missing line in a text file.
-        raise ValueError(
-            "there is no country= line, and the panel's Wi-Fi radio stays "
-            "switched off until it knows which country it is in. Add a line "
-            "such as country=US (a two-letter code: US, CA, GB) and restart "
-            "the panel"
-        )
-    country = country.upper()
-    if len(country) != 2 or not country.isalpha():
-        raise ValueError(f"country must be a two-letter code such as US, got {country!r}")
+    if country is not None:
+        country = country.upper()
+        if len(country) != 2 or not country.isalpha():
+            raise ValueError(f"country must be a two-letter code such as US, got {country!r}")
 
     return WifiSettings(
         ssid=ssid, psk=psk, country=country,
@@ -167,7 +169,8 @@ def parse_wifi_file(text: str) -> WifiSettings | None:
     )
 
 
-def consume(path: Path, when: str, owner: str | None = None) -> None:
+def consume(path: Path, when: str, owner: str | None = None,
+            country: str | None = None) -> None:
     """Replace the file with a note saying it was applied.
 
     The password is now in NetworkManager's own store, root-owned on the
@@ -179,6 +182,19 @@ def consume(path: Path, when: str, owner: str | None = None) -> None:
     password is -- it is the address of the person holding the card -- and
     the panel may not enroll until a later boot, or may be factory reset,
     at which point this file is the only record of who it belongs to.
+
+    The country line is kept for a different reason: this note is the panel's
+    own instructions for changing networks later, and it used to tell the
+    owner to write back an ssid and a psk and nothing else. An owner who
+    followed it to the letter produced a file with no country line, which a
+    panel with no regulatory domain refuses -- so the panel's own advice could
+    take it offline. Carrying the country that was just applied makes the note
+    self-sufficient.
+
+    The three lines are written empty-but-uncommented rather than as commented
+    examples, so changing networks is the same gesture as the first time: fill
+    in the blanks. An empty ssid is "nothing to do" to parse_wifi_file, so the
+    note is inert on every later boot until somebody edits it.
     """
     kept = f"owner={owner}\n\n" if owner else ""
     path.write_text(
@@ -188,10 +204,12 @@ def consume(path: Path, when: str, owner: str | None = None) -> None:
         "# The network details that were here are stored on the device now, and\n"
         "# have been removed from this file, which any computer can read.\n"
         "#\n"
-        "# To change networks, replace the lines below with:\n"
-        "#   ssid=YourNetworkName\n"
-        "#   psk=YourWiFiPassword\n"
-        "# and reboot the panel. Leave the owner line alone.\n"
+        "# To change networks, fill in the lines below and restart the panel.\n"
+        "# Leave the owner line alone. The country is the two-letter code for\n"
+        "# where the panel is used -- the Wi-Fi radio stays off without it.\n"
+        "ssid=\n"
+        "psk=\n"
+        f"country={country or ''}\n"
     )
 
 
@@ -258,12 +276,23 @@ WIFI_READY_TRIES = 10
 WIFI_READY_WAIT_S = 2
 
 
+# nmcli translates device and connection STATE even under -t, and
+# network-manager-l10n is installed on the image -- so the strings this module
+# compares against ("connected", "unavailable", "unmanaged") are English only
+# by accident of whatever locale the panel happens to run in. Forcing C on the
+# child process turns that accident into a guarantee. LANGUAGE is cleared as
+# well as LC_ALL set, because gettext lets LANGUAGE override LC_ALL for message
+# translation. Nothing here shows nmcli's output to a person, so a machine
+# locale costs nothing. Applies to `iw` too, which this module also parses.
+C_LOCALE_ENV = {**os.environ, "LC_ALL": "C", "LANG": "C", "LANGUAGE": ""}
+
+
 def _run_nmcli(args: list[str], timeout: float = QUERY_TIMEOUT_S) -> str:
     # A list, never a string, and never shell=True: an SSID is attacker-chosen
     # text from the air, and a password is whatever the user typed.
     timed_out = False
     try:
-        result = subprocess.run(["nmcli", *args], capture_output=True, text=True, timeout=timeout)
+        result = subprocess.run(["nmcli", *args], capture_output=True, text=True, timeout=timeout, env=C_LOCALE_ENV)
     except subprocess.TimeoutExpired:
         # TimeoutExpired's str() embeds the whole argv, and apply()'s argv holds
         # the Wi-Fi password, so this must never reach a caller that logs it.
@@ -285,7 +314,7 @@ def _run_raspi_config(args: list[str], timeout: float = QUERY_TIMEOUT_S) -> str:
     # exception is left on __context__.
     timed_out = False
     try:
-        result = subprocess.run(["raspi-config", *args], capture_output=True, text=True, timeout=timeout)
+        result = subprocess.run(["raspi-config", *args], capture_output=True, text=True, timeout=timeout, env=C_LOCALE_ENV)
     except subprocess.TimeoutExpired:
         timed_out = True
     if timed_out:
@@ -293,6 +322,64 @@ def _run_raspi_config(args: list[str], timeout: float = QUERY_TIMEOUT_S) -> str:
     if result.returncode != 0:
         raise NetworkError((result.stderr or result.stdout).strip() or "raspi-config failed")
     return result.stdout
+
+
+def _run_iw_reg_get(timeout: float = QUERY_TIMEOUT_S) -> str:
+    # Same shape as the runners above, and the same C locale: this output is
+    # parsed, not shown. OSError is caught alongside the timeout, because iw
+    # is a package this image happens to have rather than one it depends on.
+    failed = False
+    try:
+        result = subprocess.run(["iw", "reg", "get"], capture_output=True,
+                                text=True, timeout=timeout, env=C_LOCALE_ENV)
+    except (subprocess.TimeoutExpired, OSError):
+        failed = True
+    if failed:
+        raise NetworkError("iw reg get failed")
+    if result.returncode != 0:
+        raise NetworkError((result.stderr or result.stdout).strip() or "iw reg get failed")
+    return result.stdout
+
+
+def regulatory_domain(run_iw=None) -> str | None:
+    """The Wi-Fi regulatory domain this panel already has, or None.
+
+    Two sources, because they answer slightly different questions and neither
+    alone is enough:
+
+    - ``/proc/cmdline``, where raspi-config leaves
+      ``cfg80211.ieee80211_regdom=XX``. This is the one that survives a
+      reboot, so it is what "this panel is configured" actually means.
+    - ``iw reg get``, because raspi-config also runs ``iw reg set`` at once,
+      so a domain set earlier in THIS boot is live before it has ever
+      appeared on the kernel command line.
+
+    "00" is the world regulatory domain -- the conservative default the kernel
+    falls back to when nobody has said where it is -- so it reads as None. So
+    does anything unreadable: unknown has to mean "not configured", or a panel
+    with no domain would be waved through into a radio that is switched off,
+    which is exactly where v0.1.1 was.
+    """
+    try:
+        for token in PROC_CMDLINE.read_text().split():
+            key, sep, value = token.partition("=")
+            if sep and key == "cfg80211.ieee80211_regdom":
+                code = value.strip().upper()
+                if len(code) == 2 and code.isalpha():
+                    return code
+    except OSError:
+        pass
+    try:
+        out = (run_iw or _run_iw_reg_get)()
+    except NetworkError:
+        return None
+    for line in out.splitlines():
+        fields = line.strip().split()
+        if len(fields) >= 2 and fields[0] == "country":
+            code = fields[1].rstrip(":").upper()
+            if len(code) == 2 and code.isalpha():
+                return code
+    return None
 
 
 def set_country(code: str, run=None) -> None:
@@ -311,13 +398,16 @@ def set_country(code: str, run=None) -> None:
     raspi-config's do_wifi_country (20260730, read from the deb) validates the
     code against /usr/share/zoneinfo/iso3166.tab and returns 1 on a bad one,
     writes cfg80211.ieee80211_regdom= into cmdline.txt so it survives a
-    reboot, calls `iw reg set`, zeroes /var/lib/systemd/rfkill/*:wlan, and
-    then -- and only then -- unblocks the radio. That last step is a branch:
-    `nmcli radio wifi on` IF systemd is up, it is not in a chroot and
-    NetworkManager is already active, ELSE `rfkill unblock wifi` plus a sed of
-    NetworkManager.state. Which branch runs depends on timing we do not
-    control, so the caller says `nmcli radio wifi on` itself afterwards rather
-    than depend on it.
+    reboot, and calls `iw reg set`. It then unblocks the radio -- by one of
+    two branches: `nmcli radio wifi on` IF systemd is up, it is not in a
+    chroot and NetworkManager is already active, ELSE `rfkill unblock wifi`
+    plus a sed of NetworkManager.state. Only after that does it zero
+    /var/lib/systemd/rfkill/*:wlan, inside its own `if is_pi`, which is what
+    makes the unblock survive the next boot.
+
+    Which of those two branches runs depends on timing we do not control, so
+    the caller says `nmcli radio wifi on` itself afterwards rather than depend
+    on it.
     """
     (run or _run_raspi_config)(["nonint", "do_wifi_country", code])
 
@@ -464,18 +554,31 @@ def apply_boot_file(path: Path | None = None, nm: "NetworkManager | None" = None
     if settings is None:
         return False
     manager = nm if nm is not None else NetworkManager()
-    # Order matters, and all three steps are the radio. The regulatory domain
-    # is what makes transmitting legal (and, on this image, possible at all);
-    # radio_on() covers whichever branch raspi-config took; and the interface
-    # then needs a moment to become usable before a connect can go through it.
-    if settings.country:
-        manager.set_country(settings.country)
+    # Order matters, and the first three steps are all the radio. The
+    # regulatory domain is what makes transmitting legal (and, on this image,
+    # possible at all); radio_on() covers whichever branch raspi-config took;
+    # and the interface then needs a moment to become usable before a connect
+    # can go through it.
+    country = settings.country
+    if country:
+        manager.set_country(country)
+    else:
+        # No country line. Fatal on a panel that has never had a domain set --
+        # nothing can connect, so say what to add. But NOT fatal on a panel
+        # that already has one: that is a working panel whose owner edited the
+        # file by hand, or a card written before the line existed, and taking
+        # it offline over a missing line of text would be a worse bug than the
+        # one this check exists to prevent.
+        country = regulatory_domain()
+        if country is None:
+            raise ValueError(MISSING_COUNTRY)
+        log.info("no country= line, but this panel is already set to %s; using that", country)
     manager.radio_on()
     manager.wait_for_wifi()
     manager.apply(settings)
     stamp = now() if now is not None else datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     try:
-        consume(target, stamp, parse_owner(text))
+        consume(target, stamp, parse_owner(text), country)
     except OSError:
         # The connect succeeded, but the file could not be rewritten -- most
         # realistically a /boot/firmware remounted read-only after an unclean

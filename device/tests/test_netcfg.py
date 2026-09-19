@@ -85,28 +85,11 @@ def test_bad_country_rejected(country):
         parse_wifi_file(f"ssid=HomeNet\npsk=supersecret\ncountry={country}\n")
 
 
-def test_a_file_with_an_ssid_but_no_country_is_refused_loudly():
-    # The image ships with the Wi-Fi radio switched OFF. raspberrypi-sys-mods
-    # sets rfkill.default_state=0, and pi-gen's stage2/02-net-tweaks/01-run.sh
-    # writes /var/lib/NetworkManager/NetworkManager.state with
-    # WirelessEnabled=false whenever WPA_COUNTRY is unset -- which it is here,
-    # and must stay so, because an image cannot know where a stranger lives.
-    # Setting the country is what turns the radio on, so a file without one
-    # cannot possibly work, and must say so instead of proceeding to an nmcli
-    # call that fails for a reason nobody could guess from its message.
-    with pytest.raises(ValueError, match="country"):
-        parse_wifi_file("ssid=HomeNet\npsk=supersecret\n")
-
-
-def test_the_missing_country_message_says_what_to_add():
-    # This text is the whole diagnosis for whoever is holding the card, and it
-    # lands in the journal and nowhere else, so it has to stand on its own.
-    with pytest.raises(ValueError) as caught:
-        parse_wifi_file("ssid=HomeNet\npsk=supersecret\n")
-    message = str(caught.value)
-    assert "country=" in message
-    assert "US" in message
-    assert "off" in message
+def test_a_country_is_optional_to_the_parser():
+    # Whether a file is USABLE is not a question about its text: it depends on
+    # whether this panel already has a regulatory domain. parse_wifi_file stays
+    # pure and answers only "is this well formed"; apply_boot_file decides.
+    assert parse_wifi_file("ssid=HomeNet\npsk=supersecret\n").country is None
 
 
 def test_a_file_with_nothing_to_do_is_not_asked_for_a_country():
@@ -134,6 +117,66 @@ def test_consume_removes_the_password(tmp_path):
     # And what is left must still be a file the parser treats as "nothing to do",
     # or the next boot would re-apply it.
     assert parse_wifi_file(left) is None
+
+
+def test_the_note_the_panel_writes_carries_the_country_it_just_applied(tmp_path):
+    # C2: the note used to tell the owner to write back ssid= and psk= and
+    # nothing else. An owner who followed the panel's own instructions to the
+    # letter produced a file the panel then refused, and the panel dropped
+    # offline. The note has to be self-sufficient.
+    path = tmp_path / "scoreboard-setup.txt"
+    path.write_text("ssid=HomeNet\npsk=supersecret\ncountry=GB\n")
+    consume(path, "2026-09-18 10:00 UTC", owner="friend@example.com", country="GB")
+    assert "country=GB" in path.read_text()
+
+
+def test_the_note_the_panel_writes_is_accepted_once_it_is_filled_in(tmp_path, monkeypatch):
+    # The whole round trip, which is what was never tested: apply a file, take
+    # the note the panel leaves behind, fill it in the way it tells the owner
+    # to, and put it back. It must parse AND be accepted -- on a panel with no
+    # regulatory domain of its own, so the country line is doing the work.
+    path = tmp_path / "scoreboard-setup.txt"
+    path.write_text("ssid=HomeNet\npsk=supersecret\ncountry=GB\nowner=friend@example.com\n")
+    monkeypatch.setattr(netcfg, "regulatory_domain", lambda: None)
+    first = FakeNmcli()
+    assert apply_boot_file(
+        path, nm=NetworkManager(run=first, run_raspi_config=NO_RASPI_CONFIG),
+        now=lambda: "NOW") is True
+
+    note = path.read_text()
+    assert "supersecret" not in note and "HomeNet" not in note
+    # Untouched, the note must be "nothing to do" -- or every later boot would
+    # try to reapply it.
+    assert parse_wifi_file(note) is None
+
+    # Now the owner does exactly what the note says: fills in the empty lines.
+    filled = note.replace("ssid=\n", "ssid=OtherNet\n").replace("psk=\n", "psk=othersecret\n")
+    assert filled != note, "the note has no lines for the owner to fill in"
+    settings = parse_wifi_file(filled)
+    assert settings is not None, "the note the panel wrote does not parse once filled in"
+    assert (settings.ssid, settings.psk, settings.country) == ("OtherNet", "othersecret", "GB")
+
+    path.write_text(filled)
+    second = FakeNmcli()
+    assert apply_boot_file(
+        path, nm=NetworkManager(run=second, run_raspi_config=NO_RASPI_CONFIG),
+        now=lambda: "LATER") is True, "the panel refused the file its own note told the owner to write"
+    assert ["device", "wifi", "connect", "OtherNet", "password", "othersecret"] in second.calls
+    assert netcfg.parse_owner(path.read_text()) == "friend@example.com"
+
+
+def test_the_note_records_the_domain_relied_on_when_the_file_had_no_country(
+        tmp_path, monkeypatch):
+    # An already-configured panel applying a file with no country line: the
+    # note it writes should still carry a country, so the NEXT edit is
+    # self-sufficient even though this one was not.
+    path = tmp_path / "scoreboard-setup.txt"
+    path.write_text("ssid=HomeNet\npsk=supersecret\n")
+    monkeypatch.setattr(netcfg, "regulatory_domain", lambda: "CA")
+    assert apply_boot_file(
+        path, nm=NetworkManager(run=FakeNmcli(), run_raspi_config=NO_RASPI_CONFIG),
+        now=lambda: "NOW") is True
+    assert "country=CA" in path.read_text()
 
 
 def test_owner_line_is_read_from_the_setup_file():
@@ -335,6 +378,95 @@ def test_apply_boot_file_leaves_the_file_when_nmcli_fails(tmp_path):
     assert "psk=supersecret" in path.read_text()
 
 
+def test_a_fresh_panel_refuses_a_file_with_no_country(tmp_path, monkeypatch):
+    # The image ships with the Wi-Fi radio switched OFF: raspberrypi-sys-mods
+    # sets rfkill.default_state=0, and pi-gen's stage2/02-net-tweaks/01-run.sh
+    # writes /var/lib/NetworkManager/NetworkManager.state with
+    # WirelessEnabled=false whenever WPA_COUNTRY is unset -- which it is here,
+    # and must stay so, because an image cannot know where a stranger lives.
+    # Nothing can connect until a regulatory domain is set, so say what to add
+    # rather than proceed to an nmcli call that cannot succeed.
+    path = tmp_path / "scoreboard-setup.txt"
+    path.write_text("ssid=HomeNet\npsk=supersecret\n")
+    monkeypatch.setattr(netcfg, "regulatory_domain", lambda: None)
+    with pytest.raises(ValueError, match="country"):
+        apply_boot_file(path, nm=NetworkManager(run=FakeNmcli(), run_raspi_config=NO_RASPI_CONFIG))
+    assert "psk=supersecret" in path.read_text(), "the user's only copy was destroyed"
+
+
+def test_the_missing_country_message_says_what_to_add(tmp_path, monkeypatch):
+    # This text is the whole diagnosis for whoever is holding the card, and it
+    # lands in the journal and nowhere else, so it has to stand on its own.
+    path = tmp_path / "scoreboard-setup.txt"
+    path.write_text("ssid=HomeNet\npsk=supersecret\n")
+    monkeypatch.setattr(netcfg, "regulatory_domain", lambda: None)
+    with pytest.raises(ValueError) as caught:
+        apply_boot_file(path, nm=NetworkManager(run=FakeNmcli(), run_raspi_config=NO_RASPI_CONFIG))
+    message = str(caught.value)
+    assert "country=" in message
+    assert "US" in message
+    assert "off" in message
+
+
+def test_a_panel_that_already_has_a_domain_does_not_go_dark_over_a_missing_line(
+        tmp_path, monkeypatch, caplog):
+    # The case that matters most in the field: a working panel, set up before
+    # the country line existed, or whose owner edited the file by hand. Its
+    # regulatory domain is already set and persists in cmdline.txt, so the
+    # radio is on and a country line would add nothing. Refusing here would
+    # take a working panel offline over a missing line of text.
+    path = tmp_path / "scoreboard-setup.txt"
+    path.write_text("ssid=HomeNet\npsk=supersecret\n")
+    monkeypatch.setattr(netcfg, "regulatory_domain", lambda: "GB")
+    fake = FakeNmcli()
+    with caplog.at_level(logging.INFO, logger="scoreboard.netcfg"):
+        assert apply_boot_file(
+            path, nm=NetworkManager(run=fake, run_raspi_config=NO_RASPI_CONFIG),
+            now=lambda: "NOW") is True
+    assert ["device", "wifi", "connect", "HomeNet", "password", "supersecret"] in fake.calls
+    assert "GB" in caplog.text, "the journal should say which domain it relied on"
+
+
+def test_regulatory_domain_reads_the_kernel_command_line(tmp_path, monkeypatch):
+    # What raspi-config writes into cmdline.txt, and therefore the signal that
+    # survives a reboot.
+    cmdline = tmp_path / "cmdline"
+    cmdline.write_text("console=serial0,115200 cfg80211.ieee80211_regdom=CA rootwait\n")
+    monkeypatch.setattr(netcfg, "PROC_CMDLINE", cmdline)
+    assert netcfg.regulatory_domain(run_iw=lambda: "country 00: DFS-UNSET\n") == "CA"
+
+
+def test_regulatory_domain_falls_back_to_iw_within_the_same_boot(tmp_path, monkeypatch):
+    # raspi-config also runs `iw reg set` immediately, so a domain set earlier
+    # in THIS boot is live before it has ever been in /proc/cmdline.
+    cmdline = tmp_path / "cmdline"
+    cmdline.write_text("console=serial0,115200 rootwait\n")
+    monkeypatch.setattr(netcfg, "PROC_CMDLINE", cmdline)
+    assert netcfg.regulatory_domain(run_iw=lambda: "global\ncountry DE: DFS-ETSI\n") == "DE"
+
+
+def test_regulatory_domain_treats_the_world_domain_as_unset(tmp_path, monkeypatch):
+    # "00" is the world regulatory domain: the conservative default the kernel
+    # falls back to when nobody has said where it is. That is precisely "not
+    # configured", and treating it as configured would put us back where
+    # v0.1.1 was.
+    cmdline = tmp_path / "cmdline"
+    cmdline.write_text("console=serial0,115200 rootwait\n")
+    monkeypatch.setattr(netcfg, "PROC_CMDLINE", cmdline)
+    assert netcfg.regulatory_domain(run_iw=lambda: "global\ncountry 00: DFS-UNSET\n") is None
+
+
+def test_regulatory_domain_is_none_when_nothing_can_be_read(tmp_path, monkeypatch):
+    # No cmdline, no iw. Unknown must read as "not configured", so the file is
+    # refused with an explanation rather than applied into a radio that is off.
+    monkeypatch.setattr(netcfg, "PROC_CMDLINE", tmp_path / "does-not-exist")
+
+    def boom():
+        raise NetworkError("iw is not installed")
+
+    assert netcfg.regulatory_domain(run_iw=boom) is None
+
+
 def test_the_radio_is_switched_on_before_connecting(tmp_path, monkeypatch):
     # raspi-config's do_wifi_country only runs `nmcli radio wifi on` when
     # `systemctl -q is-active NetworkManager` is true at that instant; its
@@ -497,7 +629,7 @@ def test_apply_boot_file_warns_but_still_succeeds_when_the_file_cannot_be_cleare
     path = tmp_path / "scoreboard-wifi.txt"
     path.write_text("ssid=HomeNet\npsk=supersecret\ncountry=US\n")
 
-    def consume_that_fails(_path, _when, _owner=None):
+    def consume_that_fails(_path, _when, _owner=None, _country=None):
         raise OSError("Read-only file system")
 
     monkeypatch.setattr(netcfg, "consume", consume_that_fails)
