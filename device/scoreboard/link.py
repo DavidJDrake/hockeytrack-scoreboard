@@ -20,19 +20,41 @@ TODAY = "hockeytrack/games/today"
 def _refused(reason_code) -> bool:
     """Did this CONNACK say no?
 
-    paho's VERSION2 callbacks hand over a ReasonCode, which knows; older
-    paths and MQTT v3 brokers can hand over a plain int, where 0 is the only
-    success. Anything unrecognizable is treated as a refusal, because the
-    cost of that is a help screen the owner can act on, while the cost of
-    the opposite is a panel that never admits it is being turned away.
+    Three shapes, in order of how much they know. paho's VERSION2 callbacks
+    hand over a ReasonCode, which answers outright. Failing that, its
+    ``value`` is the CONNACK code, where 0 is the only success -- and note
+    that this is NOT the same as int(reason_code): paho 2.1.0's ReasonCode
+    defines no __int__, so int() on one raises TypeError, inside a paho
+    callback, where nothing catches it (N-6). Last, a plain int, which MQTT
+    v3 brokers and older paho paths can pass.
+
+    Anything else -- a shape none of the three fit -- is treated as NOT a
+    refusal, and said loudly in the journal.
+
+    That is a deliberate reversal of what this shipped with. "Cannot tell"
+    used to mean "refused", which sounds like the careful choice and is in
+    fact the only answer here that bricks the panel: returning True skips
+    every SUBSCRIBE, so no state, no today list and no config can ever
+    arrive, and the panel shows "cannot reach the service" for ever over a
+    link that is working. If a future paho dropped is_failure and changed
+    the code's shape, that would have happened on every CONNACK, including
+    every successful one. Failing open costs almost nothing by comparison: a
+    CONNACK that really was a refusal is followed by the broker closing the
+    socket, which fires _on_disconnect and reports the link down through the
+    ordinary path, and subscribing on a connection that is about to close
+    does no harm.
     """
     failure = getattr(reason_code, "is_failure", None)
     if failure is not None:
         return bool(failure)
+    code = getattr(reason_code, "value", reason_code)
     try:
-        return int(reason_code) != 0
+        return int(code) != 0
     except (TypeError, ValueError):
-        return True
+        log.warning("cannot tell whether the broker accepted this connection: %r (%s); "
+                    "treating it as accepted -- a disconnect will say otherwise",
+                    reason_code, reason_code)
+        return False
 
 
 def config_topic(thing_name: str) -> str:

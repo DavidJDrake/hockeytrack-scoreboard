@@ -165,3 +165,56 @@ def test_an_integer_reason_code_is_read_the_same_way():
     assert connect_with(0)[0] == [True]
     assert connect_with(5)[0] == [False]      # 5: not authorized
     assert connect_with(5)[1] == []
+
+
+class ValueOnly:
+    """A reason code that knows its number but not whether it is a failure.
+
+    paho 2.1.0's ReasonCode has both `.value` and `.is_failure`; this is the
+    shape left if a future paho drops the second, which N-6 is about.
+    int(ReasonCode) raises TypeError -- it has no __int__ -- so the old
+    fallback did not fall back at all.
+    """
+
+    def __init__(self, value):
+        self.value = value
+
+    def __str__(self):
+        return f"reason {self.value}"
+
+
+class Inscrutable:
+    """Something the panel cannot read at all: no is_failure, no value, no
+    int()."""
+
+    def __str__(self):
+        return "who knows"
+
+
+def test_a_reason_code_that_only_knows_its_number_is_read_by_that_number():
+    # N-6: int(reason_code) raises TypeError for paho 2.1.0's ReasonCode, so
+    # with is_failure gone the fallback raised rather than answering -- out
+    # of a paho callback, where nothing catches it.
+    assert connect_with(ValueOnly(0))[0] == [True]
+    assert len(connect_with(ValueOnly(0))[1]) == 3
+    assert connect_with(ValueOnly(5))[0] == [False]
+    assert connect_with(ValueOnly(5))[1] == []
+
+
+def test_a_reason_code_nothing_can_read_connects_anyway(caplog):
+    # The decision, and it is the opposite of the one this code shipped
+    # with. "Cannot tell" used to mean "refused", which sounds careful and
+    # is in fact the only outcome here that bricks the panel: _refused()
+    # returning True skips every SUBSCRIBE, so nothing can ever arrive, and
+    # the panel shows "cannot reach the service" for ever on a link that is
+    # working. Failing open costs nothing by comparison -- a CONNACK that
+    # really was a refusal is followed by the broker closing the socket,
+    # which fires _on_disconnect and reports the link down through the
+    # ordinary path -- so the panel subscribes, says so, and lets the
+    # disconnect tell the truth.
+    with caplog.at_level("WARNING"):
+        seen, subscribed = connect_with(Inscrutable())
+    assert seen == [True]
+    assert len(subscribed) == 3
+    assert any("who knows" in r.getMessage() for r in caplog.records), \
+        "a reason code nothing could read went into the journal unremarked"
