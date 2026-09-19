@@ -7,20 +7,21 @@ Spec: `docs/superpowers/specs/2026-09-12-device-image-design.md`
 
 | ID | Check | Pass criterion | Result |
 |---|---|---|---|
-| H1 | systemd hardening against kmsdrm | The panel renders with the hardened unit | **PASS on a Pi 4, 2026-09-19 (v0.1.2)** — the hardened unit opened the display and drew for 15 minutes. One finding: it silently disabled the GPIO buttons |
+| H1 | systemd hardening against kmsdrm | The panel renders with the hardened unit | **PASS on a Pi 4, 2026-09-19** — on v0.1.2 the hardened unit opened the display and drew for 15 minutes, with two SDL settings added by hand; on v0.1.3 it did so from the stock image. One finding on v0.1.2: it silently disabled the GPIO buttons (fixed in v0.1.3, not yet re-observed) |
 | H2 | polkit grant | The `scoreboard` account applies a connection | not yet run |
 | H3 | Real `nmcli` scan and apply | Networks list; joining one succeeds | not yet run |
 | H4 | Imager customisation on a custom image | The dialog is offered and the settings take effect | observed 2026-09-18 — no dialog offered, nothing written to the boot partition |
-| H5 | Image boots | Both boards boot and the panel lights up | **PASS on a Pi 4, 2026-09-19 (v0.1.2)** — boots unattended and the panel lights up. Failed on v0.1.0 and v0.1.1. The Zero 2 W is still unrun |
+| H5 | Image boots | Both boards boot and the panel lights up | **PASS on a Pi 4, 2026-09-19 (v0.1.3, stock image)** — boots unattended, the panel lights up the right way up, and it joins Wi-Fi from the site's own setup file. Failed on v0.1.0 and v0.1.1; v0.1.2 drew only with hand edits and never joined. The Zero 2 W is still unrun |
 | H6 | CMA on the Zero 2 W | A bar panel renders without CMA exhaustion | not yet run |
 | H7 | Keyboard under kmsdrm | A USB keyboard drives the settings screen | not yet run |
-| H8 | A panel enrolls itself | Pairing, claim and restart all work end to end against real AWS | not yet run |
+| H8 | A panel enrolls itself | Pairing, claim and restart all work end to end against real AWS | **PASS on the core path, 2026-09-19 (v0.1.3, Pi 4)** — steps 0, 1, 2, 5 and 7. Steps 3, 4, 6 and 8 are not yet run |
 
 H4, H5 and H6 need an image, so they belong to B2. H1, H2, H3 and H7 can be run
 as soon as this plan is installed on a Pi. H8 needs the enrollment path this
 plan builds, plus two invited Google accounts: the owner's, and a second one
-for step 4. **H8 is still open**, and cannot be attempted until a panel joins
-a network — which is defect 2 under H5.
+for step 4. H8's core path passed on 2026-09-19, once v0.1.3 fixed the Wi-Fi
+join that had blocked it; four of its steps are still open, and its section
+says which.
 
 ## Reading a failed panel
 
@@ -1023,8 +1024,64 @@ branches — `nmcli radio wifi on` if NetworkManager is already active, else
 `rfkill unblock wifi` plus a `sed` of `NetworkManager.state` — and which one
 runs depends on timing this service does not control.
 
+**2026-09-19 — PASS on the core path, v0.1.3 on a Pi 4.** The first panel to
+enroll itself. The image was the published `v0.1.3`, verified by checksum and
+by `gh attestation verify` against the release workflow at `refs/tags/v0.1.3`,
+flashed with Raspberry Pi Imager's "Use custom", with **nothing edited on the
+card by hand** — the two earlier images that drew anything had needed
+`cmdline.txt` changes to do it.
+
+- **Step 0.** The owner signed in and used *Download setup file*. The file the
+  site wrote carried `country=US`, prefilled from the browser, and the
+  commented `# rotate=270` hint.
+- **Step 1.** `ssid=` and `psk=` were filled in, and the `#` was removed from
+  `rotate=270` because v0.1.2 had drawn upside down on this mounting. The
+  password was copied from the PC's saved Wi-Fi profile straight into the file
+  and never displayed; the temporary copy was shredded. `owner=` was left as
+  the site wrote it.
+- **Step 2.** Booted with no keyboard attached. The panel showed **Add this
+  panel at scoreboard.davidjdrake.com**, a code in the form `XXXX-XXXX`, and
+  `Waiting for` the owner's address, **the right way up**. The pending
+  enrollment appeared in DynamoDB about forty seconds after the watch for it
+  began: one record for the enrollment (`status: pending`, a thing name, the
+  CSR, and the owner's address and the code present **only as hashes**), and
+  one `code#…` lookup record holding a token hash. Nothing was stored in the
+  clear.
+- **Step 5.** The owner claimed the code on the site, first try. This was the
+  first time `Dynamo.ByCodeHash` ran against real DynamoDB — the line this
+  check flags as the one to suspect — and it worked. The enrollment moved from
+  `pending` to `ready`, the devices table went from 0 to 1, and within the
+  expected half minute the panel restarted into the scoreboard showing "no
+  game selected", still the right way up. A game chosen on the site then
+  appeared on the panel as `PUCK DROP in 06:00:00` and counted down: the first
+  round trip from the site, through AWS IoT, to a panel holding a certificate
+  it had been issued through a pairing code.
+- **Step 7.** Read back from AWS: the thing exists; it has **exactly one**
+  certificate, `ACTIVE`, created about two minutes after the panel first asked
+  for a code; and that certificate has the `scoreboard-device` policy attached
+  and no other.
+
+**Not yet run**, and each needs saying why rather than being left to look like
+a pass:
+
+- **Step 3** (the code rotates after it expires, and the old one is refused)
+  and **step 4** (a different invited account is refused with the same message
+  a mistyped code gets). Both need an unclaimed panel, so they wait for a
+  factory reset; step 4 also needs a second Google account on the invite list.
+- **Step 6** (`device.json`, `device.pem.crt`, `private.pem.key` at mode 0600
+  and the root CA present under `/var/lib/scoreboard`, and `enrollment.json`
+  gone). It needs the card's Linux partition read on another machine — see
+  "Reading a failed panel" for why that is awkward from Windows.
+- **Step 8** (an idle tab re-authenticates cleanly after the ID token's hour).
+
+**What the owner noticed while claiming:** the claim box does not insert the
+dash the panel displays, so a code read off the screen as `XXXX-XXXX` has to
+be typed with its dash by hand. Logged as a site follow-up.
+
 **The one to watch:** step 5 is the first time `Dynamo.ByCodeHash` runs against
 real DynamoDB. It has no test coverage and neither alarm would catch an
 inverted comparison there — a 404 does not trip the 5xx alarm, and the 4xx
 alarm needs twenty in five minutes, which a three-panel fleet will never
 reach. If the claim 404s with everything else correct, suspect that line first.
+
+**2026-09-19.** It did not 404: the first real claim succeeded on the first try.
