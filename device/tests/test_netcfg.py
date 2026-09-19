@@ -136,7 +136,8 @@ def test_the_note_the_panel_writes_is_accepted_once_it_is_filled_in(tmp_path, mo
     # to, and put it back. It must parse AND be accepted -- on a panel with no
     # regulatory domain of its own, so the country line is doing the work.
     path = tmp_path / "scoreboard-setup.txt"
-    path.write_text("ssid=HomeNet\npsk=supersecret\ncountry=GB\nowner=friend@example.com\n")
+    path.write_text("ssid=HomeNet\npsk=supersecret\ncountry=GB\nrotate=270\n"
+                    "owner=friend@example.com\n")
     monkeypatch.setattr(netcfg, "regulatory_domain", lambda: None)
     first = FakeNmcli()
     assert apply_boot_file(
@@ -163,6 +164,10 @@ def test_the_note_the_panel_writes_is_accepted_once_it_is_filled_in(tmp_path, mo
         now=lambda: "LATER") is True, "the panel refused the file its own note told the owner to write"
     assert ["device", "wifi", "connect", "OtherNet", "password", "othersecret"] in second.calls
     assert netcfg.parse_owner(path.read_text()) == "friend@example.com"
+    # And which way up the panel is mounted has survived both rewrites. It is
+    # set once, by hand, and there is no other place on the card it could be
+    # kept: losing it here would turn the picture over on the next boot.
+    assert netcfg.rotate_hint(path) == 270
 
 
 def test_the_note_records_the_domain_relied_on_when_the_file_had_no_country(
@@ -177,6 +182,113 @@ def test_the_note_records_the_domain_relied_on_when_the_file_had_no_country(
         path, nm=NetworkManager(run=FakeNmcli(), run_raspi_config=NO_RASPI_CONFIG),
         now=lambda: "NOW") is True
     assert "country=CA" in path.read_text()
+
+
+# --------------------------------------------------------------------------
+# rotate= on the boot partition
+#
+# display.placement() turns a portrait display's frame 90 degrees when rotate
+# is None. A bar panel mounted the other way up needs 270, and on v0.1.2 there
+# was no way to say so: rotate reaches the program only through device.json,
+# which is written by identity.write_identity() and carries nothing but
+# thingName and endpoint -- so in practice NOTHING sets it. Before enrollment
+# there is nothing at all, which means the pairing code itself is shown upside
+# down and the owner cannot read it to fix anything.
+# --------------------------------------------------------------------------
+
+
+def test_rotate_is_read_from_the_setup_file(tmp_path):
+    path = tmp_path / "scoreboard-setup.txt"
+    path.write_text("ssid=Home\nrotate=270\nowner=friend@example.com\n")
+    assert netcfg.rotate_hint(path) == 270
+
+
+@pytest.mark.parametrize("value,want", [("0", 0), ("90", 90), ("180", 180),
+                                        ("270", 270), ("auto", None), (" 90 ", 90)])
+def test_rotate_accepts_exactly_what_parse_rotate_accepts(tmp_path, value, want):
+    # The same values as device.json and SCOREBOARD_ROTATE, so an owner is not
+    # asked to learn a second spelling of the same setting.
+    path = tmp_path / "scoreboard-setup.txt"
+    path.write_text(f"rotate={value}\n")
+    assert netcfg.rotate_hint(path) == want
+
+
+@pytest.mark.parametrize("value", ["sideways", "45", "-90", "90deg", "true", "90.0"])
+def test_an_unusable_rotate_is_logged_and_ignored_rather_than_fatal(tmp_path, value, caplog):
+    # This file is typed by hand on a FAT partition. A typo in an optional
+    # display setting must never stop a panel starting -- it would turn "the
+    # picture is upside down" into "the panel does not come on at all".
+    path = tmp_path / "scoreboard-setup.txt"
+    path.write_text(f"ssid=Home\nrotate={value}\n")
+    with caplog.at_level(logging.WARNING, logger="scoreboard.netcfg"):
+        assert netcfg.rotate_hint(path) is None
+    assert caplog.records, f"rotate={value!r} was dropped in silence"
+    assert "rotate" in caplog.text
+
+
+def test_rotate_is_optional_and_its_absence_is_not_an_error(tmp_path):
+    path = tmp_path / "scoreboard-setup.txt"
+    path.write_text("ssid=Home\npsk=password123\ncountry=US\n")
+    assert netcfg.rotate_hint(path) is None
+
+
+def test_a_commented_rotate_line_is_inert(tmp_path):
+    # The site ships the line commented out, so this is what every panel that
+    # has not been told otherwise actually reads.
+    path = tmp_path / "scoreboard-setup.txt"
+    path.write_text("ssid=Home\n# rotate=270\n")
+    assert netcfg.rotate_hint(path) is None
+
+
+def test_reading_rotate_does_not_change_the_file(tmp_path):
+    # Read the same non-consuming way owner_hint reads owner=: the main
+    # program reads this on every start, long after netcfg has finished.
+    path = tmp_path / "scoreboard-setup.txt"
+    before = "ssid=Home\nrotate=270\nowner=friend@example.com\n"
+    path.write_text(before)
+    netcfg.rotate_hint(path)
+    assert path.read_text() == before
+
+
+def test_an_unreadable_file_is_not_a_rotation_error(tmp_path):
+    assert netcfg.rotate_hint(tmp_path / "not-there.txt") is None
+
+
+def test_applying_wifi_keeps_the_rotate_line(tmp_path):
+    # consume() rewrites the whole file. The owner and the country already
+    # survive that; rotation has to as well, or a panel would come up the
+    # right way once and be upside down on every boot afterwards.
+    path = tmp_path / "scoreboard-setup.txt"
+    path.write_text("ssid=Home\npsk=password123\ncountry=US\nrotate=270\n"
+                    "owner=friend@example.com\n")
+
+    class FakeNM:
+        def set_country(self, code): self.country = code
+        def radio_on(self): self.radio_on_called = True
+        def wait_for_wifi(self): return True
+        def join(self, settings): self.applied = settings
+
+    assert netcfg.apply_boot_file(path, nm=FakeNM(), now=lambda: "NOW") is True
+    left = path.read_text()
+    assert "password123" not in left
+    assert netcfg.rotate_hint(path) == 270, "the panel forgot which way up it is"
+    assert netcfg.parse_wifi_file(left) is None, "the note is no longer inert"
+
+
+def test_the_note_carries_no_rotate_line_when_there_was_none(tmp_path):
+    # An owner who never needed it should not find a new setting in their
+    # file, half-filled in, that they have to reason about.
+    path = tmp_path / "scoreboard-setup.txt"
+    path.write_text("ssid=Home\npsk=password123\ncountry=US\n")
+
+    class FakeNM:
+        def set_country(self, code): pass
+        def radio_on(self): pass
+        def wait_for_wifi(self): return True
+        def join(self, settings): pass
+
+    assert netcfg.apply_boot_file(path, nm=FakeNM(), now=lambda: "NOW") is True
+    assert "rotate" not in path.read_text()
 
 
 def test_owner_line_is_read_from_the_setup_file():
@@ -1079,7 +1191,7 @@ def test_apply_boot_file_warns_but_still_succeeds_when_the_file_cannot_be_cleare
     path = tmp_path / "scoreboard-wifi.txt"
     path.write_text("ssid=HomeNet\npsk=supersecret\ncountry=US\n")
 
-    def consume_that_fails(_path, _when, _owner=None, _country=None):
+    def consume_that_fails(_path, _when, _owner=None, _country=None, _rotate=None):
         raise OSError("Read-only file system")
 
     monkeypatch.setattr(netcfg, "consume", consume_that_fails)
@@ -1168,6 +1280,16 @@ def test_the_setup_file_the_website_writes_is_read_the_way_it_meant():
     settings = netcfg.parse_wifi_file(filled)
     assert settings is not None
     assert (settings.ssid, settings.psk, settings.country) == ("HomeNet", "supersecret", "US")
+    # The optional rotate line the site ships commented out. Inert as
+    # downloaded -- every panel reads this file, and a setting nobody asked
+    # for must not turn the picture over -- and accepted once the owner does
+    # exactly what the comment above it tells them to.
+    assert netcfg.parse_rotate_hint(text) is None, \
+        "the commented rotate line is not inert; every panel would be turned"
+    assert "rotate=" in text, "the website stopped offering a way to set the rotation"
+    uncommented = text.replace("# rotate=270", "rotate=270")
+    assert uncommented != text, "the rotate line is not commented out the way the panel expects"
+    assert netcfg.parse_rotate_hint(uncommented) == 270
 
 
 def test_the_website_knows_every_character_the_panel_breaks_lines_on():

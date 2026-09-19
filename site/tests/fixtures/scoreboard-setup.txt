@@ -14,6 +14,10 @@ psk=
 # filled in, so check it even if there is already something here.
 country=
 
+# If the picture is upside down, remove the # from the next line, save
+# the file, and start the panel again.
+# rotate=270
+
 # This line ties the panel to your account, so the code it shows can be
 # claimed by you and nobody else. Leave it exactly as it is.
 owner=friend@example.com

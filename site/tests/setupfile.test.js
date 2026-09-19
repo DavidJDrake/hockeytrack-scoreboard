@@ -71,6 +71,29 @@ test("the owner line still says to leave it alone, and comes last", () => {
   assert.ok(text.indexOf("country=") < text.indexOf("owner="), "the order changed");
 });
 
+test("the file offers a way to turn the picture, and it is off by default", () => {
+  // A bar panel mounted the other way up shows its own pairing code upside
+  // down, and before enrollment there is nowhere else to say so -- rotation
+  // otherwise reaches the panel only through device.json. Shipped commented
+  // out: every panel reads this file, and a setting nobody asked for must not
+  // turn anybody's picture over. device/tests/test_netcfg.py asserts the
+  // panel treats the commented line as inert and the uncommented one as 270.
+  const text = setupFileFor("friend@example.com");
+  assert.match(text, /^# rotate=270$/m);
+  assert.ok(!/^rotate=/m.test(text), "the rotate line is not commented out");
+});
+
+test("the rotate line is explained in words a non-technical owner can act on", () => {
+  // "Remove the #" is something anybody can do in Notepad. "Uncomment" is
+  // not, and neither is "set rotate to 270 degrees clockwise".
+  const text = setupFileFor("friend@example.com");
+  const before = text.split("\n# rotate=270")[0].split("\n").slice(-2).join(" ");
+  assert.match(before, /upside down/i);
+  assert.match(before, /remove the #/i);
+  assert.ok(!/rotat(e|ion)|degree|clockwise/i.test(before),
+    "the instruction leans on the jargon it is there to replace");
+});
+
 test("regionFromLocale takes the region out of a browser locale", () => {
   assert.equal(regionFromLocale("en-US"), "US");
   assert.equal(regionFromLocale("en-GB"), "GB");

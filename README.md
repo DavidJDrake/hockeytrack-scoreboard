@@ -124,6 +124,7 @@ on the card's boot partition (the one Windows and macOS can see):
     ssid=YourNetworkName
     psk=YourWiFiPassword
     country=US
+    # rotate=270
     owner=you@example.com
 
 The panel reads it on every boot, connects, and then removes the password from
@@ -143,11 +144,34 @@ while signed in fills in the owner line, and prefills this one from your
 browser's locale — check it, since that is the language you read in rather
 than necessarily where the panel will live.
 
+### Which way up the panel is mounted
+
 The first line the service logs (`journalctl -u scoreboard -f`) names the
-video driver, the display size and the rotation it chose. If the picture is
-upside down or turned the wrong way, add `"rotate"` to `device.json` — `90`,
-`180` or `270` degrees clockwise, or `"auto"` (the default, which turns a
-landscape frame a quarter turn on a portrait display) — and restart.
+video driver, the display size and the rotation it chose. Left to itself the
+panel turns a landscape frame a quarter turn clockwise onto a portrait
+display, which is right for one of the two ways a bar panel can be hung and
+upside down for the other.
+
+`rotate=` in `scoreboard-setup.txt` is how you say. It takes `0`, `90`, `180`,
+`270` (degrees clockwise) or `auto`, it is optional, and the file the site
+generates ships it commented out:
+
+    # If the picture is upside down, remove the # from the next line, save
+    # the file, and start the panel again.
+    # rotate=270
+
+An unusable value is noted in the log and ignored — it never stops the panel
+starting — and the line survives the rewrite the panel does after it joins
+Wi-Fi, so it is set once and then left alone.
+
+It belongs on the card because that is the only place a panel can be told
+before it has been registered, and the pairing code an unregistered panel
+shows is exactly the screen you have to be able to read. Two other places can
+override it, in this order: `SCOREBOARD_ROTATE` in the environment (the
+desktop preview's knob) beats `"rotate"` in `device.json`, which beats the
+card. `device.json` is written by the panel when it enrolls and carries only
+its thing name and endpoint, so in practice nothing puts a rotation there
+today — see `docs/hardware-checks.md` for the note on that.
 
 The display font, Barlow Condensed, is bundled in `device/scoreboard/fonts/`
 under the SIL Open Font Licence.

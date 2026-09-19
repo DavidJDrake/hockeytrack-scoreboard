@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .config import parse_rotate
+
 BOOT_FILE = Path("/boot/firmware/scoreboard-setup.txt")
 # The name this file had when it carried only Wi-Fi. Cards written before the
 # rename still work: a panel that refused to read the file the user was told
@@ -85,6 +87,32 @@ def parse_owner(text: str) -> str | None:
     return _values(text).get("owner") or None
 
 
+def parse_rotate_hint(text: str) -> int | None:
+    """Which way up this panel is mounted, if the card says. Never raises.
+
+    The values are exactly the ones ``config.parse_rotate`` accepts -- 0, 90,
+    180, 270 or "auto" -- so an owner is not asked to learn a second spelling
+    of a setting that already exists in ``device.json`` and in
+    ``SCOREBOARD_ROTATE``.
+
+    An unusable value is logged and ignored rather than raised. This file is
+    typed by hand on a FAT partition, and the whole point of the line is to
+    fix a picture that is upside down: turning that into a panel that does not
+    start at all would be a far worse bug than the one it exists to fix. It is
+    also the only one of the three sources a person edits blind, with no shell
+    to be told off by -- device.json is written by the panel itself, and
+    SCOREBOARD_ROTATE is typed at a prompt where a complaint is useful.
+    """
+    value = _values(text).get("rotate")
+    if not value:
+        return None
+    try:
+        return parse_rotate(value)
+    except ValueError as e:
+        log.warning("ignoring the rotate line on the boot partition: %s", e)
+        return None
+
+
 def boot_file(primary: Path | None = None, legacy: Path | None = None) -> Path:
     """The setup file to read. The new name wins; the old one is a fallback.
 
@@ -122,6 +150,26 @@ def owner_hint(path: Path | None = None) -> str | None:
     if owner is not None and len(owner.encode("utf-8")) > MAX_OWNER_BYTES:
         return None
     return owner
+
+
+def rotate_hint(path: Path | None = None) -> int | None:
+    """The rotate line from the boot partition, or None.
+
+    Read the same way, at the same moment and with the same forgiveness as
+    owner_hint reads ``owner=``: the file is opened, read and left exactly as
+    it was. The main program calls this on every start, long after
+    scoreboard-netcfg has finished with the file, which is why consume() has
+    to carry the line through when it rewrites it.
+
+    Its place in the order is decided in one place only --
+    ``scoreboard.main.chosen_rotation`` -- and stated there.
+    """
+    target = boot_file() if path is None else path
+    try:
+        text = target.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    return parse_rotate_hint(text)
 
 
 def parse_wifi_file(text: str) -> WifiSettings | None:
@@ -170,7 +218,7 @@ def parse_wifi_file(text: str) -> WifiSettings | None:
 
 
 def consume(path: Path, when: str, owner: str | None = None,
-            country: str | None = None) -> None:
+            country: str | None = None, rotate: str | None = None) -> None:
     """Replace the file with a note saying it was applied.
 
     The password is now in NetworkManager's own store, root-owned on the
@@ -191,12 +239,34 @@ def consume(path: Path, when: str, owner: str | None = None,
     take it offline. Carrying the country that was just applied makes the note
     self-sufficient.
 
-    The three lines are written empty-but-uncommented rather than as commented
-    examples, so changing networks is the same gesture as the first time: fill
-    in the blanks. An empty ssid is "nothing to do" to parse_wifi_file, so the
-    note is inert on every later boot until somebody edits it.
+    The rotate line is kept for a third reason, and it is the sharpest of the
+    three: it has nowhere else to live. Rotation otherwise reaches the panel
+    only through device.json, which identity.write_identity() writes with a
+    thing name and an endpoint and nothing else -- so this file is the only
+    record anywhere that a panel is mounted the other way up. Dropping it here
+    would turn the picture over on the next boot, and the owner would have to
+    work out that connecting to Wi-Fi is what did it. The value is carried
+    through exactly as it was written rather than normalized: a value the
+    panel could not use stays visible to whoever typed it, which is the same
+    rule the rest of this file follows.
+
+    The three blank lines are written empty-but-uncommented rather than as
+    commented examples, so changing networks is the same gesture as the first
+    time: fill in the blanks. An empty ssid is "nothing to do" to
+    parse_wifi_file, so the note is inert on every later boot until somebody
+    edits it -- and a rotate line does not change that, since "nothing to do"
+    is decided by the ssid alone.
     """
     kept = f"owner={owner}\n\n" if owner else ""
+    # Only when there was one. An owner who never needed this should not find
+    # a setting in their file that they now have to reason about.
+    turned = (
+        "\n"
+        "# Which way up this panel is mounted. It was set before, and is kept\n"
+        "# here because there is nowhere else on the card to keep it. Delete\n"
+        "# the line to let the panel decide for itself again.\n"
+        f"rotate={rotate}\n"
+    ) if rotate else ""
     path.write_text(
         kept +
         f"# Wi-Fi settings applied by the scoreboard on {when}.\n"
@@ -210,6 +280,7 @@ def consume(path: Path, when: str, owner: str | None = None,
         "ssid=\n"
         "psk=\n"
         f"country={country or ''}\n"
+        + turned
     )
 
 
@@ -825,7 +896,10 @@ def apply_boot_file(path: Path | None = None, nm: "NetworkManager | None" = None
     manager.join(settings)
     stamp = now() if now is not None else datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     try:
-        consume(target, stamp, parse_owner(text), country)
+        # The raw rotate line rather than a parsed one: consume() is
+        # preserving what the owner wrote, not applying it.
+        consume(target, stamp, parse_owner(text), country,
+                _values(text).get("rotate") or None)
     except OSError:
         # The connect succeeded, but the file could not be rewritten -- most
         # realistically a /boot/firmware remounted read-only after an unclean

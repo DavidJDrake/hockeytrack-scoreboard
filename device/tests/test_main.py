@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 import pygame
+import pytest
 
 from scoreboard import main as main_module
 from scoreboard.display import EX_CONFIG
@@ -308,3 +309,87 @@ def test_enrollment_does_not_start_when_a_fixture_is_set(tmp_path, monkeypatch):
     main_module.main()
 
     assert calls == []
+
+
+# --------------------------------------------------------------------------
+# Which way up the panel is mounted
+#
+# Three places can say, and they have to be ordered once, in one place, or
+# they will be ordered differently by accident in another.
+# --------------------------------------------------------------------------
+
+
+def test_the_setup_file_says_which_way_up_when_nothing_else_does():
+    # The case this exists for: a panel that has never enrolled. device.json
+    # does not exist yet, so there is no other way to say, and the pairing
+    # code the owner has to read is on screen upside down.
+    assert main_module.chosen_rotation(None, 270, None) == 270
+
+
+def test_device_json_wins_over_the_setup_file():
+    # The card's file is set once by hand and then carried along by
+    # consume(); device.json is the panel's own provisioned identity.
+    assert main_module.chosen_rotation(90, 270, None) == 90
+
+
+def test_the_environment_override_wins_over_both():
+    # SCOREBOARD_ROTATE is the desktop preview's knob and stays the last word.
+    assert main_module.chosen_rotation(90, 270, "180") == 180
+    assert main_module.chosen_rotation(90, 270, "auto") is None
+
+
+def test_nothing_anywhere_still_means_decide_from_the_shape():
+    assert main_module.chosen_rotation(None, None, None) is None
+
+
+def test_an_auto_in_device_json_falls_through_to_the_setup_file():
+    # parse_rotate turns "auto" into None, so device.json saying "auto" is
+    # indistinguishable from device.json saying nothing -- and in both cases
+    # the file is the next thing that has an opinion. Stated here rather than
+    # left to be rediscovered.
+    assert main_module.chosen_rotation(None, 180, None) == 180
+
+
+def test_a_bad_environment_override_is_not_swallowed():
+    # Unlike the card's file, SCOREBOARD_ROTATE is typed by a developer at a
+    # shell who wants to be told they got it wrong.
+    with pytest.raises(ValueError):
+        main_module.chosen_rotation(None, None, "sideways")
+
+
+def test_a_panel_with_only_a_setup_file_is_turned_the_way_it_asks(tmp_path, monkeypatch):
+    # End to end through main(): no device.json, a setup file on the boot
+    # partition, and the placement the display actually gets.
+    from scoreboard import netcfg
+
+    boot = tmp_path / "scoreboard-setup.txt"
+    boot.write_text("owner=friend@example.com\nrotate=270\n")
+    monkeypatch.setattr(netcfg, "BOOT_FILE", boot)
+    monkeypatch.setattr(netcfg, "LEGACY_BOOT_FILE", tmp_path / "nothing.txt")
+    monkeypatch.setenv("SCOREBOARD_CONFIG_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("SDL_VIDEODRIVER", "dummy")
+    monkeypatch.setenv("SCOREBOARD_WINDOW", "400x1280")  # a bar panel's own shape
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("SCOREBOARD_FIXTURE", raising=False)
+    monkeypatch.delenv("SCOREBOARD_ROTATE", raising=False)
+    monkeypatch.setattr(main_module, "enrollment_thread", lambda *a, **k: None)
+
+    seen = []
+    real_placement = main_module.placement
+    monkeypatch.setattr(main_module, "placement",
+                        lambda frame, display, rotate: seen.append(rotate)
+                        or real_placement(frame, display, rotate))
+
+    posted = {"done": False}
+
+    def fake_get(*a, **k):
+        if posted["done"]:
+            return []
+        posted["done"] = True
+        return [pygame.event.Event(pygame.QUIT)]
+
+    monkeypatch.setattr(pygame.event, "get", fake_get)
+
+    main_module.main()
+
+    assert seen == [270], "the panel ignored the rotation on its own boot partition"
