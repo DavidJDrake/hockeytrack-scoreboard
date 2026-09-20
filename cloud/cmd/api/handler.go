@@ -5,16 +5,18 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"time"
 
 	"github.com/aws/aws-lambda-go/events"
 
+	"hockeytrack-scoreboard/internal/accounts"
 	"hockeytrack-scoreboard/internal/devices"
 	"hockeytrack-scoreboard/internal/idtoken"
 	"hockeytrack-scoreboard/internal/iotpub"
+	"hockeytrack-scoreboard/internal/panelconfig"
 	"hockeytrack-scoreboard/internal/reduce"
+	"hockeytrack-scoreboard/internal/settings"
 )
 
 // Handler serves the admin API. Every device-scoped route resolves the
@@ -28,6 +30,9 @@ type Handler struct {
 	// keeps. Nil means the list goes without.
 	Game   func(ctx context.Context, gameID int64) (reduce.State, bool, error)
 	Tokens idtoken.Tokens
+	// Accounts holds each account's default settings. Nil means nobody has
+	// any, and the route that would save them says so.
+	Accounts accounts.Store
 	// Now is the clock stamped onto a config message as chosenAt. Injected
 	// so a test can move it; nil means time.Now.
 	Now func() time.Time
@@ -50,6 +55,11 @@ type deviceView struct {
 	// when the lookup failed: the site says less, it does not say nothing.
 	ChosenAt int64     `json:"chosenAt,omitempty"`
 	Game     *gameView `json:"game,omitempty"`
+	// Display is what was set on the panel, what it runs on once the
+	// account's defaults are laid under that, and which layer each value
+	// came from. Absent when the account's defaults could not be read: the
+	// list then says less rather than something untrue.
+	Display *settings.View `json:"display,omitempty"`
 }
 
 // gameView is the little of a reducer State the site's sentence is made of.
@@ -83,8 +93,39 @@ func viewOf(s reduce.State) *gameView {
 	return v
 }
 
-func (h *Handler) view(ctx context.Context, d devices.Device) deviceView {
+// defaults reads the account's default settings. With no accounts store
+// wired (an older deployment) an account simply has none.
+func (h *Handler) defaults(ctx context.Context, sub string) (settings.Settings, error) {
+	if h.Accounts == nil {
+		return settings.Settings{}, nil
+	}
+	return h.Accounts.Defaults(ctx, sub)
+}
+
+// send publishes a panel's whole config document, retained. Every publish to
+// a panel goes through here and through panelconfig.Compose: a retained
+// message replaces the document, so one that carried only the game would
+// wipe the settings from the panel's next reconnect, and one that carried
+// only the settings would wipe the game.
+func (h *Handler) send(ctx context.Context, d devices.Device, account settings.Settings) error {
+	resolved, _ := settings.Resolve(account, d.Display)
+	payload, err := panelconfig.Compose(d.GameID, d.ChosenAt, resolved)
+	if err != nil {
+		return err
+	}
+	return h.Pub.Publish(ctx, panelconfig.Topic(d.ThingName), payload, true)
+}
+
+// maxSettingsBody is far more than any settings document needs. Decode is
+// strict about keys; this is strict about size before it parses anything.
+const maxSettingsBody = 4 << 10
+
+func (h *Handler) view(ctx context.Context, d devices.Device, account *settings.Settings) deviceView {
 	v := deviceView{ThingName: d.ThingName, Name: d.Name, GameID: d.GameID, ChosenAt: d.ChosenAt}
+	if account != nil {
+		view := settings.ViewOf(*account, d.Display)
+		v.Display = &view
+	}
 	if h.Game == nil || d.GameID == 0 {
 		return v
 	}
@@ -165,11 +206,99 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 		if err != nil {
 			return fail(500, "list failed")
 		}
+		// One read of the account's defaults for the whole list. If it
+		// fails the panels are still listed, without resolved settings: the
+		// list is the page, and it says less rather than something untrue.
+		var account *settings.Settings
+		if a, err := h.defaults(ctx, sub); err == nil {
+			account = &a
+		} else {
+			slog.Warn("defaults lookup failed; listing panels without resolved settings", "err", err)
+		}
 		out := make([]deviceView, 0, len(devs))
 		for _, d := range devs {
-			out = append(out, h.view(ctx, d))
+			out = append(out, h.view(ctx, d, account))
 		}
 		return respond(200, out)
+
+	case "GET /api/settings":
+		a, err := h.defaults(ctx, sub)
+		if err != nil {
+			return fail(500, "lookup failed")
+		}
+		return respond(200, struct {
+			Defaults settings.Settings `json:"defaults"`
+			BuiltIn  settings.Wire     `json:"builtIn"`
+		}{a, settings.BuiltIn.Wire()})
+
+	case "PUT /api/settings":
+		if h.Accounts == nil {
+			return fail(500, "settings are not configured")
+		}
+		if len(rawBody) > maxSettingsBody {
+			return fail(400, "invalid settings")
+		}
+		a, err := settings.Decode(rawBody)
+		if err != nil {
+			return fail(400, "invalid settings")
+		}
+		devs, err := h.Store.ListByOwner(ctx, sub)
+		if err != nil {
+			return fail(500, "lookup failed")
+		}
+		// Saved first, unlike a single panel's change. This one fans out,
+		// and a fan-out can half fail; with the defaults stored, saving
+		// again -- or any later publish to a panel that was missed --
+		// converges, because every publish is the whole document composed
+		// from what is stored. The response says which panels were missed.
+		if err := h.Accounts.SetDefaults(ctx, sub, a); err != nil {
+			return fail(500, "save failed")
+		}
+		notSent := []string{}
+		for _, d := range devs {
+			if err := h.send(ctx, d, a); err != nil {
+				slog.Warn("settings publish failed", "thing", d.ThingName, "err", err)
+				notSent = append(notSent, d.ThingName)
+			}
+		}
+		slog.Info("account defaults saved", "sub", sub, "panels", len(devs), "notSent", len(notSent))
+		return respond(200, struct {
+			Defaults settings.Settings `json:"defaults"`
+			NotSent  []string          `json:"notSent"`
+		}{a, notSent})
+
+	case "PUT /api/devices/{thing}/display":
+		if len(rawBody) > maxSettingsBody {
+			return fail(400, "invalid settings")
+		}
+		overrides, err := settings.Decode(rawBody)
+		if err != nil {
+			return fail(400, "invalid settings")
+		}
+		d, ok, err := h.owned(ctx, thing, sub)
+		if err != nil {
+			return fail(500, "lookup failed")
+		}
+		if !ok {
+			return fail(404, "no such device")
+		}
+		// Without the account's defaults the document would carry built-in
+		// values where the owner's belong. Nothing is sent that was built
+		// on settings nobody could read.
+		account, err := h.defaults(ctx, sub)
+		if err != nil {
+			return fail(500, "lookup failed")
+		}
+		d.Display = overrides
+		// Publish before persisting, for the reason the game route gives.
+		if err := h.send(ctx, d, account); err != nil {
+			return fail(502, "publish failed")
+		}
+		if err := h.Store.Update(ctx, d); err != nil {
+			return fail(500, "save failed")
+		}
+		slog.Info("panel settings saved", "sub", sub, "thing", d.ThingName)
+		return respond(200, h.view(ctx, d, &account))
 
 	case "PUT /api/devices/{thing}/game":
 		var body struct {
@@ -185,10 +314,6 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 		if !ok {
 			return fail(404, "no such device")
 		}
-		// gameId stays a top-level number: panels in the field (v0.1.3)
-		// read only that key and ignore the rest, so adding to this
-		// document must never move it.
-		//
 		// chosenAt is when the owner pressed the button, on the server's
 		// clock. It exists because the panel cannot otherwise tell a press
 		// from a repetition: this topic is retained, and a panel that was
@@ -202,18 +327,13 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 		// and they compare them for DIFFERENCE, not for order, so this
 		// value need not be monotonic across deployments, execution
 		// environments or a region failover. It only has to change when
-		// the owner presses the button.
-		// One stamp, for the panel and for the record: the site runs the
-		// panel's rule from the stored one, so they must be the same moment.
-		chosenAt := h.now().UnixMilli()
-		payload, err := json.Marshal(struct {
-			GameID   int64 `json:"gameId"`
-			ChosenAt int64 `json:"chosenAt"`
-		}{body.GameID, chosenAt})
+		// the owner presses the button -- and ONLY then, which is why it is
+		// stored: a publish that is not a choice re-sends it unchanged.
+		account, err := h.defaults(ctx, sub)
 		if err != nil {
-			return fail(500, "encode failed")
+			return fail(500, "lookup failed")
 		}
-		topic := fmt.Sprintf("scoreboard/%s/config", d.ThingName)
+		d.GameID, d.ChosenAt = body.GameID, h.now().UnixMilli()
 		// Publish before persisting. If Update then fails, the panel is
 		// already showing the new game while the stored record still shows
 		// the old one. The reverse order trades that for a worse mismatch —
@@ -221,14 +341,13 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 		// panel is the thing the owner is actually looking at. The retained
 		// publish is idempotent, so a retry (or the next successful change)
 		// converges the record either way.
-		if err := h.Pub.Publish(ctx, topic, payload, true); err != nil {
+		if err := h.send(ctx, d, account); err != nil {
 			return fail(502, "publish failed")
 		}
-		d.GameID, d.ChosenAt = body.GameID, chosenAt
 		if err := h.Store.Update(ctx, d); err != nil {
 			return fail(500, "save failed")
 		}
-		return respond(200, h.view(ctx, d))
+		return respond(200, h.view(ctx, d, &account))
 
 	case "PATCH /api/devices/{thing}":
 		var body struct {
@@ -248,7 +367,7 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 		if err := h.Store.Update(ctx, d); err != nil {
 			return fail(500, "save failed")
 		}
-		return respond(200, h.view(ctx, d))
+		return respond(200, h.view(ctx, d, nil))
 
 	case "DELETE /api/devices/{thing}":
 		_, ok, err := h.owned(ctx, thing, sub)
