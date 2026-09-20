@@ -1871,3 +1871,36 @@ hardening (`ProtectKernelTunables`, the device allowlist) leaves the
 ioctl reachable; and how long the panel takes to come back, since anything
 over a second or two makes "comes back by itself" feel broken. Until that is
 answered, nothing in the software tries it.
+
+## The live clock
+
+**2026-09-19 — first live game on a real panel (v0.1.5, Pi 4): the clock
+counted down five seconds and jumped back, over and over.** Found by the
+owner watching VAN at SEA, not by a test: every test fed the reducer clock
+samples that were different from each other.
+
+**Measured.** Sampling the NHL's play-by-play every 5 s for five minutes:
+every clock value arrived exactly four times in a row. The feed is cached for
+about 20 seconds. In play it read 1191 for 20 s, then 1169. The reducer
+stamped each of the four copies `asOf = now`, and a panel computes
+`seconds - (now - asOf)`, so the count restarted from the same number every
+five seconds.
+
+**Fix (reducer only, no image change).** A heartbeat that repeats the previous
+running sample keeps that sample's `asOf`, for at most 60 s. `seenAt` was
+added so the document still changes on every heartbeat, which is how a panel
+judges freshness.
+
+**Result: PASS.** Applied during the third period of the same game. The owner
+reports the clock ticking smoothly with corrections of a second or two.
+
+**Not fixed.** An intermission countdown moves in 20-second steps, because a
+panel only counts between samples while the clock is running, and marking an
+intermission as running would make it tick penalties down during the break.
+That needs a panel change: count the intermission clock, leave penalties
+alone.
+
+**A wrong turn, recorded.** Partway through, the stored state showed the clock
+falling while `running` was false, and it was first read as the feed's flag
+lying. It was the intermission countdown; the first query had not printed
+that field. Nothing was changed on the strength of the misreading.
