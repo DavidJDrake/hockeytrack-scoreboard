@@ -1,6 +1,7 @@
 """Service entry point: MQTT in, frames out, 10 Hz."""
 from __future__ import annotations
 
+import json
 import logging
 import os
 import queue
@@ -188,6 +189,108 @@ class Display:
     # without the panel still showing last night's result over breakfast.
     final_hold_s: int = 3 * 60 * 60
     sleep: Sleep | None = None
+
+
+# The bounds the site is held to, held again here (see parse_display).
+COUNTDOWN_LEAD_MAX_MIN = 48 * 60
+FINAL_HOLD_MAX_MIN = 24 * 60
+DISPLAY_FORMAT = 1
+
+
+def _whole_minutes(value, ceiling: int) -> int | None:
+    # bool is an int in Python, and True is not a number of minutes.
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if 0 <= value <= ceiling else None
+
+
+def _sleep_from(value) -> Sleep | None:
+    if not isinstance(value, dict):
+        return None
+    start, end, zone = value.get("start"), value.get("end"), value.get("zone")
+    if not all(isinstance(x, str) for x in (start, end, zone)):
+        return None
+    a, b = _minutes(start), _minutes(end)
+    if a is None or b is None or a == b:
+        return None
+    try:
+        ZoneInfo(zone)
+    except (ZoneInfoNotFoundError, ValueError, TypeError, OSError):
+        # ZoneInfo refuses a key that tries to leave its directory with
+        # ValueError; an empty key is a directory, which is OSError.
+        return None
+    return Sleep(start, end, zone)
+
+
+def parse_display(payload) -> Display:
+    """The owner's display settings out of a config message. Never raises.
+
+    This arrives from the network, so it is checked here to the same bounds
+    the API checks -- the panel does not take the API's word for it. What is
+    wrong falls back **one setting at a time**: a countdown lead nobody can
+    read does not cost the owner their sleep hours. No ``display`` key at all
+    is the ordinary case (an API that does not send one yet) and means the
+    built-in settings.
+
+    A sleep window that is wrong in any way is no window. Not "sleep in UTC",
+    not half a window: a panel that stays on can be read by somebody standing
+    in front of it, and one that is dark at the wrong hours, with no input
+    device, cannot even say why.
+
+    A format version this build does not know means the built-in settings
+    rather than a best guess, because a later format may mean something else
+    by the same key.
+
+    Nothing here is written to the card. The document is retained, so it is
+    handed over again on every connect; a panel with no link runs on the
+    built-in settings until it has one.
+    """
+    default = Display()
+    try:
+        d = json.loads(payload)
+    except (ValueError, TypeError):
+        return default
+    block = d.get("display") if isinstance(d, dict) else None
+    if not isinstance(block, dict):
+        return default
+    version = block.get("v")
+    if isinstance(version, bool) or version != DISPLAY_FORMAT:
+        _complain_once(f"display:v={version!r}", "display settings in a format this build does not know; using the built-in ones")
+        return default
+
+    lead = _whole_minutes(block.get("countdownLeadMin"), COUNTDOWN_LEAD_MAX_MIN) if "countdownLeadMin" in block else None
+    hold = _whole_minutes(block.get("finalHoldMin"), FINAL_HOLD_MAX_MIN) if "finalHoldMin" in block else None
+    if "countdownLeadMin" in block and lead is None:
+        _complain_once("display:lead", "countdown lead is not a whole number of minutes in range; using the built-in one")
+    if "finalHoldMin" in block and hold is None:
+        _complain_once("display:hold", "final-score hold is not a whole number of minutes in range; using the built-in one")
+    sleep = None
+    if block.get("sleep") is not None:
+        sleep = _sleep_from(block["sleep"])
+        if sleep is None:
+            _complain_once("display:sleep", "sleep hours are not HH:MM to HH:MM in a zone this panel knows; no sleep hours")
+    return Display(
+        countdown_lead_s=default.countdown_lead_s if lead is None else lead * 60,
+        final_hold_s=default.final_hold_s if hold is None else hold * 60,
+        sleep=sleep,
+    )
+
+
+def display_after(payload, current: Display) -> Display:
+    """The settings in force once a config message has arrived.
+
+    A message that is a JSON object decides them, even by saying nothing: the
+    document is the whole truth each time, so one with no ``display`` key
+    means the owner has gone back to the built-in settings. A message nobody
+    can read at all decides nothing, and the settings in force stay in force
+    -- the same rule the game half follows, for the same reason: garbage on
+    the topic must not change what the panel is doing.
+    """
+    try:
+        readable = isinstance(json.loads(payload), dict)
+    except (ValueError, TypeError):
+        readable = False
+    return parse_display(payload) if readable else current
 
 
 class Presentation(NamedTuple):
@@ -676,6 +779,14 @@ def config_action(game_id: int | None, following: int | None, retain: bool = Fal
     if game_id != following:
         return SELECT
     if not retain:
+        # A live publish of the game already followed is a press -- unless it
+        # carries the stamp this panel has already acted on. That is the site
+        # saving settings: the config document is one retained message, so
+        # changing sleep hours re-sends the game and its chosenAt untouched.
+        # Read as a press it re-armed the hold and lit the panel for five
+        # minutes, which is a strange thing for "sleep from 23:00" to do.
+        if chosen_at is not None and chosen_at == last_chosen_at:
+            return IGNORE
         return REARM
     # A replay. Ordinarily it says nothing new -- but if it carries a
     # chosenAt this panel has not acted on, it is the press that happened
@@ -970,6 +1081,15 @@ def main() -> None:
                         log.warning("ignoring an unreadable state document: %s: %s",
                                     type(e).__name__, e)
                 elif kind == "config":
+                    # The settings ride in the same document as the game and
+                    # are read whatever becomes of the game half: a message
+                    # that changes only the sleep hours is IGNOREd below as a
+                    # choice and must still be obeyed as settings.
+                    new_display = display_after(item[1], display)
+                    if new_display != display:
+                        log.info("display settings changed: lead %ss, hold %ss, sleep %s",
+                                 new_display.countdown_lead_s, new_display.final_hold_s, new_display.sleep)
+                        display = new_display
                     gid = parse_config(item[1])
                     chosen_at = parse_chosen_at(item[1])
                     action = config_action(gid, following, retain=item[2],
@@ -989,7 +1109,11 @@ def main() -> None:
                     if gid is not None and chosen_at is not None:
                         last_chosen_at = chosen_at
                     if action == IGNORE:
-                        log.warning("ignoring unreadable config message")
+                        # Unreadable, a replay that says nothing new, or the
+                        # site saving settings. Only the first is worth a
+                        # line in the journal.
+                        if gid is None:
+                            log.warning("ignoring unreadable config message")
                     elif action == SELECT:
                         log.info("admin site selected game %s", gid)
                         select(gid)
