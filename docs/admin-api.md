@@ -65,9 +65,28 @@ The caller's own devices.
 
 - **200** — a JSON array, one entry per device the caller owns:
   ```json
-  [{"thingName": "scoreboard-01", "name": "Living room", "gameId": 2026020001}]
+  [{"thingName": "scoreboard-01", "name": "Living room", "gameId": 2026020001,
+    "chosenAt": 1789871240471,
+    "game": {"state": "LIVE", "start": "2026-10-01T23:00:00Z",
+             "away": {"abbrev": "MTL", "score": 2}, "home": {"abbrev": "TOR", "score": 3},
+             "period": {"label": "2"}, "lastSeenAt": 1789930443000}}]
   ```
   An owner with no devices gets `[]`, not an error.
+
+  `chosenAt` is when the owner last chose the game, in milliseconds on the
+  server's clock: the same stamp that was sent to the panel. `game` is the
+  little of the reducer's state the site needs to say what the panel should be
+  showing. Both are there so the site can run the panel's own rule
+  (`site/assets/showing.js`, held to `main.presentation` by
+  `testdata/presentation-vectors.json`); neither is word from the panel, which
+  cannot publish anything.
+
+  `game` is **absent** when the panel follows nothing, when the reducer has
+  not seen the game yet (it has not started; the site falls back on
+  `/api/games`), or when the games table could not be read. That last case is
+  logged and the list is still returned: a games table that is down does not
+  take the panels off the page. The API's role may `GetItem` on that table and
+  nothing else.
 - **500** `{"error": "list failed"}` — the store query itself failed.
 
 ### `POST /api/devices/claim`

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
-import { canResend, emailVerified, followingLabel, gameChoices, gameLabel, gameType, messageFor, panelTitle } from "../assets/view.js";
+import { canResend, emailVerified, gameChoices, gameLabel, gameType, messageFor, panelTitle } from "../assets/view.js";
 
 const games = [
   { gameId: 1, away: "TOR", home: "MTL", start: "2026-10-08T23:00:00Z", state: "FUT" },
@@ -143,16 +143,4 @@ test("the picker shows the same rows", () => {
     "TOR at MTL · 7:00 PM · Centre Bell · Pre",
   ]);
   assert.equal(choices[0].selected, true);
-});
-
-test("what a panel follows, in words", () => {
-  const opts = { timeZone: "America/Toronto", locale: "en-US" };
-  assert.equal(followingLabel({ gameId: 2026010006 }, night, false, opts), "MTL at TOR · 7:00 PM · Scotiabank Arena · Pre");
-  assert.equal(followingLabel({}, night, false, opts), "No game chosen");
-  assert.equal(followingLabel({ gameId: 0 }, night, false, opts), "No game chosen");
-  // Yesterday's choice: the panel still has it, today's list does not.
-  assert.equal(followingLabel({ gameId: 2026010001 }, night, false, opts), "A game that is not on today's list");
-  // Not knowing is said as not knowing.
-  assert.equal(followingLabel({ gameId: 2026010006 }, [], true, opts), "Today's games could not be loaded");
-  assert.equal(followingLabel({}, [], true, opts), "No game chosen", "nothing chosen needs no list to say so");
 });

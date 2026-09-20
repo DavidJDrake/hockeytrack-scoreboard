@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/aws/aws-lambda-go/events"
@@ -13,15 +14,19 @@ import (
 	"hockeytrack-scoreboard/internal/devices"
 	"hockeytrack-scoreboard/internal/idtoken"
 	"hockeytrack-scoreboard/internal/iotpub"
+	"hockeytrack-scoreboard/internal/reduce"
 )
 
 // Handler serves the admin API. Every device-scoped route resolves the
 // device by thing name, then checks the caller owns it; a caller who does
 // not own it gets 404, so the API never confirms a thing exists.
 type Handler struct {
-	Store  devices.Store
-	Pub    iotpub.Publisher
-	Games  func(ctx context.Context) ([]byte, error)
+	Store devices.Store
+	Pub   iotpub.Publisher
+	Games func(ctx context.Context) ([]byte, error)
+	// Game reads one game's state, read-only, from the table the reducer
+	// keeps. Nil means the list goes without.
+	Game   func(ctx context.Context, gameID int64) (reduce.State, bool, error)
 	Tokens idtoken.Tokens
 	// Now is the clock stamped onto a config message as chosenAt. Injected
 	// so a test can move it; nil means time.Now.
@@ -39,6 +44,61 @@ type deviceView struct {
 	ThingName string `json:"thingName"`
 	Name      string `json:"name"`
 	GameID    int64  `json:"gameId"`
+	// ChosenAt and Game are what the site needs to run the panel's own rule
+	// and say what the panel should be showing. Game is absent when the
+	// panel follows nothing, when the reducer has not seen the game yet, or
+	// when the lookup failed: the site says less, it does not say nothing.
+	ChosenAt int64     `json:"chosenAt,omitempty"`
+	Game     *gameView `json:"game,omitempty"`
+}
+
+// gameView is the little of a reducer State the site's sentence is made of.
+// Named fields, copied one by one: a State also carries rosters and penalty
+// bookkeeping, and none of that has any business in an owner's panel list.
+type gameView struct {
+	State  string   `json:"state"`
+	Start  string   `json:"start,omitempty"`
+	Away   teamView `json:"away"`
+	Home   teamView `json:"home"`
+	Period struct {
+		Label string `json:"label"`
+	} `json:"period"`
+	Intermission bool `json:"intermission,omitempty"`
+	// LastSeenAt is the later of the reducer's clock anchor and its last
+	// heartbeat, in milliseconds. Heartbeats stop when a game ends, so for a
+	// final this is about when it ended.
+	LastSeenAt int64 `json:"lastSeenAt,omitempty"`
+}
+
+type teamView struct {
+	Abbrev string `json:"abbrev"`
+	Score  int    `json:"score"`
+}
+
+func viewOf(s reduce.State) *gameView {
+	v := &gameView{State: s.GameState, Start: s.Start,
+		Away: teamView{s.Away.Abbrev, s.Away.Score}, Home: teamView{s.Home.Abbrev, s.Home.Score},
+		Intermission: s.Clock.Intermission, LastSeenAt: max(s.AsOf, s.SeenAt)}
+	v.Period.Label = s.Period.Label
+	return v
+}
+
+func (h *Handler) view(ctx context.Context, d devices.Device) deviceView {
+	v := deviceView{ThingName: d.ThingName, Name: d.Name, GameID: d.GameID, ChosenAt: d.ChosenAt}
+	if h.Game == nil || d.GameID == 0 {
+		return v
+	}
+	s, found, err := h.Game(ctx, d.GameID)
+	if err != nil {
+		// The list is the page. A games table that is down must not take
+		// the panels off it.
+		slog.Warn("game lookup failed; listing the panel without it", "gameId", d.GameID, "err", err)
+		return v
+	}
+	if found {
+		v.Game = viewOf(s)
+	}
+	return v
 }
 
 func respond(status int, body any) (events.APIGatewayV2HTTPResponse, error) {
@@ -107,7 +167,7 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 		}
 		out := make([]deviceView, 0, len(devs))
 		for _, d := range devs {
-			out = append(out, deviceView{ThingName: d.ThingName, Name: d.Name, GameID: d.GameID})
+			out = append(out, h.view(ctx, d))
 		}
 		return respond(200, out)
 
@@ -143,10 +203,13 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 		// value need not be monotonic across deployments, execution
 		// environments or a region failover. It only has to change when
 		// the owner presses the button.
+		// One stamp, for the panel and for the record: the site runs the
+		// panel's rule from the stored one, so they must be the same moment.
+		chosenAt := h.now().UnixMilli()
 		payload, err := json.Marshal(struct {
 			GameID   int64 `json:"gameId"`
 			ChosenAt int64 `json:"chosenAt"`
-		}{body.GameID, h.now().UnixMilli()})
+		}{body.GameID, chosenAt})
 		if err != nil {
 			return fail(500, "encode failed")
 		}
@@ -161,11 +224,11 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 		if err := h.Pub.Publish(ctx, topic, payload, true); err != nil {
 			return fail(502, "publish failed")
 		}
-		d.GameID = body.GameID
+		d.GameID, d.ChosenAt = body.GameID, chosenAt
 		if err := h.Store.Update(ctx, d); err != nil {
 			return fail(500, "save failed")
 		}
-		return respond(200, deviceView{ThingName: d.ThingName, Name: d.Name, GameID: d.GameID})
+		return respond(200, h.view(ctx, d))
 
 	case "PATCH /api/devices/{thing}":
 		var body struct {
@@ -185,7 +248,7 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 		if err := h.Store.Update(ctx, d); err != nil {
 			return fail(500, "save failed")
 		}
-		return respond(200, deviceView{ThingName: d.ThingName, Name: d.Name, GameID: d.GameID})
+		return respond(200, h.view(ctx, d))
 
 	case "DELETE /api/devices/{thing}":
 		_, ok, err := h.owned(ctx, thing, sub)

@@ -44,3 +44,4 @@ h1:focus-visible { outline: 2px solid var(--blue); outline-offset: 4px; }
 h2.section { font-family: var(--display); font-weight: 700; font-size: 24px; margin: 0 0 12px; }
 .panel .showing { margin: 0; font-weight: 500; }
 .panel p { margin: 0; max-width: 60ch; }
+.panel .showing .label { display: block; font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }

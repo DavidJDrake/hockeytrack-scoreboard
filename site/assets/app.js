@@ -132,19 +132,22 @@ async function showSignedIn() {
 
 // Returns true when the panel list loaded, so a caller knows whether its own
 // success message still describes what is on screen.
-async function refresh() {
-  setStatus("Loading your panels…");
+async function refresh({ quiet = false } = {}) {
+  if (!quiet) setStatus("Loading your panels…");
   const [devices, games] = await Promise.all([
     api.listDevices().catch((err) => ({ err })),
     api.listGames().then((doc) => (Array.isArray(doc?.games) ? doc.games : [])).catch((err) => ({ err })),
   ]);
   if (devices.err) {
-    reportFailure("list", devices.err);
+    // A quiet refresh that fails leaves the page as it was: what is on
+    // screen is a minute old, not wrong, and the next one may work.
+    if (!quiet) reportFailure("list", devices.err);
     return false;
   }
   const gamesFailed = Boolean(games.err);
   loaded = { devices, games: gamesFailed ? [] : games, gamesFailed, ready: true };
   render();
+  if (quiet) return true;
   if (gamesFailed) reportFailure("games", games.err);
   else setStatus("");
   return true;
@@ -190,7 +193,7 @@ function render({ moved = false } = {}) {
 
   const { devices, games, gamesFailed, ready } = loaded;
   if (route.name === "home") {
-    $("home-panels").replaceChildren(...devices.map((d) => homeRow(el, d, games, gamesFailed)));
+    $("home-panels").replaceChildren(...devices.map((d) => homeRow(el, d, games, gamesFailed, Date.now())));
     $("home-panels").hidden = devices.length === 0;
     $("home-empty").hidden = !ready || devices.length > 0;
   } else if (route.name === "panels") {
@@ -338,6 +341,19 @@ async function start() {
   $("sign-in").addEventListener("click", () => signIn());
   $("sign-out").addEventListener("click", () => signOut());
   window.addEventListener("hashchange", () => render({ moved: true }));
+  // "Should be showing" is a statement about now, and now moves: a countdown
+  // opens, a goal is scored, a final comes down. Once a minute, while Home is
+  // open and nothing is being done, fetch again quietly and redraw.
+  //
+  // Not once the token has expired. A request then would be a 401, and a 401
+  // starts a sign-in redirect -- so a tab left open on Home would navigate by
+  // itself every hour. It redraws from what it has instead, and the clock
+  // still moves the sentence; the next thing the person does signs them in.
+  setInterval(() => {
+    if (!session || busy || document.hidden || parseRoute(location.hash).name !== "home") return;
+    if (session.expired()) render();
+    else refresh({ quiet: true });
+  }, 60_000);
   wireClaim();
 
   // Capture the URL and strip the callback params before anything that can

@@ -1,6 +1,9 @@
 package main
 
 import (
+	"errors"
+	"hockeytrack-scoreboard/internal/reduce"
+
 	"bytes"
 	"context"
 	"encoding/json"
@@ -319,5 +322,111 @@ func TestUnavailableSigningKeysAre503(t *testing.T) {
 	res, _ := h.Handle(context.Background(), req("GET", "GET /api/devices", "sub-a", "", nil))
 	if res.StatusCode != 503 || !strings.Contains(res.Body, "sign-in check unavailable") {
 		t.Errorf("got %d %s, want 503 sign-in check unavailable", res.StatusCode, res.Body)
+	}
+}
+
+// The home page says what a panel should be showing. It can only say that if
+// the list carries what the panel's own rule needs: when the owner last
+// chose, and the game's state.
+func TestListCarriesWhenTheGameWasChosenAndWhatStateItIsIn(t *testing.T) {
+	h, st, _ := handlerWith(t)
+	ctx := context.Background()
+	_ = st.Claim(ctx, "scoreboard-7qf2", "sub-a")
+	h.Game = func(_ context.Context, id int64) (reduce.State, bool, error) {
+		if id != 2026020001 {
+			return reduce.State{}, false, nil
+		}
+		return reduce.State{GameID: id, GameState: "FINAL", Start: "2026-10-01T23:00:00Z", AsOf: 1000, SeenAt: 2000,
+			Away: reduce.Team{Abbrev: "MTL", Score: 1}, Home: reduce.Team{Abbrev: "TOR", Score: 4},
+			Period: reduce.Period{Number: 3, Label: "3"}}, true, nil
+	}
+	if res, _ := h.Handle(ctx, req("PUT", "PUT /api/devices/{thing}/game", "sub-a", `{"gameId":2026020001}`,
+		map[string]string{"thing": "scoreboard-7qf2"})); res.StatusCode != 200 {
+		t.Fatalf("set game: %d", res.StatusCode)
+	}
+	res, _ := h.Handle(ctx, req("GET", "GET /api/devices", "sub-a", "", nil))
+	var got []struct {
+		ChosenAt int64 `json:"chosenAt"`
+		Game     *struct {
+			State      string `json:"state"`
+			Start      string `json:"start"`
+			LastSeenAt int64  `json:"lastSeenAt"`
+			Away       struct {
+				Abbrev string `json:"abbrev"`
+				Score  int    `json:"score"`
+			} `json:"away"`
+			Period struct {
+				Label string `json:"label"`
+			} `json:"period"`
+		} `json:"game"`
+	}
+	if err := json.Unmarshal([]byte(res.Body), &got); err != nil || len(got) != 1 {
+		t.Fatalf("body %s: %v", res.Body, err)
+	}
+	if got[0].ChosenAt != clock.UnixMilli() {
+		t.Errorf("chosenAt = %d, want the moment the game was set (%d)", got[0].ChosenAt, clock.UnixMilli())
+	}
+	g := got[0].Game
+	if g == nil || g.State != "FINAL" || g.Start != "2026-10-01T23:00:00Z" || g.Away.Abbrev != "MTL" || g.Away.Score != 1 || g.Period.Label != "3" {
+		t.Fatalf("game = %+v", g)
+	}
+	if g.LastSeenAt != 2000 {
+		t.Errorf("lastSeenAt = %d, want the later of asOf and seenAt (2000)", g.LastSeenAt)
+	}
+	// Nothing the reducer keeps for itself leaks: rosters, penalties' bookkeeping.
+	if strings.Contains(res.Body, "roster") || strings.Contains(res.Body, "penalt") {
+		t.Errorf("list leaks reducer internals: %s", res.Body)
+	}
+}
+
+func TestListSaysNothingAboutAGameItCannotFind(t *testing.T) {
+	h, st, _ := handlerWith(t)
+	ctx := context.Background()
+	_ = st.Claim(ctx, "scoreboard-7qf2", "sub-a")
+	lookups := 0
+	h.Game = func(context.Context, int64) (reduce.State, bool, error) { lookups++; return reduce.State{}, false, nil }
+
+	res, _ := h.Handle(ctx, req("GET", "GET /api/devices", "sub-a", "", nil))
+	if lookups != 0 {
+		t.Errorf("looked up a game for a panel following none")
+	}
+	if strings.Contains(res.Body, `"game"`) {
+		t.Errorf("a panel following nothing has a game: %s", res.Body)
+	}
+
+	// A game the reducer has not seen yet (it has not started): the list
+	// still answers, without one. The site falls back on today's schedule.
+	_, _ = h.Handle(ctx, req("PUT", "PUT /api/devices/{thing}/game", "sub-a", `{"gameId":2026020009}`, map[string]string{"thing": "scoreboard-7qf2"}))
+	res, _ = h.Handle(ctx, req("GET", "GET /api/devices", "sub-a", "", nil))
+	if res.StatusCode != 200 || strings.Contains(res.Body, `"game"`) {
+		t.Errorf("status %d body %s", res.StatusCode, res.Body)
+	}
+}
+
+// The list is the page. A games table that is down must not take the panels
+// off it; the site says less, it does not say nothing.
+func TestListSurvivesTheGamesTableBeingDown(t *testing.T) {
+	h, st, _ := handlerWith(t)
+	ctx := context.Background()
+	_ = st.Claim(ctx, "scoreboard-7qf2", "sub-a")
+	_, _ = h.Handle(ctx, req("PUT", "PUT /api/devices/{thing}/game", "sub-a", `{"gameId":2026020001}`, map[string]string{"thing": "scoreboard-7qf2"}))
+	h.Game = func(context.Context, int64) (reduce.State, bool, error) {
+		return reduce.State{}, false, errors.New("throttled")
+	}
+	res, _ := h.Handle(ctx, req("GET", "GET /api/devices", "sub-a", "", nil))
+	if res.StatusCode != 200 || !strings.Contains(res.Body, "scoreboard-7qf2") || strings.Contains(res.Body, `"game"`) {
+		t.Errorf("status %d body %s", res.StatusCode, res.Body)
+	}
+}
+
+func TestReleasingAPanelForgetsWhenItsGameWasChosen(t *testing.T) {
+	h, st, _ := handlerWith(t)
+	ctx := context.Background()
+	_ = st.Claim(ctx, "scoreboard-7qf2", "sub-a")
+	_, _ = h.Handle(ctx, req("PUT", "PUT /api/devices/{thing}/game", "sub-a", `{"gameId":2026020001}`, map[string]string{"thing": "scoreboard-7qf2"}))
+	_ = st.Unbind(ctx, "scoreboard-7qf2", "sub-a")
+	d, _, _ := st.Get(ctx, "scoreboard-7qf2")
+	if d.ChosenAt != 0 || d.GameID != 0 {
+		t.Errorf("the next owner inherits %+v", d)
 	}
 }
