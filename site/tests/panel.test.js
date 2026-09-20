@@ -138,25 +138,32 @@ test("nothing on the page is called Remove any more", () => {
 
 const link = (row) => every(row).find((n) => n.tagName === "a");
 
-test("a home row is the panel, what it follows, and a way to manage it", () => {
-  const row = homeRow(makeEl(fakeDoc()), following, games, false);
-  const text = every(row).map((n) => n.text).join(" | ");
-  assert.match(text, /Den/);
-  assert.match(text, /TBL at NYR/);
+const NOON = Date.parse("2026-10-01T16:00:00Z");
+const opts = { timeZone: "America/New_York", locale: "en-US" };
+const textOf = (row) => every(row).map((n) => n.text).join(" | ");
+
+test("a home row is the panel, what it should be showing, and a way to manage it", () => {
+  const row = homeRow(makeEl(fakeDoc()), following, games, false, NOON, opts);
+  assert.match(textOf(row), /Den/);
+  assert.match(textOf(row), /Should be showing/);
+  assert.match(textOf(row), /Counting down to TBL at NYR · puck drop 7:30 PM/);
   assert.equal(link(row).attrs.href ?? link(row).href, "#/panel/scoreboard-abc");
   assert.equal(link(row).text, "Manage");
   assert.equal(every(row).some((n) => ["select", "input", "form"].includes(n.tagName)), false, "home shows, it does not edit");
 });
 
-test("a home row for a panel following nothing says so", () => {
-  const text = every(homeRow(makeEl(fakeDoc()), nothing, games, false)).map((n) => n.text).join(" | ");
-  assert.match(text, /No game chosen/);
+test("a home row uses the game state the API sent over today's schedule", () => {
+  const live = { ...following, game: { state: "LIVE", start: "2026-10-01T23:30:00Z", away: { abbrev: "TBL", score: 2 }, home: { abbrev: "NYR", score: 1 }, period: { label: "2" } } };
+  assert.match(textOf(homeRow(makeEl(fakeDoc()), live, games, false, NOON, opts)), /Live: TBL 2, NYR 1 · 2nd period/);
 });
 
-test("a home row does not invent a game when today's list could not be loaded", () => {
-  const text = every(homeRow(makeEl(fakeDoc()), following, [], true)).map((n) => n.text).join(" | ");
-  assert.match(text, /could not be loaded/i);
-  assert.doesNotMatch(text, /No game chosen/);
+test("a home row for a panel following nothing says so", () => {
+  assert.match(textOf(homeRow(makeEl(fakeDoc()), nothing, games, false, NOON, opts)), /Off · no game chosen/);
+});
+
+test("a home row does not invent an answer when it has nothing to go on", () => {
+  assert.match(textOf(homeRow(makeEl(fakeDoc()), following, [], true, NOON, opts)), /Not known: today's games could not be loaded/);
+  assert.match(textOf(homeRow(makeEl(fakeDoc()), { ...following, gameId: 2026029999 }, games, false, NOON, opts)), /Not known: the chosen game is not on today's list/);
 });
 
 test("a claimed row names the panel, shows its id, and links to it", () => {

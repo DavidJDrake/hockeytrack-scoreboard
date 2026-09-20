@@ -50,16 +50,6 @@ export function gameChoices(device, games, options = {}) {
   return choices;
 }
 
-// What a panel follows, for the pages that show it without editing it. Says
-// what is not known as not known: a game id that today's list does not hold
-// is yesterday's choice, not "nothing".
-export function followingLabel(device, games, gamesFailed, options = {}) {
-  if (!canResend(device)) return "No game chosen";
-  if (gamesFailed) return "Today's games could not be loaded";
-  const game = games.find((g) => g.gameId === device.gameId);
-  return game ? gameLabel(game, options) : "A game that is not on today's list";
-}
-
 // Can this panel be told to show its current game again?
 //
 // Only if it has one: the API refuses a gameId of 0, and a panel following

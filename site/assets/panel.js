@@ -12,7 +12,8 @@
 // this module knows the shape of a row, not what the API is or how failures
 // are reported.
 import { hrefFor } from "./routes.js";
-import { canResend, followingLabel, gameChoices, panelTitle } from "./view.js";
+import { inputFor, showingLine } from "./showing.js";
+import { canResend, gameChoices, panelTitle } from "./view.js";
 
 export function makeEl(doc) {
   return function el(tag, props = {}, ...children) {
@@ -37,13 +38,27 @@ function manageLink(el, device, title) {
   return link;
 }
 
-// Home: the panel, what it follows, and the way to its own page. It shows;
-// it does not edit.
-export function homeRow(el, device, games, gamesFailed) {
+// What goes after "Should be showing". Says what is not known as not known:
+// a chosen game that neither the reducer nor today's schedule knows is not
+// "off", it is a question this page cannot answer.
+export function showingText(device, games, gamesFailed, nowMs, options = {}) {
+  const input = inputFor(device, games, nowMs);
+  if (input.unknownGame) {
+    return gamesFailed ? "Not known: today's games could not be loaded" : "Not known: the chosen game is not on today's list";
+  }
+  return showingLine(input, options);
+}
+
+// Home: the panel, what it should be showing, and the way to its own page.
+// It shows; it does not edit. "Should be", because a panel cannot report:
+// this is the panel's own rule run here (showing.js), not word from the panel.
+export function homeRow(el, device, games, gamesFailed, nowMs = Date.now(), options = {}) {
   const title = panelTitle(device);
   return el("li", { class: "panel" },
     el("h2", {}, title),
-    el("p", { class: "showing" }, followingLabel(device, games, gamesFailed)),
+    el("p", { class: "showing" },
+      el("span", { class: "label" }, "Should be showing"),
+      showingText(device, games, gamesFailed, nowMs, options)),
     el("div", { class: "row" }, manageLink(el, device, title)));
 }
 

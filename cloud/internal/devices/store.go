@@ -43,6 +43,12 @@ type Device struct {
 	Owner     string // the Cognito subject; empty means unclaimed
 	Name      string // a display name the owner chooses, e.g. "Living room"
 	GameID    int64  // the game the panel is following; 0 means none
+	// ChosenAt is when the owner last chose GameID, in milliseconds on the
+	// server's clock; 0 means never. It is the stamp sent to the panel, kept
+	// so the site can run the panel's rule (a choice buys five minutes on
+	// screen and re-arms a final's hold) and so a later publish that is not
+	// a choice can re-send the same stamp.
+	ChosenAt int64
 }
 
 // Store persists Devices. Claim is the only operation that may bind an owner,
@@ -136,8 +142,8 @@ func (f *Fake) Update(_ context.Context, in Device) error {
 	if d.Owner != in.Owner {
 		return ErrNotOwner
 	}
-	// Only Name and GameID are mutable; ThingName is immutable.
-	d.Name, d.GameID = in.Name, in.GameID
+	// Only Name, GameID and ChosenAt are mutable; ThingName is immutable.
+	d.Name, d.GameID, d.ChosenAt = in.Name, in.GameID, in.ChosenAt
 	f.items[in.ThingName] = d
 	return nil
 }
@@ -152,7 +158,7 @@ func (f *Fake) Unbind(_ context.Context, thingName, owner string) error {
 	if d.Owner != owner {
 		return ErrNotOwner
 	}
-	d.Owner, d.Name, d.GameID = "", "", 0
+	d.Owner, d.Name, d.GameID, d.ChosenAt = "", "", 0, 0
 	f.items[thingName] = d
 	return nil
 }

@@ -1,0 +1,573 @@
+{
+ "about": "What a panel should be showing. One file, two readers: device/tests/test_presentation_vectors.py runs every case against main.presentation, and site/tests/showing.test.js runs every case against the site's copy of the rule. Change the rule on one side only and CI fails. Times are UTC instants. finalSeenAt is when the panel first saw the final; chosenAt is when the owner last chose the game. Cases cover only what the site can know: link loss, stale feeds and an unset clock are the panel's alone.",
+ "cases": [
+  {
+   "name": "no game chosen",
+   "why": "an unused screen is essentially off",
+   "now": "2026-09-20T15:00:00Z",
+   "game": null,
+   "chosenAt": null,
+   "display": {
+    "countdownLeadMin": 720,
+    "finalHoldMin": 180,
+    "sleep": null
+   },
+   "expect": "off"
+  },
+  {
+   "name": "no game chosen, but the owner touched the panel a minute ago",
+   "why": "",
+   "now": "2026-09-20T15:00:00Z",
+   "game": null,
+   "chosenAt": "2026-09-20T14:59:00Z",
+   "display": {
+    "countdownLeadMin": 720,
+    "finalHoldMin": 180,
+    "sleep": null
+   },
+   "expect": "no-game"
+  },
+  {
+   "name": "a game thirteen hours away",
+   "why": "outside the twelve-hour lead",
+   "now": "2026-09-20T10:00:00Z",
+   "game": {
+    "state": "PRE",
+    "start": "2026-09-20T23:00:00Z"
+   },
+   "chosenAt": null,
+   "display": {
+    "countdownLeadMin": 720,
+    "finalHoldMin": 180,
+    "sleep": null
+   },
+   "expect": "off"
+  },
+  {
+   "name": "a game exactly twelve hours away",
+   "why": "the lead is inclusive",
+   "now": "2026-09-20T11:00:00Z",
+   "game": {
+    "state": "PRE",
+    "start": "2026-09-20T23:00:00Z"
+   },
+   "chosenAt": null,
+   "display": {
+    "countdownLeadMin": 720,
+    "finalHoldMin": 180,
+    "sleep": null
+   },
+   "expect": "countdown"
+  },
+  {
+   "name": "a game one second past twelve hours away",
+   "why": "",
+   "now": "2026-09-20T10:59:59Z",
+   "game": {
+    "state": "PRE",
+    "start": "2026-09-20T23:00:00Z"
+   },
+   "chosenAt": null,
+   "display": {
+    "countdownLeadMin": 720,
+    "finalHoldMin": 180,
+    "sleep": null
+   },
+   "expect": "off"
+  },
+  {
+   "name": "a game six hours away",
+   "why": "",
+   "now": "2026-09-20T17:00:00Z",
+   "game": {
+    "state": "PRE",
+    "start": "2026-09-20T23:00:00Z"
+   },
+   "chosenAt": null,
+   "display": {
+    "countdownLeadMin": 720,
+    "finalHoldMin": 180,
+    "sleep": null
+   },
+   "expect": "countdown"
+  },
+  {
+   "name": "a game thirteen hours away, chosen two minutes ago",
+   "why": "the owner needs to see the panel heard them",
+   "now": "2026-09-20T10:00:00Z",
+   "game": {
+    "state": "PRE",
+    "start": "2026-09-20T23:00:00Z"
+   },
+   "chosenAt": "2026-09-20T09:58:00Z",
+   "display": {
+    "countdownLeadMin": 720,
+    "finalHoldMin": 180,
+    "sleep": null
+   },
+   "expect": "countdown"
+  },
+  {
+   "name": "a game thirteen hours away, chosen six minutes ago",
+   "why": "",
+   "now": "2026-09-20T10:00:00Z",
+   "game": {
+    "state": "PRE",
+    "start": "2026-09-20T23:00:00Z"
+   },
+   "chosenAt": "2026-09-20T09:54:00Z",
+   "display": {
+    "countdownLeadMin": 720,
+    "finalHoldMin": 180,
+    "sleep": null
+   },
+   "expect": "off"
+  },
+  {
+   "name": "puck drop passed an hour ago and the game never went live",
+   "why": "held for two hours past the start",
+   "now": "2026-09-21T00:00:00Z",
+   "game": {
+    "state": "PRE",
+    "start": "2026-09-20T23:00:00Z"
+   },
+   "chosenAt": null,
+   "display": {
+    "countdownLeadMin": 720,
+    "finalHoldMin": 180,
+    "sleep": null
+   },
+   "expect": "countdown"
+  },
+  {
+   "name": "puck drop passed two hours ago and the game never went live",
+   "why": "",
+   "now": "2026-09-21T01:00:00Z",
+   "game": {
+    "state": "PRE",
+    "start": "2026-09-20T23:00:00Z"
+   },
+   "chosenAt": null,
+   "display": {
+    "countdownLeadMin": 720,
+    "finalHoldMin": 180,
+    "sleep": null
+   },
+   "expect": "off"
+  },
+  {
+   "name": "a pregame with no start time",
+   "why": "nothing to count down to",
+   "now": "2026-09-20T17:00:00Z",
+   "game": {
+    "state": "PRE",
+    "start": null
+   },
+   "chosenAt": null,
+   "display": {
+    "countdownLeadMin": 720,
+    "finalHoldMin": 180,
+    "sleep": null
+   },
+   "expect": "off"
+  },
+  {
+   "name": "a pregame with a start nobody can read",
+   "why": "",
+   "now": "2026-09-20T17:00:00Z",
+   "game": {
+    "state": "PRE",
+    "start": "soon"
+   },
+   "chosenAt": null,
+   "display": {
+    "countdownLeadMin": 720,
+    "finalHoldMin": 180,
+    "sleep": null
+   },
+   "expect": "off"
+  },
+  {
+   "name": "a pregame with a start that has no zone",
+   "why": "no zone, so no instant",
+   "now": "2026-09-20T17:00:00Z",
+   "game": {
+    "state": "PRE",
+    "start": "2026-09-20T23:00:00"
+   },
+   "chosenAt": null,
+   "display": {
+    "countdownLeadMin": 720,
+    "finalHoldMin": 180,
+    "sleep": null
+   },
+   "expect": "off"
+  },
+  {
+   "name": "a live game",
+   "why": "",
+   "now": "2026-09-21T00:30:00Z",
+   "game": {
+    "state": "LIVE",
+    "start": "2026-09-20T23:00:00Z"
+   },
+   "chosenAt": null,
+   "display": {
+    "countdownLeadMin": 720,
+    "finalHoldMin": 180,
+    "sleep": null
+   },
+   "expect": "game"
+  },
+  {
+   "name": "a live game in the middle of sleep hours",
+   "why": "the late game is what the panel is for",
+   "now": "2026-09-21T05:30:00Z",
+   "game": {
+    "state": "LIVE",
+    "start": "2026-09-20T23:00:00Z"
+   },
+   "chosenAt": null,
+   "display": {
+    "countdownLeadMin": 720,
+    "finalHoldMin": 180,
+    "sleep": {
+     "start": "23:00",
+     "end": "07:00",
+     "zone": "America/Toronto"
+    }
+   },
+   "expect": "game"
+  },
+  {
+   "name": "a final, an hour after it ended",
+   "why": "",
+   "now": "2026-09-21T03:00:00Z",
+   "game": {
+    "state": "FINAL",
+    "start": "2026-09-20T23:00:00Z",
+    "finalSeenAt": "2026-09-21T02:00:00Z"
+   },
+   "chosenAt": null,
+   "display": {
+    "countdownLeadMin": 720,
+    "finalHoldMin": 180,
+    "sleep": null
+   },
+   "expect": "final"
+  },
+  {
+   "name": "a final, one second before the hold runs out",
+   "why": "",
+   "now": "2026-09-21T04:59:59Z",
+   "game": {
+    "state": "FINAL",
+    "start": "2026-09-20T23:00:00Z",
+    "finalSeenAt": "2026-09-21T02:00:00Z"
+   },
+   "chosenAt": null,
+   "display": {
+    "countdownLeadMin": 720,
+    "finalHoldMin": 180,
+    "sleep": null
+   },
+   "expect": "final"
+  },
+  {
+   "name": "a final, exactly when the hold runs out",
+   "why": "",
+   "now": "2026-09-21T05:00:00Z",
+   "game": {
+    "state": "FINAL",
+    "start": "2026-09-20T23:00:00Z",
+    "finalSeenAt": "2026-09-21T02:00:00Z"
+   },
+   "chosenAt": null,
+   "display": {
+    "countdownLeadMin": 720,
+    "finalHoldMin": 180,
+    "sleep": null
+   },
+   "expect": "off"
+  },
+  {
+   "name": "an old final the owner chose again ten minutes ago",
+   "why": "choosing it again gives it another hold",
+   "now": "2026-09-21T12:00:00Z",
+   "game": {
+    "state": "FINAL",
+    "start": "2026-09-20T23:00:00Z",
+    "finalSeenAt": "2026-09-21T02:00:00Z"
+   },
+   "chosenAt": "2026-09-21T11:50:00Z",
+   "display": {
+    "countdownLeadMin": 720,
+    "finalHoldMin": 180,
+    "sleep": null
+   },
+   "expect": "final"
+  },
+  {
+   "name": "a final with a hold of zero",
+   "why": "",
+   "now": "2026-09-21T02:00:01Z",
+   "game": {
+    "state": "FINAL",
+    "start": "2026-09-20T23:00:00Z",
+    "finalSeenAt": "2026-09-21T02:00:00Z"
+   },
+   "chosenAt": null,
+   "display": {
+    "countdownLeadMin": 720,
+    "finalHoldMin": 0,
+    "sleep": null
+   },
+   "expect": "off"
+  },
+  {
+   "name": "a final during sleep hours",
+   "why": "23:30 in Toronto",
+   "now": "2026-09-21T03:30:00Z",
+   "game": {
+    "state": "FINAL",
+    "start": "2026-09-20T23:00:00Z",
+    "finalSeenAt": "2026-09-21T02:00:00Z"
+   },
+   "chosenAt": null,
+   "display": {
+    "countdownLeadMin": 720,
+    "finalHoldMin": 180,
+    "sleep": {
+     "start": "23:00",
+     "end": "07:00",
+     "zone": "America/Toronto"
+    }
+   },
+   "expect": "off"
+  },
+  {
+   "name": "a countdown during sleep hours",
+   "why": "06:00 in Toronto",
+   "now": "2026-09-20T10:00:00Z",
+   "game": {
+    "state": "PRE",
+    "start": "2026-09-20T17:00:00Z"
+   },
+   "chosenAt": null,
+   "display": {
+    "countdownLeadMin": 720,
+    "finalHoldMin": 180,
+    "sleep": {
+     "start": "23:00",
+     "end": "07:00",
+     "zone": "America/Toronto"
+    }
+   },
+   "expect": "off"
+  },
+  {
+   "name": "a countdown the minute sleep hours end",
+   "why": "07:00 in Toronto: the end is exclusive",
+   "now": "2026-09-20T11:00:00Z",
+   "game": {
+    "state": "PRE",
+    "start": "2026-09-20T17:00:00Z"
+   },
+   "chosenAt": null,
+   "display": {
+    "countdownLeadMin": 720,
+    "finalHoldMin": 180,
+    "sleep": {
+     "start": "23:00",
+     "end": "07:00",
+     "zone": "America/Toronto"
+    }
+   },
+   "expect": "countdown"
+  },
+  {
+   "name": "a countdown the minute sleep hours start",
+   "why": "23:00 in Toronto: the start is inclusive",
+   "now": "2026-09-21T03:00:00Z",
+   "game": {
+    "state": "PRE",
+    "start": "2026-09-21T09:00:00Z"
+   },
+   "chosenAt": null,
+   "display": {
+    "countdownLeadMin": 720,
+    "finalHoldMin": 180,
+    "sleep": {
+     "start": "23:00",
+     "end": "07:00",
+     "zone": "America/Toronto"
+    }
+   },
+   "expect": "off"
+  },
+  {
+   "name": "asleep, but the owner chose a game a minute ago",
+   "why": "an owner choosing a game at 6 a.m. is awake",
+   "now": "2026-09-20T10:00:00Z",
+   "game": {
+    "state": "PRE",
+    "start": "2026-09-20T17:00:00Z"
+   },
+   "chosenAt": "2026-09-20T09:59:00Z",
+   "display": {
+    "countdownLeadMin": 720,
+    "finalHoldMin": 180,
+    "sleep": {
+     "start": "23:00",
+     "end": "07:00",
+     "zone": "America/Toronto"
+    }
+   },
+   "expect": "countdown"
+  },
+  {
+   "name": "a sleep window that does not cross midnight",
+   "why": "14:00 in Toronto",
+   "now": "2026-09-20T18:00:00Z",
+   "game": {
+    "state": "PRE",
+    "start": "2026-09-20T23:00:00Z"
+   },
+   "chosenAt": null,
+   "display": {
+    "countdownLeadMin": 720,
+    "finalHoldMin": 180,
+    "sleep": {
+     "start": "13:00",
+     "end": "15:00",
+     "zone": "America/Toronto"
+    }
+   },
+   "expect": "off"
+  },
+  {
+   "name": "a sleep window whose ends are equal is no window",
+   "why": "",
+   "now": "2026-09-20T18:00:00Z",
+   "game": {
+    "state": "PRE",
+    "start": "2026-09-20T23:00:00Z"
+   },
+   "chosenAt": null,
+   "display": {
+    "countdownLeadMin": 720,
+    "finalHoldMin": 180,
+    "sleep": {
+     "start": "09:00",
+     "end": "09:00",
+     "zone": "America/Toronto"
+    }
+   },
+   "expect": "countdown"
+  },
+  {
+   "name": "a sleep window in a zone that does not exist is no window",
+   "why": "a panel that stays on beats one dark at the wrong hours",
+   "now": "2026-09-20T10:00:00Z",
+   "game": {
+    "state": "PRE",
+    "start": "2026-09-20T17:00:00Z"
+   },
+   "chosenAt": null,
+   "display": {
+    "countdownLeadMin": 720,
+    "finalHoldMin": 180,
+    "sleep": {
+     "start": "23:00",
+     "end": "07:00",
+     "zone": "Mars/Olympus"
+    }
+   },
+   "expect": "countdown"
+  },
+  {
+   "name": "a sleep window that is not HH:MM is no window",
+   "why": "",
+   "now": "2026-09-20T10:00:00Z",
+   "game": {
+    "state": "PRE",
+    "start": "2026-09-20T17:00:00Z"
+   },
+   "chosenAt": null,
+   "display": {
+    "countdownLeadMin": 720,
+    "finalHoldMin": 180,
+    "sleep": {
+     "start": "11pm",
+     "end": "07:00",
+     "zone": "America/Toronto"
+    }
+   },
+   "expect": "countdown"
+  },
+  {
+   "name": "a short countdown lead",
+   "why": "three hours out, lead is two",
+   "now": "2026-09-20T20:00:00Z",
+   "game": {
+    "state": "PRE",
+    "start": "2026-09-20T23:00:00Z"
+   },
+   "chosenAt": null,
+   "display": {
+    "countdownLeadMin": 120,
+    "finalHoldMin": 180,
+    "sleep": null
+   },
+   "expect": "off"
+  },
+  {
+   "name": "a countdown lead of zero comes on at puck drop",
+   "why": "",
+   "now": "2026-09-20T23:00:00Z",
+   "game": {
+    "state": "PRE",
+    "start": "2026-09-20T23:00:00Z"
+   },
+   "chosenAt": null,
+   "display": {
+    "countdownLeadMin": 0,
+    "finalHoldMin": 180,
+    "sleep": null
+   },
+   "expect": "countdown"
+  },
+  {
+   "name": "a state nobody recognizes, just chosen",
+   "why": "shown so that whatever is wrong is visible",
+   "now": "2026-09-20T15:00:00Z",
+   "game": {
+    "state": "WARMUP",
+    "start": "2026-09-20T23:00:00Z"
+   },
+   "chosenAt": "2026-09-20T14:00:00Z",
+   "display": {
+    "countdownLeadMin": 720,
+    "finalHoldMin": 180,
+    "sleep": null
+   },
+   "expect": "game"
+  },
+  {
+   "name": "a state nobody recognizes, three hours on",
+   "why": "",
+   "now": "2026-09-20T15:00:00Z",
+   "game": {
+    "state": "WARMUP",
+    "start": "2026-09-20T23:00:00Z"
+   },
+   "chosenAt": "2026-09-20T12:00:00Z",
+   "display": {
+    "countdownLeadMin": 720,
+    "finalHoldMin": 180,
+    "sleep": null
+   },
+   "expect": "off"
+  }
+ ]
+}
