@@ -27,22 +27,33 @@ picker, claim, and new-panel setup.
 
 ## 2. The pages
 
-| Page | Path | Holds |
+| Page | Address | Holds |
 |---|---|---|
-| Home | `/` | Your claimed panels. For each: its name, **what it should be showing now**, and a Manage link. Nothing else. |
-| Panels | `/panels/` | Claim a panel. Set up a new panel (the setup-file steps). The list of claimed panels. Released panels (section 6). |
-| Panel | `/panel/?p=<thing>` | One panel: what it shows (the game picker and "Show on panel"), its name, its display settings, its orientation, and Release / Retire. |
-| Settings | `/settings/` | Your defaults: countdown lead, final-score hold, sleep hours and time zone. |
-| Download, Privacy | unchanged | |
+| Home | `#/` | Your claimed panels. For each: its name, **what it should be showing now**, and a Manage link. Nothing else. |
+| Panels | `#/panels` | Claim a panel. Set up a new panel (the setup-file steps). The list of claimed panels. Released panels (section 6). |
+| Panel | `#/panel/<thing>` | One panel: what it shows (the game picker and "Show on panel"), its name, its display settings, its orientation, and Release / Retire. |
+| Settings | `#/settings` | Your defaults: countdown lead, final-score hold, sleep hours and time zone. Arrives with step 3; until then there is nothing to put on it. |
+| Download, Privacy | unchanged, separate documents | They need no sign-in. |
 
-Signed out, every page shows the sign-in prompt and nothing else, as now.
+Signed out, the site shows the sign-in prompt and nothing else, as now.
+
+**One document, not four** (corrected while building step 1; this section first
+said each page would be its own `index.html`). The signed-in pages are views
+of a single document, addressed by the URL fragment. The reason is the token:
+it lives in one variable for the life of the tab and nowhere else, by design.
+A second document arrives with no token, so separate pages would mean either
+a round trip through Cognito on every click, or moving the token into storage
+where any script that ever runs on the origin can read it. One document keeps
+the token where it is. The fragment also never appears in a request, an access
+log or a Referer header, which a panel's name in a path would.
 
 The site stays static files on S3 behind CloudFront, plain ES modules, no
-framework and no build step. Each page is an `index.html` plus one small entry
-module; the logic lives in pure modules with tests, as `view.js`,
-`claimcode.js` and `panel.js` already do. The panel id travels in the query
-string and is validated against the panel-name pattern before it is used for
-anything, and the API decides ownership regardless of what the URL says.
+framework and no build step. Logic lives in pure modules with tests
+(`routes.js` joins `view.js`, `claimcode.js` and `panel.js`). A fragment is
+parsed against a strict pattern before it is used for anything; the page
+someone was on is carried across sign-in in `sessionStorage` and is parsed and
+rebuilt on the way back, never used as found; and the API decides ownership
+regardless of what the address says.
 
 ## 3. "What it should be showing"
 
@@ -258,7 +269,7 @@ Each step ships alone and leaves the site working.
 
 | Step | What | Needs |
 |---|---|---|
-| 1 | The four pages, with today's abilities moved into them. Release keeps its current behavior under its new name. | site only |
+| 1 | Home, Panels and Panel, with today's abilities moved into them. Release keeps its current behavior under its new name. **Built: PR #34.** | site only |
 | 2 | "Should be showing": the shared vectors, the JavaScript port, game state in `GET /api/devices`. | site + API |
 | 3 | Defaults and overrides: accounts table, routes, the compose function, stored `chosenAt`; Settings page and the Panel page's settings. | site + API + Terraform. Panels act on it from image v0.1.6 (`parse_display`); older panels ignore it safely. |
 | 4 | Retire from the site: the retire Lambda, `releasedBy`, the Released list, the alarm. | site + new Lambda + Terraform |
