@@ -4,8 +4,9 @@ Status: **proposed, awaiting the owner's approval.** Nothing here is built.
 
 This extends, and in one place replaces,
 `2026-09-19-display-settings-design.md`. That document's wire format, panel
-validation and security rules stand. Its section 5 (templates) is replaced by
-section 5 here.
+validation and security rules stand. Its section 5 treated templates as shared
+*settings*; the owner has since drawn the line differently (section 5 here),
+and that section is superseded.
 
 ## 1. What the owner asked for (2026-09-20)
 
@@ -101,19 +102,56 @@ never subscribes to anything.
 - The Panel page shows the value in force and where it comes from
   ("7:00 AM · from your defaults").
 
-## 5. Templates are replaced by defaults
+## 5. Settings are not templates
 
-The earlier design had named templates that several panels could follow.
-Account defaults with per-panel overrides cover the case the owner described
-(most panels alike, one or two different) with one less concept, no new table
-and no delete-while-followed problem. **Proposed: build defaults and
-overrides, and do not build templates.** They can be added later without
-undoing anything: a template is a named set of defaults.
+The owner's ruling (2026-09-20):
 
-Storage: defaults live in one row per account in a new `scoreboard-accounts`
-table keyed by the Cognito subject; overrides live on the panel's existing
-row. Point-in-time recovery on both (the devices table does not have it today;
-see the earlier document).
+> Templates should be about what will be shown on a panel. Defaults and
+> overrides are about settings for the panel.
+
+So there are two separate things, and the earlier design had merged them:
+
+| | Answers | Lives |
+|---|---|---|
+| **Settings** | *How the panel behaves*: countdown lead, final-score hold, sleep hours, orientation | your defaults, with per-panel overrides (section 4) |
+| **Templates** | *What the panel shows*: its content | a named thing in your account that several panels can use |
+
+Settings storage: defaults live in one row per account in a new
+`scoreboard-accounts` table keyed by the Cognito subject; overrides live on
+the panel's existing row. Point-in-time recovery on both (the devices table
+does not have it today; see the earlier document).
+
+### Templates, sketched
+
+Today "what the panel shows" is one thing: a game somebody picked by hand that
+day. A template makes that a rule with a name, which panels point at:
+
+- **A chosen game** — what exists now. Picking a game on the Panel page is
+  this, without a name.
+- **Follow a team** — "Leafs": each day the panel takes that club's game by
+  itself. No daily visit to the site. This is the template that earns the
+  feature: a panel on a wall should not need tending.
+- Later, the same slot takes anything else that is content rather than
+  behavior: which layout, a standings screen between games, and so on.
+
+How it would work, in outline. A template is a row owned by the account; a
+panel's row names a template or a game, never both. "Follow a team" is
+resolved **in the cloud**: when the today document is rebuilt, each template
+is resolved to a game id and any panel whose game changed gets its usual
+config document. The panel still receives `gameId` and nothing else, so
+**templates need no panel change at all** and work on every image already in
+the field. Editing a template fans out to the panels using it, with the same
+convergent full-document publish as settings.
+
+Security shape, the same as everything else here: templates are read with the
+caller's subject as the key, so there is no fetch-by-id to forget an ownership
+check on; a template id from the client is looked up under the caller before
+it is attached to a panel; the team is validated against the known club list;
+counts and names are bounded.
+
+This is a sketch, deliberately. Templates get their own design once the pages
+and settings exist; the question in section 9 is whether "follow a team" is
+the right first template.
 
 ## 6. Removing panels, and orphans
 
@@ -149,15 +187,19 @@ The cost, stated plainly: between a release and the next claim, the previous
 owner can still retire the panel. If it was given to someone else, that person
 would have to reflash before claiming. The previous owner could have retired
 it a minute earlier while they still owned it, so this grants nothing new, and
-it ends the moment the new owner claims.
+it ends the moment the new owner claims. Accepted by the owner: "Worst case
+scenario is new owner needs to reflash the device."
 
 ### Panels nobody will ever retire
 
 Some orphans have no owner to notice them. A scheduled sweep retires any
-panel that is **unowned and has not connected for 30 days**. A panel someone
-still has in a drawer comes back with a reflash, which is the recovery path
-for every other fault already. This is step 5 of the build, not part of the
-first release, and it needs IoT connection events stored, which they are not
+panel that is **unowned and has not connected for 365 days** (the owner's
+figure: long enough that a panel boxed up for a season, or sitting in a
+drawer between owners, is never caught by it). A panel retired by the sweep
+comes back with a reflash, which is the recovery path for every other fault
+already. Released panels stay visible to whoever released them for that whole
+year, so the sweep is the backstop, not the mechanism. This is step 5 of the
+build, and it needs each panel's last connection recorded, which it is not
 today.
 
 ### Where the power to delete lives
@@ -220,19 +262,29 @@ Each step ships alone and leaves the site working.
 | 2 | "Should be showing": the shared vectors, the JavaScript port, game state in `GET /api/devices`. | site + API |
 | 3 | Defaults and overrides: accounts table, routes, the compose function, stored `chosenAt`; Settings page and the Panel page's settings. | site + API + Terraform. Panels act on it from image v0.1.6 (`parse_display`); older panels ignore it safely. |
 | 4 | Retire from the site: the retire Lambda, `releasedBy`, the Released list, the alarm. | site + new Lambda + Terraform |
-| 5 | The 30-day sweep. | connection events stored first |
+| 5 | The 365-day sweep. | each panel's last connection recorded first |
+| 7 | Templates, starting with "follow a team". Its own design first. | API + today Lambda + site. No panel change. |
 | 6 | Orientation from the site. | image v0.1.6 |
 
 Steps 1 and 2 change nothing about security posture. Step 4 is the one to
 review hardest.
 
-## 9. Questions for the owner
+## 9. Decisions and questions
 
-1. **Templates dropped in favor of defaults and overrides (section 5): agreed?**
-2. **Release and Retire as the two names, with released panels staying visible
-   to whoever released them (section 6): agreed?**
-3. **The 30-day sweep of unowned, unseen panels: wanted, and is 30 days
-   right?**
-4. Still open from the earlier document: the list of choices for countdown
-   (off, 1, 2, 6, 12, 24, 48 h) and final score (off, 30 min, 1, 3, 6, 12,
-   24 h); and whether a countdown may show during sleep hours (proposed: no).
+Decided by the owner, 2026-09-20:
+
+- Settings (defaults and overrides) and templates (content) are separate
+  things. Section 5.
+- Released panels stay visible to whoever released them, and that person may
+  retire them until someone else claims. Section 6.
+- The sweep window is 365 days. Section 6.
+- "Retire" is the word.
+
+Still open:
+
+1. **Is "follow a team" the right first template?** And should a panel
+   following a team show anything on a day that club does not play (proposed:
+   off, like any panel with no game).
+2. The choices offered for countdown (off, 1, 2, 6, 12, 24, 48 h) and final
+   score (off, 30 min, 1, 3, 6, 12, 24 h).
+3. Whether a countdown may show during sleep hours (proposed: no).

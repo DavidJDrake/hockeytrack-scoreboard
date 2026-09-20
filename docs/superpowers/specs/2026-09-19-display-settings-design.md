@@ -2,6 +2,11 @@
 
 Status: **proposed, awaiting the owner's approval.** Nothing here is built.
 
+**Section 5 (templates) is superseded** by
+`2026-09-20-site-organization-design.md`: the owner ruled that templates are
+about what a panel shows, and that shared *settings* are account defaults with
+per-panel overrides. Everything else here stands.
+
 ## 1. What the owner asked for
 
 > Have timing options for things like how long before game countdown should
