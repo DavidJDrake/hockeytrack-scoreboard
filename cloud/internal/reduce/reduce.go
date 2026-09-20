@@ -22,6 +22,11 @@ type statusDetail struct {
 	Score     map[string]int `json:"score"`
 }
 
+// How long a running clock may repeat one value and still be believed to be
+// running. Past this, the likelier story is that play stopped and the feed
+// has not caught up, and extrapolating further is the bigger error.
+const maxRepeatAnchorMs = 60_000
+
 type clockDetail struct {
 	GameID           int64          `json:"gameId"`
 	GameState        string         `json:"gameState"`
@@ -139,6 +144,12 @@ func Reduce(s State, e Event) (State, bool, error) {
 		s.applyScore(d.Score)
 		s.Away.SOG, s.Home.SOG = d.Shots[d.AwayTeam], d.Shots[d.HomeTeam]
 		s.OTLen = OTLength(d.GameID)
+		// Judged against the state as it was, before this heartbeat is
+		// folded in; see where AsOf is set below.
+		nowMs := e.Time.UTC().UnixMilli()
+		repeat := s.Clock.Running && d.Running &&
+			s.Clock.Seconds == d.SecondsRemaining && s.Period.Number == d.Period &&
+			s.AsOf != 0 && nowMs-s.AsOf < maxRepeatAnchorMs
 		if d.Period > 0 {
 			s.Period = Period{Number: d.Period, Type: d.PeriodType, Label: PeriodLabel(d.Period, d.PeriodType)}
 		}
@@ -157,7 +168,17 @@ func Reduce(s State, e Event) (State, bool, error) {
 		// is the only one that also sets Clock.Seconds: the device derives
 		// the live clock as Clock.Seconds - (now - AsOf), so the two must
 		// always be anchored to the same moment.
-		s.AsOf = e.Time.UTC().UnixMilli()
+		//
+		// Anchored to when the reading was TAKEN, which is not always now.
+		// The NHL's feed repeats one clock value for 20 to 40 seconds while
+		// calling it running, and we poll every five. Stamping each repeat
+		// as new made every panel count down five seconds and jump back, for
+		// as long as play ran (first seen on real hardware, 2026-09-19). A
+		// repeat keeps the anchor of the reading it repeats.
+		if !repeat {
+			s.AsOf = nowMs
+		}
+		s.SeenAt = nowMs
 		return s, true, nil
 
 	case "nhl.game.play":

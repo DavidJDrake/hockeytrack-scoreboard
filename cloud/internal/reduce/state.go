@@ -51,10 +51,15 @@ type Goal struct {
 // bookkeeping the reducer needs between events; they persist in DynamoDB
 // but never reach the topic.
 type State struct {
-	V         int       `json:"v" dynamodbav:"v"`
-	GameID    int64     `json:"gameId" dynamodbav:"gameId"`
-	GameState string    `json:"state" dynamodbav:"state"` // PRE | LIVE | FINAL
-	AsOf      int64     `json:"asOf" dynamodbav:"asOf"`
+	V         int    `json:"v" dynamodbav:"v"`
+	GameID    int64  `json:"gameId" dynamodbav:"gameId"`
+	GameState string `json:"state" dynamodbav:"state"` // PRE | LIVE | FINAL
+	AsOf      int64  `json:"asOf" dynamodbav:"asOf"`
+	// SeenAt is when a clock heartbeat last confirmed this document. AsOf
+	// cannot do that job: it is the clock's anchor, and it deliberately
+	// stands still while the feed repeats itself. Panels judge freshness by
+	// whether the document changed, so something in it has to.
+	SeenAt    int64     `json:"seenAt,omitempty" dynamodbav:"seenAt"`
 	Away      Team      `json:"away" dynamodbav:"away"`
 	Home      Team      `json:"home" dynamodbav:"home"`
 	Period    Period    `json:"period" dynamodbav:"period"`
