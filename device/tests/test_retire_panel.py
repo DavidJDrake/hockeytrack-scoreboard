@@ -89,7 +89,8 @@ def test_access_is_cut_first_and_the_record_goes_last(tmp_path):
 
 
 def test_names_that_are_not_a_panel_are_refused_before_any_call(tmp_path):
-    for bad in ["", "scoreboard-", "scoreboard-ABC", "prod-db", "scoreboard-973pe43q585t;rm", "*"]:
+    for bad in ["", "scoreboard-", "scoreboard-a", "scoreboard-ABC", "prod-db", "scoreboard-973pe43q585t;rm", "*",
+                "scoreboard-" + "a" * 33, "scoreboard-01 ", "scoreboard-0_1", "scoreboard-01/../x", "xscoreboard-01"]:
         result, calls = run(tmp_path, bad, "--apply", bad)
         assert result.returncode != 0, bad
         assert calls == [], bad
@@ -120,3 +121,11 @@ def test_nothing_left_at_all_says_so(tmp_path):
     assert result.returncode == 0
     assert writes(calls) == []
     assert "nothing to remove" in result.stdout
+
+
+def test_the_first_panel_made_by_hand_can_be_retired_too(tmp_path):
+    # scoreboard-01 predates enrollment and its twelve-character names. Its
+    # key was gone and its certificate ACTIVE: an orphan the pattern refused.
+    result, calls = run(tmp_path, "scoreboard-01", principals=ARN, cert_things="scoreboard-01", row="")
+    assert result.returncode == 0, result.stderr
+    assert "dry run" in result.stdout and writes(calls) == []

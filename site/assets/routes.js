@@ -18,6 +18,16 @@ const THING = /^scoreboard-[0-9a-z]{1,32}$/;
 
 export const ROUTE_KEY = "scoreboard.route";
 
+// Is this fragment a page address at all? "#main" -- the skip link -- and any
+// other anchor inside the page are not, and must not be routed: read as a
+// page, "#main" is a page that does not exist, and the first link a keyboard
+// user meets would send them to Not found.
+export function isPageAddress(hash) {
+  if (hash === null || hash === undefined) return true;
+  if (typeof hash !== "string") return false;
+  return hash === "" || hash === "#" || hash.startsWith("#/");
+}
+
 export function parseRoute(hash) {
   if (hash === null || hash === undefined) return { name: "home" };
   if (typeof hash !== "string") return { name: "unknown" };
