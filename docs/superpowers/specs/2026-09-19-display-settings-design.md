@@ -1,6 +1,7 @@
 # Display settings and templates: design
 
-Status: **proposed, awaiting the owner's approval.** Nothing here is built.
+Status: **approved by the owner, 2026-09-20**, as amended by
+`2026-09-20-site-organization-design.md`. Not yet built.
 
 **Section 5 (templates) is superseded** by
 `2026-09-20-site-organization-design.md`: the owner ruled that templates are

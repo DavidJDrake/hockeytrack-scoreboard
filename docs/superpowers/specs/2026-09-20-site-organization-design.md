@@ -1,6 +1,6 @@
 # The scoreboard site, organized: design
 
-Status: **proposed, awaiting the owner's approval.** Nothing here is built.
+Status: **approved by the owner, 2026-09-20.** Steps 1 and 2 are built and live (PRs #34, #35). Decisions are in section 9.
 
 This extends, and in one place replaces,
 `2026-09-19-display-settings-design.md`. That document's wire format, panel
@@ -280,9 +280,9 @@ Each step ships alone and leaves the site working.
 Steps 1 and 2 change nothing about security posture. Step 4 is the one to
 review hardest.
 
-## 9. Decisions and questions
+## 9. Decisions
 
-Decided by the owner, 2026-09-20:
+All made by the owner, 2026-09-20. Nothing is open.
 
 - Settings (defaults and overrides) and templates (content) are separate
   things. Section 5.
@@ -290,12 +290,10 @@ Decided by the owner, 2026-09-20:
   retire them until someone else claims. Section 6.
 - The sweep window is 365 days. Section 6.
 - "Retire" is the word.
-
-Still open:
-
-1. **Is "follow a team" the right first template?** And should a panel
-   following a team show anything on a day that club does not play (proposed:
-   off, like any panel with no game).
-2. The choices offered for countdown (off, 1, 2, 6, 12, 24, 48 h) and final
-   score (off, 30 min, 1, 3, 6, 12, 24 h).
-3. Whether a countdown may show during sleep hours (proposed: no).
+- **Choices offered on the site.** Countdown: off, 1, 2, 6, 12, 24, 48 hours.
+  Final score: off, 30 minutes, 1, 3, 6, 12, 24 hours. (The API accepts any
+  whole minute in range, so the lists can change without redeploying it.)
+- **A countdown does not show during sleep hours.** A 07:00 wake shows it
+  already running. No per-panel switch.
+- **"Follow a team" is the first template**, and a panel following a team is
+  off on a day that club does not play, like any panel with no game.
