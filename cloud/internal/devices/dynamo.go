@@ -34,6 +34,7 @@ func marshalDevice(d Device) (map[string]types.AttributeValue, error) {
 		"thingName": &types.AttributeValueMemberS{Value: d.ThingName},
 		"name":      &types.AttributeValueMemberS{Value: d.Name},
 		"gameId":    &types.AttributeValueMemberN{Value: strconv.FormatInt(d.GameID, 10)},
+		"chosenAt":  &types.AttributeValueMemberN{Value: strconv.FormatInt(d.ChosenAt, 10)},
 	}
 	if d.Owner != "" {
 		item["owner"] = &types.AttributeValueMemberS{Value: d.Owner}
@@ -66,6 +67,12 @@ func unmarshalDevice(item map[string]types.AttributeValue) (Device, error) {
 		return Device{}, err
 	}
 	d.GameID = gameID
+	// Absent on every row written before this field existed: never chosen.
+	if _, ok := item["chosenAt"]; ok {
+		if d.ChosenAt, err = attrN(item, "chosenAt"); err != nil {
+			return Device{}, err
+		}
+	}
 	return d, nil
 }
 
@@ -189,12 +196,13 @@ func (x *Dynamo) Update(ctx context.Context, d Device) error {
 	_, err := x.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName:                aws.String(x.table),
 		Key:                      map[string]types.AttributeValue{"thingName": &types.AttributeValueMemberS{Value: d.ThingName}},
-		UpdateExpression:         aws.String("SET #n = :n, gameId = :g"),
+		UpdateExpression:         aws.String("SET #n = :n, gameId = :g, chosenAt = :c"),
 		ConditionExpression:      aws.String("#o = :o"),
 		ExpressionAttributeNames: map[string]string{"#n": "name", "#o": "owner"},
 		ExpressionAttributeValues: map[string]types.AttributeValue{
 			":n": &types.AttributeValueMemberS{Value: d.Name},
 			":g": &types.AttributeValueMemberN{Value: strconv.FormatInt(d.GameID, 10)},
+			":c": &types.AttributeValueMemberN{Value: strconv.FormatInt(d.ChosenAt, 10)},
 			":o": &types.AttributeValueMemberS{Value: d.Owner},
 		},
 		ReturnValuesOnConditionCheckFailure: types.ReturnValuesOnConditionCheckFailureAllOld,
@@ -216,7 +224,7 @@ func (x *Dynamo) Unbind(ctx context.Context, thingName, owner string) error {
 	_, err := x.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName:                aws.String(x.table),
 		Key:                      map[string]types.AttributeValue{"thingName": &types.AttributeValueMemberS{Value: thingName}},
-		UpdateExpression:         aws.String("REMOVE #o SET #n = :empty, gameId = :zero"),
+		UpdateExpression:         aws.String("REMOVE #o SET #n = :empty, gameId = :zero, chosenAt = :zero"),
 		ConditionExpression:      aws.String("#o = :o"),
 		ExpressionAttributeNames: map[string]string{"#o": "owner", "#n": "name"},
 		ExpressionAttributeValues: map[string]types.AttributeValue{

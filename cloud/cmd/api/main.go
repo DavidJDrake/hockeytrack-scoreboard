@@ -21,6 +21,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/iotdataplane"
 
 	"hockeytrack-scoreboard/internal/devices"
+	"hockeytrack-scoreboard/internal/gamestore"
 	"hockeytrack-scoreboard/internal/idtoken"
 	"hockeytrack-scoreboard/internal/iotpub"
 	"hockeytrack-scoreboard/internal/today"
@@ -73,11 +74,18 @@ func main() {
 		os.Exit(1)
 	}
 	iot := iotdataplane.NewFromConfig(cfg, func(o *iotdataplane.Options) { o.BaseEndpoint = &endpoint })
+	db := dynamodb.NewFromConfig(cfg)
 	h := &Handler{
-		Store:  devices.NewDynamo(dynamodb.NewFromConfig(cfg), table),
+		Store:  devices.NewDynamo(db, table),
 		Pub:    iotpub.NewIoT(iot),
 		Games:  func(ctx context.Context) ([]byte, error) { return games(ctx, scheduleURL) },
 		Tokens: idtoken.New(cfg.Region, pool, client),
+	}
+	// Optional, so a deployment without it still lists panels. This role may
+	// only GetItem on the games table: it reads what the reducer wrote and
+	// can change none of it.
+	if gamesTable := os.Getenv("GAMES_TABLE"); gamesTable != "" {
+		h.Game = gamestore.NewDynamo(db, gamesTable).Get
 	}
 	lambda.Start(h.Handle)
 }

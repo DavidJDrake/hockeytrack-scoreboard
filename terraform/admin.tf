@@ -241,6 +241,14 @@ data "aws_iam_policy_document" "api" {
     actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
     resources = [aws_dynamodb_table.devices.arn]
   }
+  # Read one game, and nothing else, from the table the reducer keeps: the
+  # panel list says what each panel should be showing, which needs the game's
+  # state. GetItem only -- this role cannot write a score, scan the table or
+  # delete from it. The reducer remains the only writer.
+  statement {
+    actions   = ["dynamodb:GetItem"]
+    resources = [aws_dynamodb_table.games.arn]
+  }
   # Every Query in dynamo.go (ByCode, ListByOwner) names an index, never the
   # table itself.
   statement {
@@ -274,6 +282,7 @@ resource "aws_lambda_function" "api" {
   environment {
     variables = {
       DEVICES_TABLE = aws_dynamodb_table.devices.name
+      GAMES_TABLE   = aws_dynamodb_table.games.name
       IOT_ENDPOINT  = "https://${data.aws_iot_endpoint.data.endpoint_address}"
       SCHEDULE_URL  = var.schedule_url
       USER_POOL_ID  = aws_cognito_user_pool.admin.id

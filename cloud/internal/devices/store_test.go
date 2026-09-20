@@ -155,3 +155,20 @@ func TestCondFailureDistinguishesMissingFromPresentByTheReturnedItem(t *testing.
 		t.Errorf("present item err = %v, want ErrAlreadyClaimed", err)
 	}
 }
+
+func TestWhenAGameWasChosenRoundTripsAndOldRowsReadAsNever(t *testing.T) {
+	item, err := marshalDevice(Device{ThingName: "scoreboard-7qf2", Owner: "sub-a", GameID: 5, ChosenAt: 1789871240471})
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, err := unmarshalDevice(item)
+	if err != nil || back.ChosenAt != 1789871240471 {
+		t.Fatalf("round trip: %+v, %v", back, err)
+	}
+	// Every row written before this field existed.
+	delete(item, "chosenAt")
+	old, err := unmarshalDevice(item)
+	if err != nil || old.ChosenAt != 0 {
+		t.Fatalf("a row with no chosenAt: %+v, %v", old, err)
+	}
+}

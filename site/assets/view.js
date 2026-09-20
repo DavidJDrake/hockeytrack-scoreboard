@@ -86,7 +86,7 @@ const MESSAGES = {
     "not-found": "That panel is no longer on your account.",
     "bad-request": "A panel needs a name.",
   },
-  unbind: { "not-found": "That panel is no longer on your account." },
+  release: { "not-found": "That panel is no longer on your account." },
   list: {},
   games: {
     unavailable: "Today's games could not be loaded, so a game cannot be chosen right now.",
