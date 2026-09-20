@@ -26,7 +26,11 @@ h1 { font-family: var(--display); font-weight: 700; font-size: clamp(36px, 5vw, 
 .row label { font-weight: 600; font-size: 13.5px; }
 .row input[type="text"], .row select { font: inherit; padding: 8px 10px; border: 2px solid var(--rule); background: var(--ice); color: var(--ink); min-width: 0; max-width: 100%; }
 .row input[type="text"]:focus-visible, .row select:focus-visible { border-color: var(--blue); }
-.code { font-family: var(--mono); font-size: 22px; letter-spacing: 0.08em; text-transform: uppercase; width: 12ch; }
+/* Wide enough for XXXX-XXXX and nothing more: nine characters, the letter
+   spacing after each, and a character of slack for the caret. content-box,
+   because under the page's border-box the padding and border came out of the
+   12ch this used to be, and the last character was cut off. */
+.code { font-family: var(--mono); font-size: 22px; letter-spacing: 0.08em; text-transform: uppercase; box-sizing: content-box; width: calc(10ch + 9 * 0.08em); }
 
 .card { border: 2px solid var(--blue); background: var(--blue-soft); padding: 18px 20px; margin: 0 0 32px; }
 .card h2 { font-family: var(--display); font-weight: 700; font-size: 24px; margin: 0 0 8px; }

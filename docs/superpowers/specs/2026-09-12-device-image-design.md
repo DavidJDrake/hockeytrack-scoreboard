@@ -599,6 +599,14 @@ Three things this section exists to say plainly:
 - **Two of the fixes were first justified by explanations that were false,** and review, not hardware, caught both: that a package upgrade would delete the wizard's mask (Debian's helper refuses to remove a mask it did not create), and that the GPU drivers were missing (on Mesa 26 they are compiled into a library that was already installed). The fixes held; the reasons written next to them were corrected everywhere they appeared.
 - **Diagnosis had to be built before it could be used.** With no login, no SSH and no console prompt, a failed panel said nothing. The persistent journal (§9.2) and `systemd.journald.forward_to_console=1` on the boot partition's `cmdline.txt` are what made `v0.1.1`'s and `v0.1.2`'s failures readable at all.
 
+### 9.9e Proven on hardware, 2026-09-19: the hardened image
+
+`v0.1.4` carries the network-surface pass (§9.13). On a Pi 4B, from the stock published image, it still booted unattended, joined Wi-Fi, enrolled and was issued exactly one active certificate with only the device policy — so the purge of avahi, the Bluetooth stack and all of OpenSSH took nothing the panel needs. Measured from another host on the same LAN, against a baseline taken from `v0.1.3` the same day with the same tools: the panel still answers ping and still refuses all 65,535 TCP ports, and every mDNS query that `v0.1.3` answered — its name, its link-local address, the service browse, and the `_workstation._tcp` record that published its hostname and MAC address — is now **refused**, with UDP 5353 closed. The full before/after table is under H9 in `docs/hardware-checks.md`.
+
+Three things are **not** yet shown, because they can only be read from the card's journal and the card has not been read since: that the Bluetooth adapter never attached, what the serial console did, and what it cost first paint.
+
+**The approval control held against the agent that built the image.** `v0.1.5` was ready while the owner had only a phone. At the owner's explicit instruction the agent attempted the `image-release` approval through the GitHub API with the owner's credentials, after verifying that the run, the tag and the tip of `main` were the same commit. Claude Code's permission layer refused the call, and the release waited for the owner. §9.9 describes the approval as "a deliberate second action, not a second person"; this is the first evidence that the action cannot be delegated to the automation it exists to check.
+
 ### 9.10 Order of work and proof
 
 1. **Code:** the gate and its fixtures, the pi-gen recipe, the workflow, `images.tf`, the monitor, and the download page, each test-first where it can be.

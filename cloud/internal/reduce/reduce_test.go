@@ -314,3 +314,82 @@ func TestFinalEventClearsPenaltyBox(t *testing.T) {
 		t.Errorf("penalties should be cleared on final: %+v", s.Penalties)
 	}
 }
+
+func runningClock(seconds, period int, running bool, at time.Time) Event {
+	body := fmt.Sprintf(`{"gameId":2025020001,"gameState":"LIVE","period":%d,"periodType":"REG",`+
+		`"secondsRemaining":%d,"running":%t,"inIntermission":false,"situationCode":"1551",`+
+		`"homeTeam":"FLA","awayTeam":"CHI","score":{"CHI":0,"FLA":2},"shots":{"CHI":3,"FLA":4},`+
+		`"observedAt":%q}`, period, seconds, running, at.Format(time.RFC3339))
+	return Event{DetailType: "nhl.game.clock", Detail: json.RawMessage(body), Time: at}
+}
+
+// Seen on the first live game on a real panel (VAN at SEA, 2026-09-19): the
+// clock counted down five seconds, jumped back, and did it again, for as long
+// as play ran. The NHL's feed repeats one clock value for 20 to 40 seconds
+// while saying "running"; we poll every five. Each repeat was stamped as if
+// it had been read off the scoreboard that instant, so the panel's
+// seconds - (now - asOf) started over from the same number every time.
+func TestARepeatedRunningSampleKeepsItsAnchor(t *testing.T) {
+	t0 := time.Date(2026, 9, 20, 2, 29, 27, 0, time.UTC)
+	s, _, _ := Reduce(State{}, runningClock(369, 2, true, t0))
+	if s.AsOf != t0.UnixMilli() {
+		t.Fatalf("first sample: asOf = %d, want %d", s.AsOf, t0.UnixMilli())
+	}
+	for i := 1; i <= 4; i++ {
+		at := t0.Add(time.Duration(i) * 5 * time.Second)
+		var changed bool
+		s, changed, _ = Reduce(s, runningClock(369, 2, true, at))
+		if s.AsOf != t0.UnixMilli() {
+			t.Fatalf("repeat %d: asOf moved to %d; the panel's clock would jump back", i, s.AsOf)
+		}
+		// The panel judges freshness by whether the document changed. A
+		// repeat must still change it, or a healthy feed reads as NO UPDATES.
+		if !changed || s.SeenAt != at.UnixMilli() {
+			t.Fatalf("repeat %d: changed=%v seenAt=%d, want a document that says it was just confirmed", i, changed, s.SeenAt)
+		}
+	}
+	// The feed catches up: a new value is a new reading, anchored to now.
+	t1 := t0.Add(40 * time.Second)
+	s, _, _ = Reduce(s, runningClock(326, 2, true, t1))
+	if s.AsOf != t1.UnixMilli() || s.Clock.Seconds != 326 {
+		t.Errorf("new sample: asOf=%d seconds=%d", s.AsOf, s.Clock.Seconds)
+	}
+}
+
+func TestOnlyAGenuineRepeatKeepsTheAnchor(t *testing.T) {
+	t0 := time.Date(2026, 9, 20, 2, 29, 27, 0, time.UTC)
+	at := t0.Add(5 * time.Second)
+	cases := []struct {
+		name        string
+		first, next Event
+	}{
+		{"the clock was stopped", runningClock(369, 2, false, t0), runningClock(369, 2, true, at)},
+		{"the clock has stopped", runningClock(369, 2, true, t0), runningClock(369, 2, false, at)},
+		{"a stopped clock, repeated", runningClock(369, 2, false, t0), runningClock(369, 2, false, at)},
+		{"another period", runningClock(1200, 2, true, t0), runningClock(1200, 3, true, at)},
+		{"a different value", runningClock(369, 2, true, t0), runningClock(368, 2, true, at)},
+	}
+	for _, c := range cases {
+		s, _, _ := Reduce(State{}, c.first)
+		s, _, _ = Reduce(s, c.next)
+		if s.AsOf != at.UnixMilli() {
+			t.Errorf("%s: asOf = %d, want re-anchored to %d", c.name, s.AsOf, at.UnixMilli())
+		}
+	}
+}
+
+// If the same value keeps coming for a whole minute, the likelier story is
+// that play stopped and the feed has not said so. Extrapolating on is then
+// the bigger lie; go back to trusting the sample.
+func TestARepeatIsNotTrustedForEver(t *testing.T) {
+	t0 := time.Date(2026, 9, 20, 2, 29, 27, 0, time.UTC)
+	s, _, _ := Reduce(State{}, runningClock(369, 2, true, t0))
+	var at time.Time
+	for i := 1; i <= 12; i++ {
+		at = t0.Add(time.Duration(i) * 5 * time.Second)
+		s, _, _ = Reduce(s, runningClock(369, 2, true, at))
+	}
+	if s.AsOf != at.UnixMilli() {
+		t.Errorf("after %v of one value, asOf = %d, want re-anchored to %d", at.Sub(t0), s.AsOf, at.UnixMilli())
+	}
+}

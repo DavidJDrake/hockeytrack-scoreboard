@@ -7,12 +7,34 @@ export function panelTitle(device) {
   return name || device.thingName;
 }
 
+// Copied from HockeyTrack's schedule page, which already solved this: a row
+// there is the clubs, the building, and a "Pre" chip on preseason games. The
+// building is what tells a split-squad night apart -- MTL at TOR and TOR at
+// MTL at the same hour, which the owner first read as a bug in this list.
+//
+// `type` is the NHL's and comes through from HockeyTrack's schedule (1
+// preseason, 2 regular season, 3 playoffs). The same two digits sit in the
+// game id -- season (4), type (2), number (4) -- so a today document from an
+// API older than this page still gets its chip.
+export function gameType(game) {
+  if ([1, 2, 3].includes(game?.type)) return game.type;
+  const id = String(game?.gameId ?? "");
+  const fromId = /^\d{10}$/.test(id) ? Number(id.slice(4, 6)) : 0;
+  return [1, 2, 3].includes(fromId) ? fromId : 0;
+}
+
+const TYPE_CHIP = { 1: "Pre", 3: "Playoffs" };
+
 export function gameLabel(game, { timeZone, locale } = {}) {
-  const teams = `${game.away} at ${game.home}`;
+  const parts = [`${game.away} at ${game.home}`];
   const when = new Date(game.start);
-  if (Number.isNaN(when.getTime())) return teams;
-  const time = new Intl.DateTimeFormat(locale, { hour: "numeric", minute: "2-digit", timeZone }).format(when);
-  return `${teams} · ${time}`;
+  if (!Number.isNaN(when.getTime())) {
+    parts.push(new Intl.DateTimeFormat(locale, { hour: "numeric", minute: "2-digit", timeZone }).format(when));
+  }
+  if (typeof game.venue === "string" && game.venue.trim()) parts.push(game.venue.trim());
+  const chip = TYPE_CHIP[gameType(game)];
+  if (chip) parts.push(chip);
+  return parts.join(" · ");
 }
 
 export function gameChoices(device, games, options = {}) {
