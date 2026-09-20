@@ -10,7 +10,8 @@ import { beginSignIn, completeSignIn, forgetSignIn, logoutUrl, mayReauth, wasSig
 import { ApiError, createApi } from "./api.js";
 import { reformat } from "./claimcode.js";
 import { SETUP_FILE_NAME, SetupFileError, countryNoteFor, regionFromLocale, setupFileFor } from "./setupfile.js";
-import { makeEl, panelRow } from "./panel.js";
+import { claimedRow, homeRow, makeEl, panelControls } from "./panel.js";
+import { hrefFor, parseRoute, recallRoute, rememberRoute, titleFor } from "./routes.js";
 import { emailVerified, messageFor, panelTitle } from "./view.js";
 
 const $ = (id) => document.getElementById(id);
@@ -24,6 +25,10 @@ let session = null;
 // last rather than the user's final choice. The re-render that ends every
 // action puts each control back to what the server holds.
 let busy = false;
+// What the API last said, kept so that moving between pages draws from it
+// rather than fetching again. Every action ends in refresh(), which replaces
+// it; nothing edits it in place.
+let loaded = { devices: [], games: [], gamesFailed: false, ready: false };
 
 const el = makeEl(document);
 
@@ -61,6 +66,8 @@ function setStatus(text, { error = false } = {}) {
 }
 
 function signIn() {
+  // Signing in leaves for Cognito and comes back to "/". Carry the page.
+  rememberRoute(sessionStorage, location.hash);
   beginSignIn(cfg, { origin: location.origin, storage: sessionStorage, navigate: (url) => location.assign(url) })
     .catch(() => {
       // Most plausibly no Web Crypto, which browsers withhold outside a secure
@@ -103,6 +110,9 @@ function showSignedOut(message = "") {
   $("signed-in").hidden = true;
   $("who").hidden = true;
   $("sign-out").hidden = true;
+  $("nav-home").hidden = true;
+  $("nav-panels").hidden = true;
+  $("title").textContent = titleFor({ name: "home" });
   setStatus(message, { error: Boolean(message) });
 }
 
@@ -111,9 +121,12 @@ async function showSignedIn() {
   $("who").textContent = typeof claims.email === "string" ? claims.email : "";
   $("who").hidden = false;
   $("sign-out").hidden = false;
+  $("nav-home").hidden = false;
+  $("nav-panels").hidden = false;
   $("signed-out").hidden = true;
   $("signed-in").hidden = false;
   renderAdd(claims);
+  render();
   await refresh();
 }
 
@@ -130,9 +143,10 @@ async function refresh() {
     return false;
   }
   const gamesFailed = Boolean(games.err);
-  renderPanels(devices, gamesFailed ? [] : games, gamesFailed);
+  loaded = { devices, games: gamesFailed ? [] : games, gamesFailed, ready: true };
+  render();
   if (gamesFailed) reportFailure("games", games.err);
-  else setStatus(devices.length ? "" : "No panels on your account yet.");
+  else setStatus("");
   return true;
 }
 
@@ -155,30 +169,75 @@ async function act(action, run, success) {
   }
 }
 
-function renderPanels(devices, games, gamesFailed) {
-  const list = $("panels");
-  list.replaceChildren(...devices.map((device) => panelItem(device, games, gamesFailed)));
-  list.hidden = devices.length === 0;
+// Draw the page the fragment names, from what is already loaded. Called on
+// sign-in, after every refresh, and whenever the fragment changes.
+function render({ moved = false } = {}) {
+  if (!session) return;
+  const route = parseRoute(location.hash);
+  const device = route.name === "panel" ? loaded.devices.find((d) => d.thingName === route.thing) : null;
+
+  for (const name of ["home", "panels", "panel", "unknown"]) $(`view-${name}`).hidden = name !== route.name;
+  // A panel's own page sits under Panels, so Panels stays marked there.
+  const current = { home: "nav-home", panels: "nav-panels", panel: "nav-panels" }[route.name];
+  for (const id of ["nav-home", "nav-panels"]) {
+    if (id === current) $(id).setAttribute("aria-current", route.name === "panel" ? "true" : "page");
+    else $(id).removeAttribute("aria-current");
+  }
+
+  const title = titleFor(route, device ? panelTitle(device) : "");
+  $("title").textContent = title;
+  document.title = `${title} · HockeyTrack`;
+
+  const { devices, games, gamesFailed, ready } = loaded;
+  if (route.name === "home") {
+    $("home-panels").replaceChildren(...devices.map((d) => homeRow(el, d, games, gamesFailed)));
+    $("home-panels").hidden = devices.length === 0;
+    $("home-empty").hidden = !ready || devices.length > 0;
+  } else if (route.name === "panels") {
+    $("claimed-panels").replaceChildren(...devices.map((d) => claimedRow(el, d)));
+    $("claimed-panels").hidden = devices.length === 0;
+    $("claimed-empty").hidden = !ready || devices.length > 0;
+  } else if (route.name === "panel") {
+    // The fragment is only a name. Whether it is this account's panel is the
+    // API's answer, and the API gives the same 404 for "not yours" as for
+    // "no such panel"; so does this.
+    const detail = $("panel-detail");
+    if (device) detail.replaceChildren(panelPage(device, games, gamesFailed));
+    else detail.replaceChildren(el("p", {}, ready ? "That panel is not on your account." : ""));
+  }
+
+  // A page change made by the person, not by a refresh: put focus on the
+  // heading so a keyboard or screen-reader user lands on the new page.
+  // And clear what the last page said: "Game set." under the heading of a
+  // different page is about nothing on it (seen in a real browser).
+  if (moved) {
+    if (!busy) setStatus("");
+    $("title").focus();
+  }
 }
 
-function panelItem(device, games, gamesFailed) {
-  // The row itself is built in panel.js, where a test can press its
-  // buttons; what each control DOES is here, because it needs act(), the
-  // api and the busy flag. Keep it that way: the moment a decision moves
-  // into the row builder it stops being testable without a browser.
-  return panelRow(el, device, games, gamesFailed, {
+function panelPage(device, games, gamesFailed) {
+  // The controls are built in panel.js, where a test can press them; what
+  // each one DOES is here, because it needs act(), the api and the busy
+  // flag. Keep it that way: the moment a decision moves into the builder it
+  // stops being testable without a browser.
+  return panelControls(el, device, games, gamesFailed, {
     busy: () => busy,
     setGame: (gameId) => act("setGame", () => api.setGame(device.thingName, gameId),
       "Game set. The panel switches within a few seconds."),
     resend: (gameId) => act("resend", () => api.setGame(device.thingName, gameId),
       "Sent. The panel shows that game again within a few seconds."),
     rename: (name) => act("rename", () => api.rename(device.thingName, name), "Renamed."),
-    remove: (title) => {
-      // Honest about what removal does not do: the panel keeps its
-      // certificate until it is factory reset (SCO-24 is where revocation
-      // on unbind lives).
-      if (!confirm(`Remove ${title} from your account? It keeps showing its current game until it is factory reset.`)) return;
-      act("unbind", () => api.unbind(device.thingName), "Removed.");
+    release: (title) => {
+      // Honest about what releasing does not do: the panel keeps its
+      // certificate (SCO-24 is where revocation from the site lives).
+      if (!confirm(`Release ${title} from your account? It goes back to showing a claim code. Its certificate is not revoked.`)) return;
+      act("release", async () => {
+        await api.unbind(device.thingName);
+        // Its page is about to stop existing. Leave before the refresh
+        // redraws it as "not on your account".
+        location.hash = hrefFor({ name: "panels" });
+      }, "Released.");
     },
   });
 }
@@ -278,6 +337,7 @@ function wireClaim() {
 async function start() {
   $("sign-in").addEventListener("click", () => signIn());
   $("sign-out").addEventListener("click", () => signOut());
+  window.addEventListener("hashchange", () => render({ moved: true }));
   wireClaim();
 
   // Capture the URL and strip the callback params before anything that can
@@ -321,6 +381,9 @@ async function start() {
       showSignedOut("Sign-in could not be completed. Try again.");
       return;
     }
+    // Back to the page they were on. recallRoute hands back one of this
+    // site's own fragments or "#/", whatever was in storage.
+    history.replaceState(null, "", `/${recallRoute(sessionStorage)}`);
     await showSignedIn();
     return;
   }

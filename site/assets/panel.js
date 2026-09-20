@@ -1,4 +1,4 @@
-// One panel's row, built out of a document.
+// The pieces of each page that show a panel, built out of a document.
 //
 // This lives apart from app.js so it can be exercised against a fake
 // document the way download.js is -- app.js wires itself to the real page on
@@ -11,7 +11,8 @@
 // the markup sinks. What to DO when a control is used belongs to the caller:
 // this module knows the shape of a row, not what the API is or how failures
 // are reported.
-import { canResend, gameChoices, panelTitle } from "./view.js";
+import { hrefFor } from "./routes.js";
+import { canResend, followingLabel, gameChoices, panelTitle } from "./view.js";
 
 export function makeEl(doc) {
   return function el(tag, props = {}, ...children) {
@@ -28,7 +29,37 @@ export function makeEl(doc) {
   };
 }
 
-export function panelRow(el, device, games, gamesFailed, on) {
+function manageLink(el, device, title) {
+  // hrefFor refuses anything that is not a panel's name, so a link cannot be
+  // built out of whatever the API happened to return.
+  const link = el("a", { class: "btn", href: hrefFor({ name: "panel", thing: device.thingName }), "aria-label": `Manage ${title}` }, "Manage");
+  link.dataset.focusKey = `${device.thingName}:manage`;
+  return link;
+}
+
+// Home: the panel, what it follows, and the way to its own page. It shows;
+// it does not edit.
+export function homeRow(el, device, games, gamesFailed) {
+  const title = panelTitle(device);
+  return el("li", { class: "panel" },
+    el("h2", {}, title),
+    el("p", { class: "showing" }, followingLabel(device, games, gamesFailed)),
+    el("div", { class: "row" }, manageLink(el, device, title)));
+}
+
+// Panels: which panels are claimed.
+export function claimedRow(el, device) {
+  const title = panelTitle(device);
+  // An unnamed panel's title IS its id; saying it twice helps nobody.
+  const id = title === device.thingName ? [] : [el("span", { class: "thing" }, device.thingName)];
+  return el("li", { class: "panel" },
+    el("h2", {}, title),
+    ...id,
+    el("div", { class: "row" }, manageLink(el, device, title)));
+}
+
+// One panel's own page: what it shows, what it is called, and letting it go.
+export function panelControls(el, device, games, gamesFailed, on) {
   const title = panelTitle(device);
   const selectId = `game-${device.thingName}`;
 
@@ -82,21 +113,24 @@ export function panelRow(el, device, games, gamesFailed, on) {
     },
   }, nameInput, renameButton);
 
-  const remove = el("button", {
+  const release = el("button", {
     class: "btn quiet",
     type: "button",
-    "aria-label": `Remove ${title}`,
+    "aria-label": `Release ${title}`,
     onclick: () => {
       if (on.busy()) return;
-      on.remove(title);
+      on.release(title);
     },
-  }, "Remove");
-  remove.dataset.focusKey = `${device.thingName}:remove`;
+  }, "Release");
+  release.dataset.focusKey = `${device.thingName}:release`;
 
-  return el("li", { class: "panel" },
-    el("h2", {}, title),
+  return el("div", { class: "panel" },
     el("span", { class: "thing" }, device.thingName),
     el("div", { class: "row" }, el("label", { for: selectId }, "Game"), select, resend),
     renameForm,
-    el("div", { class: "row" }, remove));
+    el("h2", {}, "Release this panel"),
+    // The words are part of the control. "Remove" said none of this, and two
+    // panels were unbound and reflashed with their certificates still live.
+    el("p", {}, "Releasing takes the panel off your account. It shows a claim code again and anyone you give it to can claim it. It does not revoke the panel's certificate: if the panel is gone, or you are about to reflash its card, it needs retiring instead, which this site cannot do yet."),
+    el("div", { class: "row" }, release));
 }

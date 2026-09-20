@@ -36,3 +36,11 @@ h1 { font-family: var(--display); font-weight: 700; font-size: clamp(36px, 5vw, 
 .card h2 { font-family: var(--display); font-weight: 700; font-size: 24px; margin: 0 0 8px; }
 .card p { margin: 0 0 12px; }
 .card ol { margin: 8px 0 16px; padding-left: 20px; }
+
+/* The pages. */
+.nav a[aria-current] { text-decoration: underline; text-underline-offset: 4px; }
+h1:focus { outline: none; }
+h1:focus-visible { outline: 2px solid var(--blue); outline-offset: 4px; }
+h2.section { font-family: var(--display); font-weight: 700; font-size: 24px; margin: 0 0 12px; }
+.panel .showing { margin: 0; font-weight: 500; }
+.panel p { margin: 0; max-width: 60ch; }

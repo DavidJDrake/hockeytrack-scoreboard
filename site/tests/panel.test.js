@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { makeEl, panelRow } from "../assets/panel.js";
+import { claimedRow, homeRow, makeEl, panelControls } from "../assets/panel.js";
 
 // A document with just enough in it to build a row and press things, in the
 // spirit of download.test.js's fakeDoc. Deliberately not a DOM
@@ -57,10 +57,10 @@ function build(device, handlers = {}, { gamesFailed = false } = {}) {
     setGame: (id) => calls.push(["setGame", id]),
     resend: (id) => calls.push(["resend", id]),
     rename: (name) => calls.push(["rename", name]),
-    remove: () => calls.push(["remove"]),
+    release: () => calls.push(["release"]),
     ...handlers,
   };
-  const row = panelRow(makeEl(fakeDoc()), device, games, gamesFailed, on);
+  const row = panelControls(makeEl(fakeDoc()), device, games, gamesFailed, on);
   const nodes = every(row);
   return {
     calls,
@@ -99,13 +99,13 @@ test("it does nothing while another action is running", () => {
   assert.deepEqual(calls, []);
 });
 
-test("the row still sets a game, renames and removes", () => {
+test("the page still sets a game, renames and releases", () => {
   const { select, form, button, calls } = build(following);
   select.value = "2026020002";
   select.fire("change");
   form.fire("submit");
-  button("Remove").fire("click");
-  assert.deepEqual(calls, [["setGame", 2026020002], ["rename", "Den"], ["remove"]]);
+  button("Release").fire("click");
+  assert.deepEqual(calls, [["setGame", 2026020002], ["rename", "Den"], ["release"]]);
 });
 
 test("a game chosen while busy is put back rather than sent", () => {
@@ -119,4 +119,65 @@ test("a game chosen while busy is put back rather than sent", () => {
 test("the row never sets a markup property", () => {
   assert.throws(() => makeEl(fakeDoc())("div", { innerHTML: "<b>no</b>" }), /refusing to set/);
   assert.throws(() => makeEl(fakeDoc())("div", { outerHTML: "<b>no</b>" }), /refusing to set/);
+});
+
+test("releasing says what it does before anyone presses it", () => {
+  // "Remove" let two panels be unbound and reflashed with their certificates
+  // still live, because nothing said the identity survives. The words are
+  // part of the control.
+  const { row } = build(following);
+  const text = every(row).map((n) => n.text).join(" ");
+  assert.match(text, /claim code again/i);
+  assert.match(text, /does not revoke/i);
+});
+
+test("nothing on the page is called Remove any more", () => {
+  const { button } = build(following);
+  assert.equal(button("Remove"), undefined);
+});
+
+const link = (row) => every(row).find((n) => n.tagName === "a");
+
+test("a home row is the panel, what it follows, and a way to manage it", () => {
+  const row = homeRow(makeEl(fakeDoc()), following, games, false);
+  const text = every(row).map((n) => n.text).join(" | ");
+  assert.match(text, /Den/);
+  assert.match(text, /TBL at NYR/);
+  assert.equal(link(row).attrs.href ?? link(row).href, "#/panel/scoreboard-abc");
+  assert.equal(link(row).text, "Manage");
+  assert.equal(every(row).some((n) => ["select", "input", "form"].includes(n.tagName)), false, "home shows, it does not edit");
+});
+
+test("a home row for a panel following nothing says so", () => {
+  const text = every(homeRow(makeEl(fakeDoc()), nothing, games, false)).map((n) => n.text).join(" | ");
+  assert.match(text, /No game chosen/);
+});
+
+test("a home row does not invent a game when today's list could not be loaded", () => {
+  const text = every(homeRow(makeEl(fakeDoc()), following, [], true)).map((n) => n.text).join(" | ");
+  assert.match(text, /could not be loaded/i);
+  assert.doesNotMatch(text, /No game chosen/);
+});
+
+test("a claimed row names the panel, shows its id, and links to it", () => {
+  const row = claimedRow(makeEl(fakeDoc()), following);
+  const text = every(row).map((n) => n.text).join(" | ");
+  assert.match(text, /Den/);
+  assert.match(text, /scoreboard-abc/);
+  assert.equal(link(row).attrs.href ?? link(row).href, "#/panel/scoreboard-abc");
+});
+
+test("a link's accessible name says which panel it manages", () => {
+  const a = link(homeRow(makeEl(fakeDoc()), following, games, false));
+  assert.equal(a.attrs["aria-label"], "Manage Den");
+});
+
+test("a panel with no name of its own is not labelled with its id twice", () => {
+  // Seen in a real browser: the title falls back to the id, and the id was
+  // printed again underneath it.
+  const unnamed = { thingName: "scoreboard-abc", name: "" };
+  const ids = every(claimedRow(makeEl(fakeDoc()), unnamed)).filter((n) => n.text === "scoreboard-abc");
+  assert.equal(ids.length, 1);
+  const named = every(claimedRow(makeEl(fakeDoc()), following)).filter((n) => n.text === "scoreboard-abc");
+  assert.equal(named.length, 1, "a named panel still shows its id");
 });
