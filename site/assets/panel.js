@@ -12,6 +12,7 @@
 // this module knows the shape of a row, not what the API is or how failures
 // are reported.
 import { hrefFor } from "./routes.js";
+import { displayFor } from "./settings.js";
 import { inputFor, showingLine } from "./showing.js";
 import { canResend, gameChoices, panelTitle } from "./view.js";
 
@@ -42,7 +43,9 @@ function manageLink(el, device, title) {
 // a chosen game that neither the reducer nor today's schedule knows is not
 // "off", it is a question this page cannot answer.
 export function showingText(device, games, gamesFailed, nowMs, options = {}) {
-  const input = inputFor(device, games, nowMs);
+  // The settings the panel actually runs on: a countdown that starts two
+  // hours out, or sleep hours, change the answer.
+  const input = inputFor(device, games, nowMs, displayFor(device));
   if (input.unknownGame) {
     return gamesFailed ? "Not known: today's games could not be loaded" : "Not known: the chosen game is not on today's list";
   }

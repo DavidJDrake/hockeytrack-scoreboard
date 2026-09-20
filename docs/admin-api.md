@@ -138,6 +138,87 @@ window — read it before assuming a 500 here means nothing happened.
   record claiming a change the panel never received. If you get a 500 from
   this route, retry it; don't assume nothing happened.
 
+### Display settings
+
+Three layers, resolved on the server, field by field: the built-in values
+(countdown 12 h before puck drop, a final score up for 3 h, no sleep hours),
+the account's defaults, and one panel's overrides. The panel is sent only the
+result, and checks it again (`parse_display`).
+
+A **layer** is the same shape everywhere. Every key is optional, and an absent
+key says nothing, so the layer beneath shows through:
+
+```json
+{"countdownLeadMin": 120,
+ "finalHoldMin": 30,
+ "sleep": {"enabled": true, "start": "23:00", "end": "07:00", "zone": "America/Toronto"}}
+```
+
+- `countdownLeadMin` 0 to 2880, `finalHoldMin` 0 to 1440: whole minutes.
+- `sleep.enabled: false` is a value, not an absence: it is how a panel says
+  "no sleep hours" over an account default that has some.
+- `start`/`end` are `HH:MM`; `zone` is an IANA name, checked against an
+  alphabet and then against the time zone data built into the binary. Equal
+  ends are stored as switched off.
+- Decoding is **strict**: an unknown key is a 400. A client cannot put
+  `gameId`, `chosenAt` or a `display` block through these routes.
+- Bodies over 4 KB are a 400 before anything is parsed.
+
+#### `GET /api/settings`
+
+- **200** `{"defaults": <layer>, "builtIn": {"v":1,"countdownLeadMin":720,"finalHoldMin":180}}`
+
+#### `PUT /api/settings`
+
+Body: a layer. Saves the caller's defaults, **then** publishes the whole config
+document to each of the caller's panels.
+
+- **200** `{"defaults": <layer>, "notSent": ["scoreboard-…"]}`. `notSent`
+  names panels whose publish failed. The defaults are saved regardless, and
+  because every publish is the whole document composed from what is stored,
+  saving again converges.
+- **400** `{"error": "invalid settings"}`.
+
+#### `PUT /api/devices/{thing}/display`
+
+Body: a layer, which **replaces** the panel's overrides (send `{}` to clear
+them). Publishes, then saves, as the game route does.
+
+- **200** the device, as `GET /api/devices` returns it.
+- **400** invalid settings. **404** not the caller's panel, unclaimed, or no
+  such panel: the same answer for all three.
+- **500** `lookup failed` if the account's defaults could not be read.
+  Nothing is published that was built on settings nobody could read.
+- **502** the publish failed; nothing was saved.
+
+`GET /api/devices` adds to each panel:
+
+```json
+"display": {"overrides": <layer>,
+            "resolved": {"v":1,"countdownLeadMin":120,"finalHoldMin":180},
+            "sources": {"countdownLeadMin":"account","finalHoldMin":"built-in","sleep":"built-in"}}
+```
+
+absent if the account's defaults could not be read.
+
+#### The config document
+
+Every publish to a panel is written by `cloud/internal/panelconfig` and is the
+whole document, because a retained message replaces what was there:
+
+```json
+{"gameId": 2026020001, "chosenAt": 1789871240471,
+ "display": {"v":1,"countdownLeadMin":120,"finalHoldMin":180,
+             "sleep":{"start":"23:00","end":"07:00","zone":"America/Toronto"}}}
+```
+
+`chosenAt` changes only when the owner chooses a game; every other publish
+re-sends the stored one, because a panel reads a stamp it has not seen as a
+button press. A panel following nothing is sent `"gameId": null`, because a
+panel reads `0` as a game to select. `testdata/config-documents.json` is
+composed byte for byte by the Go suite and read by the panel's own parsers in
+the device suite.
+
 ### `PATCH /api/devices/{thing}`
 
 Renames a device. Purely cosmetic — the display name shown by the site, not

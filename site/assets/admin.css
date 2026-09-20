@@ -45,3 +45,13 @@ h2.section { font-family: var(--display); font-weight: 700; font-size: 24px; mar
 .panel .showing { margin: 0; font-weight: 500; }
 .panel p { margin: 0; max-width: 60ch; }
 .panel .showing .label { display: block; font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+
+/* Settings forms. */
+.settings { display: grid; gap: 12px; }
+.settings .row label { min-width: 11ch; }
+.settings input[type="time"] { font: inherit; padding: 8px 10px; border: 2px solid var(--rule); background: var(--ice); color: var(--ink); }
+.settings input[type="time"]:focus-visible { border-color: var(--blue); }
+.settings .sleep-window label { min-width: 0; }
+.settings .hint { color: var(--muted); font-size: 14px; max-width: 70ch; margin: 0; }
+#panel-detail { display: grid; gap: 24px; }
+#panel-detail .card { margin: 0; }
