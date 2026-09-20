@@ -27,6 +27,15 @@ type statusDetail struct {
 // has not caught up, and extrapolating further is the bigger error.
 const maxRepeatAnchorMs = 60_000
 
+// Where the NHL parks plays it has not placed yet; real sort orders run to a
+// few thousand. HockeyTrack's poller holds the same number and no longer
+// publishes a play while it carries one.
+const provisionalSeq = 9000
+
+// A game has a few hundred plays. This is room for all of them several times
+// over, and a bound on what one item in the games table can grow to.
+const maxSeenEvents = 1500
+
 type clockDetail struct {
 	GameID           int64          `json:"gameId"`
 	GameState        string         `json:"gameState"`
@@ -44,7 +53,11 @@ type clockDetail struct {
 }
 
 type playDetail struct {
-	GameID       int64          `json:"gameId"`
+	GameID int64 `json:"gameId"`
+	// EventID is the NHL's id for the play, which does not change. Seq is
+	// its sort order, which does. Zero from a publisher older than
+	// 2026-09-20.
+	EventID      int64          `json:"eventId"`
 	Seq          int64          `json:"seq"`
 	PlayType     string         `json:"playType"`
 	HomeTeam     string         `json:"homeTeam"`
@@ -311,13 +324,53 @@ func (s State) applyPlay(e Event) (State, bool, error) {
 	if err := json.Unmarshal(e.Detail, &d); err != nil {
 		return s, false, fmt.Errorf("play: %w", err)
 	}
-	if d.Seq <= s.LastSeq {
-		return s, false, nil // at-least-once delivery: already folded
+	// At-least-once delivery: fold each play once.
+	//
+	// By eventId, not by a highest seq. The NHL gives the plays that open a
+	// period provisional sort orders in the 9000s and renumbers them a
+	// minute later, and it inserts plays late, below numbers already
+	// published. A highest-seq mark is poisoned by the first and blind to
+	// the second: on 2026-09-20 one 9004 meant every later play of four
+	// games -- goals, penalties -- was dropped here as a duplicate.
+	late := false
+	if d.EventID != 0 {
+		for _, id := range s.SeenEvents {
+			if id == d.EventID {
+				return s, false, nil
+			}
+		}
+		// A fresh slice, never an append in place: State is passed by value
+		// and a caller may still hold the array this one points at.
+		seen := make([]int64, 0, len(s.SeenEvents)+1)
+		seen = append(append(seen, s.SeenEvents...), d.EventID)
+		if len(seen) > maxSeenEvents {
+			seen = seen[len(seen)-maxSeenEvents:]
+		}
+		s.SeenEvents = seen
+		late = d.Seq < s.LastSeq && s.LastSeq < provisionalSeq
+		// The mark is for the record now. It never holds a provisional
+		// number, and one left by the old rule is replaced at once.
+		if d.Seq < provisionalSeq && (d.Seq > s.LastSeq || s.LastSeq >= provisionalSeq) {
+			s.LastSeq = d.Seq
+		}
+	} else {
+		// A publisher that sends no eventId: the old rule, which is all
+		// there is to go on.
+		if d.Seq <= s.LastSeq {
+			return s, false, nil
+		}
+		s.LastSeq = d.Seq
 	}
-	s.LastSeq = d.Seq
 	s.GameID = d.GameID
 	s.setTeams(d.AwayTeam, d.HomeTeam)
-	s.applyScore(d.Score)
+	if late {
+		// A play that arrived after later ones carries the score as it was
+		// when the play happened. It may add to what is known; it must not
+		// take the score back.
+		s.applyScoreNoRegress(d.Score)
+	} else {
+		s.applyScore(d.Score)
+	}
 	// Play events (goal, penalty, period-start, period-end) never restamp
 	// AsOf: only the clock heartbeat does, because only it also re-anchors
 	// Clock.Seconds. Restamping here without a fresh Clock.Seconds would
