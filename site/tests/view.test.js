@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
-import { canResend, emailVerified, gameChoices, gameLabel, messageFor, panelTitle } from "../assets/view.js";
+import { canResend, emailVerified, gameChoices, gameLabel, gameType, messageFor, panelTitle } from "../assets/view.js";
 
 const games = [
   { gameId: 1, away: "TOR", home: "MTL", start: "2026-10-08T23:00:00Z", state: "FUT" },
@@ -98,4 +98,49 @@ test("no script on this site turns a string into markup", () => {
     const source = readFileSync(new URL(name, dir), "utf8");
     assert.doesNotMatch(source, sinks, `${name} uses an HTML or code sink`);
   }
+});
+
+// Found by the owner on a real preseason night: "MTL at TOR" and "TOR at MTL"
+// at the same hour looks like a bug. It is a split-squad night. HockeyTrack's
+// schedule page shows the building and a "Pre" chip; this list copies it.
+const night = [
+  { gameId: 2026010006, away: "MTL", home: "TOR", start: "2026-09-19T23:00:00Z", state: "FUT", type: 1, venue: "Scotiabank Arena" },
+  { gameId: 2026010007, away: "TOR", home: "MTL", start: "2026-09-19T23:00:00Z", state: "FUT", type: 1, venue: "Centre Bell" },
+];
+const label = (game) => gameLabel(game, { timeZone: "America/Toronto", locale: "en-US" });
+
+test("a row is the clubs, the time, the building, and a Pre chip", () => {
+  assert.equal(label(night[0]), "MTL at TOR · 7:00 PM · Scotiabank Arena · Pre");
+  assert.equal(label(night[1]), "TOR at MTL · 7:00 PM · Centre Bell · Pre");
+});
+
+test("a regular-season game gets no chip, and a playoff game says so", () => {
+  assert.equal(label({ ...night[0], gameId: 2026020002, type: 2 }), "MTL at TOR · 7:00 PM · Scotiabank Arena");
+  assert.equal(label({ ...night[0], gameId: 2026030111, type: 3 }), "MTL at TOR · 7:00 PM · Scotiabank Arena · Playoffs");
+});
+
+test("the type is the schedule's, and the game id's when the schedule did not say", () => {
+  assert.equal(gameType({ gameId: 2026020002, type: 1 }), 1, "the schedule wins");
+  assert.equal(gameType({ gameId: 2026010006 }), 1, "an older API: read from the id");
+  assert.equal(gameType({ gameId: "2026030111" }), 3, "an id that arrives as a string");
+  for (const odd of [{}, null, undefined, { gameId: 12 }, { gameId: "abc" }, { gameId: 2026990001 }, { gameId: 5, type: 9 }]) {
+    assert.equal(gameType(odd), 0, `unreadable (${JSON.stringify(odd)}) gets no chip`);
+  }
+});
+
+test("a today document from before venues still makes a sensible row", () => {
+  const old = { gameId: 2026010006, away: "MTL", home: "TOR", start: "2026-09-19T23:00:00Z" };
+  assert.equal(label(old), "MTL at TOR · 7:00 PM · Pre");
+  assert.equal(label({ ...old, venue: "   " }), "MTL at TOR · 7:00 PM · Pre", "a blank venue");
+  assert.equal(label({ ...old, venue: 42 }), "MTL at TOR · 7:00 PM · Pre", "a venue that is not text");
+  assert.equal(label({ ...old, start: "soon" }), "MTL at TOR · Pre", "an unreadable start");
+});
+
+test("the picker shows the same rows", () => {
+  const choices = gameChoices({ thingName: "scoreboard-abc", gameId: 2026010006 }, night, { timeZone: "America/Toronto", locale: "en-US" });
+  assert.deepEqual(choices.map((c) => c.label), [
+    "MTL at TOR · 7:00 PM · Scotiabank Arena · Pre",
+    "TOR at MTL · 7:00 PM · Centre Bell · Pre",
+  ]);
+  assert.equal(choices[0].selected, true);
 });
