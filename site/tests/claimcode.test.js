@@ -109,3 +109,18 @@ test("a forward delete that did remove a character is left alone", () => {
   assert.deepEqual(reformat("ABCDEF", 4, { inputType: "insertText", previous: "ABCD-EF" }), { value: "ABCD-EF", caret: 4 });
   assert.deepEqual(reformat("ABCDEF", 4), { value: "ABCD-EF", caret: 4 });
 });
+
+test("the box is wide enough to show a whole code", () => {
+  // Found by the owner: at 12ch under border-box, padding and border ate the
+  // width and the placeholder read "XXXX-XXX". Pin the two things that fix
+  // it: the width counts all nine characters with their spacing, and padding
+  // is outside it.
+  const css = readFileSync(new URL("../assets/admin.css", import.meta.url), "utf8");
+  const rule = css.match(/^\.code \{[^}]*\}/m);
+  assert.ok(rule, ".code rule not found");
+  assert.match(rule[0], /box-sizing: content-box/);
+  const width = rule[0].match(/width: calc\((\d+)ch \+ (\d+) \* 0\.08em\)/);
+  assert.ok(width, "width is not the expected calc()");
+  assert.ok(Number(width[1]) >= CODE_LENGTH + 1, "room for every character and the dash");
+  assert.ok(Number(width[2]) >= CODE_LENGTH + 1, "letter spacing counted for each");
+});
