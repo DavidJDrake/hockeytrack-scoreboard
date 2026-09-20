@@ -19,6 +19,8 @@
   <div class="wrap">
     <a class="wordmark" href="/">HOCKEYTRACK</a>
     <ul>
+      <li><a id="nav-home" href="#/" hidden>Home</a></li>
+      <li><a id="nav-panels" href="#/panels" hidden>Panels</a></li>
       <li><span id="who" class="who" hidden></span></li>
       <li><button id="sign-out" class="link" type="button" hidden>Sign out</button></li>
     </ul>
@@ -26,38 +28,58 @@
 </nav>
 
 <main class="wrap" id="main">
-  <h1>Scoreboards</h1>
+  <h1 id="title" tabindex="-1">Scoreboards</h1>
   <p class="status" id="status" role="status" aria-live="polite" tabindex="-1"></p>
   <noscript><p class="status error">This page needs JavaScript to sign you in.</p></noscript>
 
   <section id="signed-out" hidden>
-    <p class="lede">Sign in to add a scoreboard panel to your account, choose the game it follows, or remove it. Accounts are by invitation.</p>
+    <p class="lede">Sign in to add a scoreboard panel to your account, choose the game it follows, or release it. Accounts are by invitation.</p>
     <button id="sign-in" class="btn primary" type="button">Sign in with Google</button>
   </section>
 
   <section id="signed-in" hidden>
-    <ul class="panels" id="panels" aria-label="Your panels" hidden></ul>
+    <!-- The pages. One document, addressed by the fragment: see routes.js for
+         why they are not separate documents. -->
+    <section id="view-home" hidden>
+      <ul class="panels" id="home-panels" aria-label="Your panels" hidden></ul>
+      <p id="home-empty" hidden>No panels on your account yet. <a href="#/panels">Claim a panel or set up a new one</a>.</p>
+    </section>
 
-    <form class="card" id="claim" novalidate>
-      <h2>Claim a panel</h2>
-      <p>Type the code shown on the panel's screen.</p>
-      <div class="row">
-        <label for="claim-code" class="sr-only">Pairing code</label>
-        <input id="claim-code" class="code" type="text" name="code" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="16" placeholder="XXXX-XXXX">
-        <button class="btn primary" type="submit">Claim</button>
-      </div>
-    </form>
+    <section id="view-panels" hidden>
+      <form class="card" id="claim" novalidate>
+        <h2>Claim a panel</h2>
+        <p>Type the code shown on the panel's screen.</p>
+        <div class="row">
+          <label for="claim-code" class="sr-only">Pairing code</label>
+          <input id="claim-code" class="code" type="text" name="code" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="16" placeholder="XXXX-XXXX">
+          <button class="btn primary" type="submit">Claim</button>
+        </div>
+      </form>
 
-    <section class="card" id="add" aria-labelledby="add-heading">
-      <h2 id="add-heading">Set up a new panel</h2>
-      <ol>
-        <li><a href="/download/">Download the scoreboard image</a>, verify it, and write it to an SD card with Raspberry Pi Imager.</li>
-        <li>Download the setup file and save it onto the card's boot partition. It must be named exactly <code>scoreboard-setup.txt</code>. If you have downloaded it before, your browser may have added a number to the name; remove it.</li>
-        <li>Open it there, and type your Wi-Fi name and password. Check the <code>country=</code> line too -- the panel's Wi-Fi stays switched off until it knows which country it is in.</li>
-        <li>Put the card in the panel and power it on. On the first start the screen can stay dark for up to two minutes while the panel joins your Wi-Fi — that is normal, leave it powered on. Before claiming the code it shows, check the panel says "Waiting for" your own address -- if it says "Waiting to be claimed" instead, the setup file wasn't read.</li>
-      </ol>
-      <p id="add-note" hidden></p>
-      <button id="download" class="btn" type="button">Download setup file</button>
+      <h2 class="section">Your panels</h2>
+      <ul class="panels" id="claimed-panels" aria-label="Your panels" hidden></ul>
+      <p id="claimed-empty" hidden>None yet. A panel appears here once you have claimed it.</p>
+
+      <section class="card" id="add" aria-labelledby="add-heading">
+        <h2 id="add-heading">Set up a new panel</h2>
+        <ol>
+          <li><a href="/download/">Download the scoreboard image</a>, verify it, and write it to an SD card with Raspberry Pi Imager.</li>
+          <li>Download the setup file and save it onto the card's boot partition. It must be named exactly <code>scoreboard-setup.txt</code>. If you have downloaded it before, your browser may have added a number to the name; remove it.</li>
+          <li>Open it there, and type your Wi-Fi name and password. Check the <code>country=</code> line too -- the panel's Wi-Fi stays switched off until it knows which country it is in.</li>
+          <li>Put the card in the panel and power it on. On the first start the screen can stay dark for up to two minutes while the panel joins your Wi-Fi — that is normal, leave it powered on. Before claiming the code it shows, check the panel says "Waiting for" your own address -- if it says "Waiting to be claimed" instead, the setup file wasn't read.</li>
+        </ol>
+        <p id="add-note" hidden></p>
+        <button id="download" class="btn" type="button">Download setup file</button>
+      </section>
+    </section>
+
+    <section id="view-panel" hidden>
+      <p><a href="#/panels">All panels</a></p>
+      <div id="panel-detail"></div>
+    </section>
+
+    <section id="view-unknown" hidden>
+      <p>There is no page at that address. <a href="#/">Go to your scoreboards</a>.</p>
     </section>
   </section>
 </main>
