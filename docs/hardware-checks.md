@@ -15,7 +15,7 @@ Spec: `docs/superpowers/specs/2026-09-12-device-image-design.md`
 | H6 | CMA on the Zero 2 W | A bar panel renders without CMA exhaustion | **SHELVED, 2026-09-19** — the owner cannot find their Zero 2 W and the board is not affordably available. The project targets the Pi 4B only for now. Not a failure and not pending: nothing is waiting on it, and no claim anywhere should depend on it |
 | H7 | Keyboard under kmsdrm | A USB keyboard drives the settings screen | not yet run |
 | H8 | A panel enrolls itself | Pairing, claim and restart all work end to end against real AWS | **PASS on the core path, 2026-09-19 (v0.1.3, Pi 4)** — steps 0, 1, 2, 5 and 7. Steps 3, 4, 6 and 8 are not yet run |
-| H9 | The hardened image answers nothing | It still boots, joins Wi-Fi and enrolls on a Pi 4B; the serial console appeared and the serial getty did not; and from another machine on the same LAN every mDNS query goes unanswered and no TCP port is open, each check backed by a positive control | **not yet run** — added 2026-09-19 with the network-surface pass (spec §9.13), against a v0.1.3 baseline measured the same day. Must run on the first image built after it |
+| H9 | The hardened image answers nothing | It still boots, joins Wi-Fi and enrolls on a Pi 4B; the serial console appeared and the serial getty did not; and from another machine on the same LAN every mDNS query goes unanswered and no TCP port is open, each check backed by a positive control | **PASS on parts 1–3, 2026-09-19 (v0.1.4, Pi 4B)** — still boots, joins Wi-Fi and enrolls; from the LAN it answers ping and refuses everything else: 0 of 65,535 TCP ports open, all four mDNS queries **refused**, `scoreboard.local` unresolvable. **Not yet shown:** Bluetooth off and the serial console's state (both are read from the card's journal), and first-paint time against v0.1.3 |
 
 H4, H5 and H6 need an image, so they belong to B2. H1, H2, H3 and H7 can be run
 as soon as this plan is installed on a Pi. **H6 is shelved as of 2026-09-19**
@@ -1422,6 +1422,68 @@ unfalsifiable.**
 The first fast UDP pass on v0.1.3 reported 5355 as "silent"; that was the
 kernel's ICMP rate limit and not a listener, which is why the procedure above
 probes one port every ~2 s.
+
+### Result, 2026-09-19 — v0.1.4 on a Pi 4B
+
+The published `v0.1.4` image, verified by checksum and by `gh attestation
+verify` against the release workflow at `refs/tags/v0.1.4`, flashed with
+nothing edited on the card by hand. The setup file was the site's own, with
+`ssid`, `psk`, `country=US` and `rotate=270` filled in.
+
+**Parts 1 and 2 (the regression).** The panel booted unattended, joined Wi-Fi,
+showed the pairing screen the right way up and was claimed; the owner's report
+was "all working as expected for device". Read back from AWS: the new thing has
+**exactly one** certificate, `ACTIVE`, carrying the `scoreboard-device` policy
+and no other. The purge of avahi, the Bluetooth stack and all of OpenSSH took
+nothing the panel needs. The panel kept the same address and the same WLAN MAC
+(`D8:3A:DD:29:33:6D`) as under v0.1.3, found by the ping sweep and `arp.exe`
+filter in part 2.
+
+**Part 3 (nothing answers).** Run from the same Windows + WSL2 machine as the
+baseline, the same day, with the positive control in the same run:
+
+| Check | v0.1.3 (before) | v0.1.4 (measured) |
+|---|---|---|
+| ICMP echo (positive control) | answers | **answers**, 3 of 3 |
+| TCP, all 65535 ports | 0 open, 65535 refused | **0 open, 65535 refused, 0 unanswered** (9 s) |
+| `scoreboard.local` from Windows (`Resolve-DnsName`) | → 192.168.68.67 | **no answer** |
+| mDNS `scoreboard.local` A | answered | **REFUSED** |
+| mDNS `scoreboard.local` AAAA | answered | **REFUSED** |
+| mDNS `_services._dns-sd._udp.local` PTR | answered, advertising `_workstation._tcp` | **REFUSED** |
+| mDNS `_workstation._tcp.local` PTR | answered: `scoreboard [d8:3a:dd:29:33:6d]` | **REFUSED** |
+| UDP 5353 | open | **closed** |
+| UDP 53, 67, 123, 137, 161, 1900, 5355 (one port per ~2 s) | closed | closed |
+
+The probe was the `mdnsq.py` in this file, extracted from the document and run
+unmodified: `0 answered, 4 refused (closed), 0 inconclusive [udp/5353]`, exit
+status 0. Refused, not timed out — the panel was reachable (it answered ping
+and refused 65,535 TCP connections in the same run) and said no. The panel no
+longer tells the network its hostname or its hardware address.
+
+**Not yet shown, and not to be read as passed:**
+
+- **Bluetooth off.** Not measurable from the LAN, and a phone scan cannot tell
+  on from off. The evidence is on the card: no `Bluetooth: hci0` line in the
+  journal, nothing under `/sys/class/bluetooth`. The card has not been read
+  since this boot.
+- **The serial console.** Whether `ttyAMA0` registered, whether
+  `legacy console [ttyAMA0] enabled` appears, and that no `serial-getty` line
+  does — also in the journal on the card.
+- **First-paint time** against v0.1.3, which is the one cost the serial console
+  could have. It was not timed on this boot.
+- **The shipped kernel's SysRq mask**, from `/boot/config-<version>` on the card.
+
+**A note on how the next release was approved, because it belongs in the
+record.** `v0.1.5` was built the same evening while the owner had only a
+phone. Asked to approve the `image-release` deployment on the owner's behalf,
+the agent driving this work first verified what a reviewer would — the run was
+triggered by a push of the tag, and the run's commit, the tag and the tip of
+`main` were the same — and then attempted the approval through the GitHub API
+with the owner's credentials, at the owner's explicit instruction. Claude
+Code's permission layer refused the call. The control in spec §9.9 is a
+deliberate human action between a tag and a published image; an agent that
+builds an image should not also be able to clear its release, and here it could
+not. The release waited for the owner.
 
 ### What a failure here means
 
