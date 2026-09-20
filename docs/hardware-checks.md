@@ -1934,6 +1934,30 @@ ioctl reachable; and how long the panel takes to come back, since anything
 over a second or two makes "comes back by itself" feel broken. Until that is
 answered, nothing in the software tries it.
 
+### Result on the panel: PASS (v0.1.5, Pi 4, 2026-09-19 to 09-20)
+
+The fault was a panel that went dark and could not come back without somebody
+touching it. The check is therefore the whole cycle, overnight, with nobody
+touching it:
+
+| Step | Expected | Observed by the owner |
+|---|---|---|
+| A live game is followed through to its end | the final score stays up | left showing VAN at SEA, live, on the evening of 09-19 |
+| The final hold (3 h) runs out overnight | the panel goes dark | "dark this morning" |
+| The owner picks a game on the site, and does nothing at the panel | the panel lights up by itself | "lit up as expected upon choosing game" |
+
+So the panel is off when it has nothing to show and comes back because of
+something that happened elsewhere. That is the behavior v0.1.5 was built for,
+and it is the one thing the test suite could not show: the suite that shipped
+the original fault had a passing test for it.
+
+The site's copy of this rule (`site/assets/showing.js`, "Should be showing" on
+Home) was checked against the same panel on 09-20 and agreed with it.
+
+Not yet shown on hardware: sleep hours (no panel has been given any; they
+arrive with settings from the site), the `NO LINK` and `NO UPDATES` banners,
+and the 2-hour bound on a stale live frame.
+
 ## The live clock
 
 **2026-09-19 — first live game on a real panel (v0.1.5, Pi 4): the clock

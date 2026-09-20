@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ROUTE_KEY, hrefFor, parseRoute, recallRoute, rememberRoute, titleFor } from "../assets/routes.js";
+import { readFileSync } from "node:fs";
+import { ROUTE_KEY, hrefFor, isPageAddress, parseRoute, recallRoute, rememberRoute, titleFor } from "../assets/routes.js";
 
 // The pages are views of one document, addressed by the URL's fragment.
 // Separate documents would each need a token, and the token lives in one
@@ -93,4 +94,35 @@ test("storage that throws does not stop anyone signing in", () => {
   const broken = { getItem() { throw new Error("denied"); }, setItem() { throw new Error("denied"); }, removeItem() { throw new Error("denied"); } };
   rememberRoute(broken, "#/panels");
   assert.equal(recallRoute(broken), "#/");
+});
+
+// Found after step 1 shipped: "Skip to content" is href="#main", and pressing
+// it changed the fragment, which the router read as a page that does not
+// exist. The first link on the page, the one a keyboard user meets first,
+// sent them to Not found. A fragment is only a page address if it starts
+// "#/"; anything else is an anchor inside the page and is none of the
+// router's business.
+test("an anchor inside the page is not a page address", () => {
+  for (const anchor of ["#main", "#add", "#status", "#panel-detail"]) assert.equal(isPageAddress(anchor), false, anchor);
+  for (const page of ["", "#", "#/", "#/panels", "#/panel/scoreboard-abc", "#/nope"]) assert.equal(isPageAddress(page), true, page);
+  assert.equal(isPageAddress(null), true);
+  assert.equal(isPageAddress(42), false);
+});
+
+test("no page links to an anchor the router would have to guess at", () => {
+  // Every same-document link is either a page address or names an id that
+  // exists in that document.
+  for (const file of ["index.html", "download/index.html", "privacy/index.html"]) {
+    const html = readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
+    for (const [, href] of html.matchAll(/href="(\/?#[^"]*)"/g)) {
+      const fragment = href.replace(/^\//, "");
+      if (isPageAddress(fragment)) {
+        assert.notEqual(parseRoute(fragment).name, "unknown", `${file} links to ${href}, which is no page`);
+      } else {
+        const target = href.startsWith("/") ? readFileSync(new URL("../index.html", import.meta.url), "utf8") : html;
+        assert.ok(target.includes(`id="${fragment.slice(1)}"`), `${file} links to ${href}, and nothing has that id`);
+        assert.ok(!href.startsWith("/"), `${file} links to ${href}: an anchor in the signed-in document lands on Home, not on the anchor; link to a page instead`);
+      }
+    }
+  }
 });

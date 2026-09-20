@@ -134,6 +134,16 @@ does not have it today; see the earlier document).
 
 ### Templates, sketched
 
+> **Superseded the same day (2026-09-20).** The owner defined a template as a
+> **chosen set of games**, picked from the full schedule with checkboxes, and
+> asked that a panel be able to take games directly as well as from one or
+> more templates, with overlapping games shown as conflicts to resolve. That
+> is its own epic (Jira SCO-36) with its own design to come (SCO-37). What
+> follows is kept as the record of the first idea; "follow a team" survives
+> only as a possible later addition (SCO-35), for games that do not exist yet
+> when a set is chosen. What does carry over unchanged is the last paragraph:
+> resolve in the cloud, send the panel one `gameId`, change no panel.
+
 Today "what the panel shows" is one thing: a game somebody picked by hand that
 day. A template makes that a rule with a name, which panels point at:
 
@@ -295,5 +305,6 @@ All made by the owner, 2026-09-20. Nothing is open.
   whole minute in range, so the lists can change without redeploying it.)
 - **A countdown does not show during sleep hours.** A 07:00 wake shows it
   already running. No per-panel switch.
-- **"Follow a team" is the first template**, and a panel following a team is
-  off on a day that club does not play, like any panel with no game.
+- ~~"Follow a team" is the first template.~~ Superseded later the same day:
+  a template is a chosen set of games (SCO-36). A panel with no game due is
+  off, as before.

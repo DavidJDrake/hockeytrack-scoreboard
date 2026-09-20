@@ -27,8 +27,13 @@ THING=${1:-}
 MODE=${2:-}
 CONFIRM=${3:-}
 
-if ! [[ $THING =~ ^scoreboard-[0-9a-z]{12}$ ]]; then
-  echo "usage: retire-panel.sh <thing> [--apply <thing>]   (thing: scoreboard- and 12 of 0-9a-z)" >&2
+# scoreboard- and 2 to 32 of 0-9a-z: the names enrollment makes (twelve
+# characters) and the first one, made by hand (scoreboard-01), which turned
+# out to be an orphan too. Still nothing that is not a panel: the prefix, the
+# alphabet and the length keep out every other thing in the account, and any
+# shell metacharacter.
+if ! [[ $THING =~ ^scoreboard-[0-9a-z]{2,32}$ ]]; then
+  echo "usage: retire-panel.sh <thing> [--apply <thing>]   (thing: scoreboard- and 2 to 32 of 0-9a-z)" >&2
   exit 2
 fi
 if [ -n "$MODE" ] && { [ "$MODE" != "--apply" ] || [ "$CONFIRM" != "$THING" ]; }; then

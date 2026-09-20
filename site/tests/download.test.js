@@ -135,3 +135,8 @@ test("the flash steps tell people to skip Imager's OS customization", () => {
   assert.match(flash, /OS customi[sz]ation/);
   assert.match(flash, /<strong>No<\/strong>/);
 });
+
+test("the page says how big a card is needed", () => {
+  const html = readFileSync(new URL("../download/index.html", import.meta.url), "utf8");
+  assert.match(html, /8 GB or larger/);
+});

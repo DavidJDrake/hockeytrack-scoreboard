@@ -49,8 +49,9 @@ it again finishes the job. The row goes last so an interrupted run leaves a
 panel that is still visible on the site rather than a live certificate nobody
 can see.
 
-It refuses, before making any call, a name that is not `scoreboard-` plus
-twelve of `0-9a-z`; and it refuses to touch a certificate attached to any other
+It refuses, before making any call, a name that is not `scoreboard-` plus 2
+to 32 of `0-9a-z` (the generated names are twelve; the first panel, made by
+hand, was `scoreboard-01`); and it refuses to touch a certificate attached to any other
 thing.
 
 **Check the name against the panel you are keeping.** The script cannot tell

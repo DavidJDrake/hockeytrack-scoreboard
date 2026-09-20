@@ -11,7 +11,7 @@ import { ApiError, createApi } from "./api.js";
 import { reformat } from "./claimcode.js";
 import { SETUP_FILE_NAME, SetupFileError, countryNoteFor, regionFromLocale, setupFileFor } from "./setupfile.js";
 import { claimedRow, homeRow, makeEl, panelControls } from "./panel.js";
-import { hrefFor, parseRoute, recallRoute, rememberRoute, titleFor } from "./routes.js";
+import { hrefFor, isPageAddress, parseRoute, recallRoute, rememberRoute, titleFor } from "./routes.js";
 import { emailVerified, messageFor, panelTitle } from "./view.js";
 
 const $ = (id) => document.getElementById(id);
@@ -28,6 +28,9 @@ let busy = false;
 // What the API last said, kept so that moving between pages draws from it
 // rather than fetching again. Every action ends in refresh(), which replaces
 // it; nothing edits it in place.
+// The page being shown. Kept because the fragment stops naming it the moment
+// someone follows an anchor inside the page (the skip link, #main).
+let shownRoute = { name: "home" };
 let loaded = { devices: [], games: [], gamesFailed: false, ready: false };
 
 const el = makeEl(document);
@@ -176,7 +179,10 @@ async function act(action, run, success) {
 // sign-in, after every refresh, and whenever the fragment changes.
 function render({ moved = false } = {}) {
   if (!session) return;
-  const route = parseRoute(location.hash);
+  // After an in-page anchor the fragment no longer names the page, so the
+  // page is remembered rather than re-read.
+  if (isPageAddress(location.hash)) shownRoute = parseRoute(location.hash);
+  const route = shownRoute;
   const device = route.name === "panel" ? loaded.devices.find((d) => d.thingName === route.thing) : null;
 
   for (const name of ["home", "panels", "panel", "unknown"]) $(`view-${name}`).hidden = name !== route.name;
@@ -340,7 +346,10 @@ function wireClaim() {
 async function start() {
   $("sign-in").addEventListener("click", () => signIn());
   $("sign-out").addEventListener("click", () => signOut());
-  window.addEventListener("hashchange", () => render({ moved: true }));
+  window.addEventListener("hashchange", () => {
+    // "#main" is the skip link, not a page. Leave the page that is showing.
+    if (isPageAddress(location.hash)) render({ moved: true });
+  });
   // "Should be showing" is a statement about now, and now moves: a countdown
   // opens, a goal is scored, a final comes down. Once a minute, while Home is
   // open and nothing is being done, fetch again quietly and redraw.
@@ -350,7 +359,7 @@ async function start() {
   // itself every hour. It redraws from what it has instead, and the clock
   // still moves the sentence; the next thing the person does signs them in.
   setInterval(() => {
-    if (!session || busy || document.hidden || parseRoute(location.hash).name !== "home") return;
+    if (!session || busy || document.hidden || shownRoute.name !== "home") return;
     if (session.expired()) render();
     else refresh({ quiet: true });
   }, 60_000);
