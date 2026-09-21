@@ -6,7 +6,7 @@
 // the markup properties. What happens when the form is saved belongs to the
 // caller: this module knows the shape of the form, not what the API is.
 import {
-  HOLD_CHOICES, HOLD_ZERO, LEAD_CHOICES, LEAD_ZERO, SettingsError, choicesWith, durationLabel, formFrom, layerFrom, sleepLabel,
+  HOLD_CHOICES, HOLD_ZERO, LEAD_CHOICES, LEAD_ZERO, OLDER_PANELS_NOTE, SettingsError, choicesWith, durationLabel, formFrom, layerFrom, sleepLabel,
 } from "./settings.js";
 
 export function settingsForm(el, { idPrefix, layer, shownThrough, inheritWord, zones, guessedZone, busy, onSave, onError }) {
@@ -67,5 +67,6 @@ export function settingsForm(el, { idPrefix, layer, shownThrough, inheritWord, z
   el("div", { class: "row" }, el("label", { for: id("sleep") }, "Sleep hours"), mode),
   window,
   el("p", { class: "hint" }, "A live game is always shown, sleep hours or not. Everything else (a countdown, a final score) waits until the sleep hours end. Times are the panel's local time in the zone you choose: check it is where the panel hangs."),
+  el("p", { class: "hint notice" }, OLDER_PANELS_NOTE),
   el("div", { class: "row" }, save));
 }

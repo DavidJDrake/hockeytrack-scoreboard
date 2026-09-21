@@ -17,6 +17,14 @@ export const HOLD_CHOICES = [0, 30, 60, 180, 360, 720, 1440];
 // has arrived, and a test holds it to the panel's own numbers.
 export const BUILT_IN = Object.freeze({ countdownLeadMin: 720, finalHoldMin: 180, sleep: null });
 
+// The first image whose panels read these settings. Older panels ignore the
+// "display" block entirely and run on the built-in values -- and a panel
+// cannot report what it runs, so the site cannot tell which it is talking
+// to. Found the honest way: the owner set a one-hour final hold and the
+// panel, on v0.1.5, kept the score up for three, while Home said it was off.
+export const SETTINGS_SINCE = "v0.1.6";
+export const OLDER_PANELS_NOTE = `Panels running an image older than ${SETTINGS_SINCE} ignore these settings and use the built-in ones (countdown 12 hours before, final score up for 3 hours, no sleep hours). This site cannot tell which image a panel runs, so on an older panel “Should be showing” on Home can be wrong about countdowns, finals and sleep hours. Reflashing the panel with the current image fixes both.`;
+
 export class SettingsError extends Error {}
 
 export function durationLabel(minutes, zeroLabel = "Off") {

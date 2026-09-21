@@ -55,3 +55,4 @@ h2.section { font-family: var(--display); font-weight: 700; font-size: 24px; mar
 .settings .hint { color: var(--muted); font-size: 14px; max-width: 70ch; margin: 0; }
 #panel-detail { display: grid; gap: 24px; }
 #panel-detail .card { margin: 0; }
+.settings .notice { border-left: 3px solid var(--rule); padding-left: 12px; }
