@@ -1,5 +1,5 @@
 {
- "about": "What a panel should be showing. One file, two readers: device/tests/test_presentation_vectors.py runs every case against main.presentation, and site/tests/showing.test.js runs every case against the site's copy of the rule. Change the rule on one side only and CI fails. Times are UTC instants. finalSeenAt is when the panel first saw the final; chosenAt is when the owner last chose the game. Cases cover only what the site can know: link loss, stale feeds and an unset clock are the panel's alone.",
+ "about": "What a panel should be showing. One file, two readers: device/tests/test_presentation_vectors.py runs every case against main.presentation, and site/tests/showing.test.js runs every case against the site's copy of the rule. Change the rule on one side only and CI fails. Times are UTC instants. finalAt is when the game ended, from the reducer, and is what a final's hold is measured from; finalSeenAt is when the panel first saw the final, used only when finalAt is missing or cannot be true; chosenAt is when the owner last chose the game. Cases cover only what the site can know: link loss, stale feeds and an unset clock are the panel's alone.",
  "cases": [
   {
    "name": "no game chosen",
@@ -246,7 +246,8 @@
    "game": {
     "state": "FINAL",
     "start": "2026-09-20T23:00:00Z",
-    "finalSeenAt": "2026-09-21T02:00:00Z"
+    "finalSeenAt": "2026-09-21T02:00:00Z",
+    "finalAt": "2026-09-21T02:00:00Z"
    },
    "chosenAt": null,
    "display": {
@@ -263,7 +264,8 @@
    "game": {
     "state": "FINAL",
     "start": "2026-09-20T23:00:00Z",
-    "finalSeenAt": "2026-09-21T02:00:00Z"
+    "finalSeenAt": "2026-09-21T02:00:00Z",
+    "finalAt": "2026-09-21T02:00:00Z"
    },
    "chosenAt": null,
    "display": {
@@ -280,7 +282,8 @@
    "game": {
     "state": "FINAL",
     "start": "2026-09-20T23:00:00Z",
-    "finalSeenAt": "2026-09-21T02:00:00Z"
+    "finalSeenAt": "2026-09-21T02:00:00Z",
+    "finalAt": "2026-09-21T02:00:00Z"
    },
    "chosenAt": null,
    "display": {
@@ -292,12 +295,13 @@
   },
   {
    "name": "an old final the owner chose again ten minutes ago",
-   "why": "choosing it again gives it another hold",
+   "why": "a game whose time has passed is not shown; choosing it does not bring it back",
    "now": "2026-09-21T12:00:00Z",
    "game": {
     "state": "FINAL",
     "start": "2026-09-20T23:00:00Z",
-    "finalSeenAt": "2026-09-21T02:00:00Z"
+    "finalSeenAt": "2026-09-21T02:00:00Z",
+    "finalAt": "2026-09-21T02:00:00Z"
    },
    "chosenAt": "2026-09-21T11:50:00Z",
    "display": {
@@ -305,7 +309,7 @@
     "finalHoldMin": 180,
     "sleep": null
    },
-   "expect": "final"
+   "expect": "off"
   },
   {
    "name": "a final with a hold of zero",
@@ -314,7 +318,8 @@
    "game": {
     "state": "FINAL",
     "start": "2026-09-20T23:00:00Z",
-    "finalSeenAt": "2026-09-21T02:00:00Z"
+    "finalSeenAt": "2026-09-21T02:00:00Z",
+    "finalAt": "2026-09-21T02:00:00Z"
    },
    "chosenAt": null,
    "display": {
@@ -331,7 +336,8 @@
    "game": {
     "state": "FINAL",
     "start": "2026-09-20T23:00:00Z",
-    "finalSeenAt": "2026-09-21T02:00:00Z"
+    "finalSeenAt": "2026-09-21T02:00:00Z",
+    "finalAt": "2026-09-21T02:00:00Z"
    },
    "chosenAt": null,
    "display": {
@@ -568,6 +574,201 @@
     "sleep": null
    },
    "expect": "off"
+  },
+  {
+   "name": "a final first seen long after the game ended",
+   "why": "the first night of v0.1.6: ended 9:34 PM, panel flashed 11:15 PM, one-hour hold. The hold runs from the end of the game, not from when this panel learned of it",
+   "now": "2026-09-21T03:16:00Z",
+   "game": {
+    "state": "FINAL",
+    "start": "2026-09-20T23:00:00Z",
+    "finalAt": "2026-09-21T01:34:00Z",
+    "finalSeenAt": "2026-09-21T03:15:00Z"
+   },
+   "chosenAt": null,
+   "display": {
+    "countdownLeadMin": 720,
+    "finalHoldMin": 60,
+    "sleep": null
+   },
+   "expect": "off"
+  },
+  {
+   "name": "an expired final chosen a minute ago",
+   "why": "the five-minute grace does not bring a finished hold back",
+   "now": "2026-09-21T03:16:00Z",
+   "game": {
+    "state": "FINAL",
+    "start": "2026-09-20T23:00:00Z",
+    "finalAt": "2026-09-21T01:34:00Z",
+    "finalSeenAt": "2026-09-21T03:15:00Z"
+   },
+   "chosenAt": "2026-09-21T03:15:00Z",
+   "display": {
+    "countdownLeadMin": 720,
+    "finalHoldMin": 60,
+    "sleep": null
+   },
+   "expect": "off"
+  },
+  {
+   "name": "a final still inside its hold, chosen a minute ago",
+   "why": "",
+   "now": "2026-09-21T02:00:00Z",
+   "game": {
+    "state": "FINAL",
+    "start": "2026-09-20T23:00:00Z",
+    "finalAt": "2026-09-21T01:34:00Z",
+    "finalSeenAt": "2026-09-21T01:59:00Z"
+   },
+   "chosenAt": "2026-09-21T01:59:00Z",
+   "display": {
+    "countdownLeadMin": 720,
+    "finalHoldMin": 60,
+    "sleep": null
+   },
+   "expect": "final"
+  },
+  {
+   "name": "a final first seen late, still inside its hold",
+   "why": "held until an hour after the END, so for 34 more minutes, not another hour",
+   "now": "2026-09-21T02:33:59Z",
+   "game": {
+    "state": "FINAL",
+    "start": "2026-09-20T23:00:00Z",
+    "finalAt": "2026-09-21T01:34:00Z",
+    "finalSeenAt": "2026-09-21T02:30:00Z"
+   },
+   "chosenAt": null,
+   "display": {
+    "countdownLeadMin": 720,
+    "finalHoldMin": 60,
+    "sleep": null
+   },
+   "expect": "final"
+  },
+  {
+   "name": "a final first seen late, the second its hold ends",
+   "why": "",
+   "now": "2026-09-21T02:34:00Z",
+   "game": {
+    "state": "FINAL",
+    "start": "2026-09-20T23:00:00Z",
+    "finalAt": "2026-09-21T01:34:00Z",
+    "finalSeenAt": "2026-09-21T02:30:00Z"
+   },
+   "chosenAt": null,
+   "display": {
+    "countdownLeadMin": 720,
+    "finalHoldMin": 60,
+    "sleep": null
+   },
+   "expect": "off"
+  },
+  {
+   "name": "a final with no end time, inside the hold from first sight",
+   "why": "a document from before finalAt existed: the first-seen rule is all there is",
+   "now": "2026-09-21T03:00:00Z",
+   "game": {
+    "state": "FINAL",
+    "start": "2026-09-20T23:00:00Z",
+    "finalSeenAt": "2026-09-21T02:00:00Z"
+   },
+   "chosenAt": null,
+   "display": {
+    "countdownLeadMin": 720,
+    "finalHoldMin": 180,
+    "sleep": null
+   },
+   "expect": "final"
+  },
+  {
+   "name": "a final with no end time, past the hold from first sight",
+   "why": "",
+   "now": "2026-09-21T05:00:00Z",
+   "game": {
+    "state": "FINAL",
+    "start": "2026-09-20T23:00:00Z",
+    "finalSeenAt": "2026-09-21T02:00:00Z"
+   },
+   "chosenAt": null,
+   "display": {
+    "countdownLeadMin": 720,
+    "finalHoldMin": 180,
+    "sleep": null
+   },
+   "expect": "off"
+  },
+  {
+   "name": "a final with no end time, chosen again ten minutes ago",
+   "why": "with nothing better to measure from, choosing it again still gives it another hold",
+   "now": "2026-09-21T12:00:00Z",
+   "game": {
+    "state": "FINAL",
+    "start": "2026-09-20T23:00:00Z",
+    "finalSeenAt": "2026-09-21T02:00:00Z"
+   },
+   "chosenAt": "2026-09-21T11:50:00Z",
+   "display": {
+    "countdownLeadMin": 720,
+    "finalHoldMin": 180,
+    "sleep": null
+   },
+   "expect": "final"
+  },
+  {
+   "name": "a final that says it ended a few minutes from now",
+   "why": "clocks differ by a little; it has just ended",
+   "now": "2026-09-21T02:00:00Z",
+   "game": {
+    "state": "FINAL",
+    "start": "2026-09-20T23:00:00Z",
+    "finalAt": "2026-09-21T02:04:00Z",
+    "finalSeenAt": "2026-09-21T02:00:00Z"
+   },
+   "chosenAt": null,
+   "display": {
+    "countdownLeadMin": 720,
+    "finalHoldMin": 180,
+    "sleep": null
+   },
+   "expect": "final"
+  },
+  {
+   "name": "a final that says it ended tomorrow",
+   "why": "an end time that cannot be true is no end time: the first-seen rule decides, so a bad number cannot keep a panel lit for a day",
+   "now": "2026-09-21T06:00:00Z",
+   "game": {
+    "state": "FINAL",
+    "start": "2026-09-20T23:00:00Z",
+    "finalAt": "2026-09-22T06:00:00Z",
+    "finalSeenAt": "2026-09-21T02:00:00Z"
+   },
+   "chosenAt": null,
+   "display": {
+    "countdownLeadMin": 720,
+    "finalHoldMin": 180,
+    "sleep": null
+   },
+   "expect": "off"
+  },
+  {
+   "name": "a final that says it ended tomorrow, first seen just now",
+   "why": "and the same fallback holds it when first sight says to",
+   "now": "2026-09-21T02:30:00Z",
+   "game": {
+    "state": "FINAL",
+    "start": "2026-09-20T23:00:00Z",
+    "finalAt": "2026-09-22T06:00:00Z",
+    "finalSeenAt": "2026-09-21T02:00:00Z"
+   },
+   "chosenAt": null,
+   "display": {
+    "countdownLeadMin": 720,
+    "finalHoldMin": 180,
+    "sleep": null
+   },
+   "expect": "final"
   }
  ]
 }

@@ -2089,3 +2089,60 @@ def test_the_card_is_not_read_when_something_else_has_already_decided():
     assert looked == [], "the boot partition was read for nothing"
     assert main_module.chosen_rotation(None, from_the_card, None) == 270
     assert looked == [True]
+
+
+# --- a final is timed from the end of the game (SCO-53) --------------------
+
+def ended_final(ended: datetime) -> GameState:
+    s = final_state()
+    return s.__class__(**{**s.__dict__, "final_at_ms": int(ended.timestamp() * 1000)})
+
+
+LATE_EVENING = datetime(2026, 9, 21, 3, 16, tzinfo=timezone.utc)
+HOLD_ONE_HOUR = main_module.Display(final_hold_s=3600)
+
+
+def test_a_final_that_ended_before_its_hold_is_not_shown_however_recently_it_was_seen():
+    # The first night of v0.1.6: ended 9:34 PM, panel flashed 11:15 PM.
+    state = ended_final(LATE_EVENING - timedelta(minutes=102))
+    assert shown(now=1000.0, now_utc=LATE_EVENING, state=state, final_seen=940.0, display=HOLD_ONE_HOUR).show == OFF
+
+
+def test_neither_choosing_it_nor_the_grace_period_brings_an_expired_final_back():
+    state = ended_final(LATE_EVENING - timedelta(minutes=102))
+    assert shown(now=1000.0, now_utc=LATE_EVENING, state=state, final_seen=999.0, last_change=999.0,
+                 display=HOLD_ONE_HOUR).show == OFF
+
+
+def test_a_final_inside_its_hold_is_shown_even_if_first_sight_was_long_ago():
+    # The other direction: a panel's monotonic clock has run for days; the
+    # game ended ten minutes ago. First sight does not get a vote.
+    state = ended_final(LATE_EVENING - timedelta(minutes=10))
+    assert shown(now=900_000.0, now_utc=LATE_EVENING, state=state, final_seen=0.0, display=HOLD_ONE_HOUR).show == FINAL
+
+
+def test_with_no_clock_the_panel_falls_back_to_when_it_first_saw_the_final():
+    # No RTC: until NTP answers there is nothing to compare finalAt with.
+    state = ended_final(LATE_EVENING - timedelta(hours=9))
+    assert shown(now=1000.0, now_utc=None, state=state, final_seen=940.0, display=HOLD_ONE_HOUR).show == FINAL
+    assert shown(now=5000.0, now_utc=None, state=state, final_seen=940.0, display=HOLD_ONE_HOUR).show == OFF
+
+
+def test_an_end_time_that_cannot_be_true_does_not_hold_the_panel_lit():
+    state = ended_final(LATE_EVENING + timedelta(days=30))
+    assert main_module.final_ended_ago_s(state, LATE_EVENING) is None
+    assert shown(now=20_000.0, now_utc=LATE_EVENING, state=state, final_seen=0.0, display=HOLD_ONE_HOUR).show == OFF
+    # A little ahead is clocks disagreeing: it has just ended.
+    assert main_module.final_ended_ago_s(ended_final(LATE_EVENING + timedelta(minutes=4)), LATE_EVENING) == 0.0
+
+
+@pytest.mark.parametrize("value, want", [
+    (1789954440000, 1789954440000), (None, None), (0, None), (-5, None), (True, None),
+    (1.7e12, None), ("1789954440000", None), ([1], None), ({}, None),
+])
+def test_finalAt_is_a_positive_whole_number_or_it_is_nothing(value, want):
+    doc = json.loads((Path(__file__).parent / "fixtures" / "state_live.json").read_text())
+    doc["state"] = "FINAL"
+    if value is not None:
+        doc["finalAt"] = value
+    assert GameState.from_json(json.dumps(doc)).final_at_ms == want

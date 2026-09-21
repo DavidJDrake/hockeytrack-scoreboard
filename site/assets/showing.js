@@ -18,6 +18,8 @@
 // The panel's own numbers (main.py: GRACE_S, STALE_AFTER_S).
 const GRACE_MS = 5 * 60 * 1000;
 const STALE_AFTER_MS = 2 * 60 * 60 * 1000;
+// main.py: FINAL_AT_SKEW_S. An end further ahead than this is not believed.
+const FINAL_AT_SKEW_MS = 10 * 60 * 1000;
 
 export const BUILT_IN = Object.freeze({ countdownLeadMin: 720, finalHoldMin: 180, sleep: null });
 
@@ -76,7 +78,16 @@ export function decide({ now, game = null, chosenAt = null, display = BUILT_IN }
   if (!game) return withinGrace ? lit("no-game", "none") : dark("none");
 
   if (game.state === "FINAL" || game.state === "OFF") {
-    // Choosing a game again re-arms its hold.
+    // The hold runs from the end of the GAME (the reducer's finalAt). Past
+    // it the final is not shown, and neither choosing the game again nor the
+    // grace period brings it back.
+    const endedMs = instant(game.finalAt);
+    if (endedMs !== null && endedMs - nowMs <= FINAL_AT_SKEW_MS) {
+      const until = endedMs + display.finalHoldMin * 60000;
+      return nowMs < until ? { ...lit("final", "final"), until } : dark("final-over", { until });
+    }
+    // No end time, or one that cannot be true: when the panel first saw it,
+    // which choosing the game again re-arms.
     const seen = Math.max(instant(game.finalSeenAt) ?? -Infinity, chosenMs ?? -Infinity);
     const until = seen === -Infinity ? null : seen + display.finalHoldMin * 60000;
     const held = until === null || nowMs < until;
@@ -161,7 +172,7 @@ export function inputFor(device, todaysGames, nowMs, display = BUILT_IN) {
   const base = { now: new Date(nowMs).toISOString(), chosenAt: iso(device?.chosenAt), display, game: null, unknownGame: false };
   if (!Number.isInteger(device?.gameId) || device.gameId <= 0) return base;
   if (device.game && typeof device.game === "object") {
-    return { ...base, game: { ...device.game, finalSeenAt: iso(device.game.lastSeenAt) } };
+    return { ...base, game: { ...device.game, finalAt: iso(device.game.finalAt), finalSeenAt: iso(device.game.lastSeenAt) } };
   }
   const listed = (todaysGames ?? []).find((g) => g.gameId === device.gameId);
   if (!listed) return { ...base, unknownGame: true };
