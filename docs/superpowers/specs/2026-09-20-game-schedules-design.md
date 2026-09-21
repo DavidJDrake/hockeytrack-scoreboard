@@ -36,6 +36,7 @@ what a panel shows a **schedule**.
 | 5 | A chosen set misses games scheduled later | The **saved-filter template is wanted** (SCO-35 joins this epic). |
 | 6 | Keep the single-game picker and "Show on panel"? | **No.** What a panel shows comes from its schedule only. |
 | 7 | Two kept games in one day | The first game's final holds for the usual time **or until the second game's puck drop**, whichever is first. |
+| 9 | When does a final come down? | **One hold after the game ended**, whenever the panel first saw it. A game whose end plus the hold has already passed is not shown at all. (2026-09-21) |
 | 8 | Who resolves a conflict? | **The user, always.** Any time games conflict the site asks them to resolve it. Only in the rare case where a conflict arises with no user action and is never resolved does a rule decide, and the rule is: **the panel's own games win over a template's.** (2026-09-21) |
 
 Three consequences follow from these, and are designed for below rather than
@@ -56,6 +57,34 @@ discovered later:
   games". And "Show on panel" was the only way to bring a final back after its
   hold ran out; nothing replaces that. The panel's `chosenAt` handling stays in
   the image, but the site stops producing presses.
+
+## 2a. A final is timed from the end of the game (decision 9)
+
+Found on the first night of v0.1.6. A panel flashed at 11:15 PM was given a
+game that had ended at 9:34 PM, with a one-hour hold, and showed its final:
+the panel counts the hold from when **it first saw** the final, because that
+was all it knew. The owner's ruling:
+
+> The one hour after SHOULD apply in that it should not show the game if the
+> end time + the time to show has already passed.
+
+So the hold is measured from **when the game ended**, everywhere:
+
+- **Reducer.** The state document gains `finalAt`: the moment the game was
+  first seen FINAL, set once and never moved. For a game that was already
+  final before this existed, the last heartbeat is used (heartbeats stop at
+  the final, so it is within seconds).
+- **Panel.** `presentation()` holds a final while `now - finalAt` is less than
+  the hold. The first-seen time is kept only as the fallback for a document
+  with no `finalAt`, and for a panel whose clock has not been set (it cannot
+  compare wall-clock times it does not have). Choosing a game no longer
+  re-arms an expired final, and the five-minute grace does not bring one
+  back: a game whose time has passed is not shown. This ships in an image.
+- **Site.** `showing.js` makes the same change and the shared cases change
+  with it: "an old final the owner chose again" becomes *off*. Both suites
+  move together or CI fails, which is what the file is for.
+- **Director.** Already reasons from real times (section 6); it uses
+  `finalAt` too, so a schedule never hands a panel a game that is over.
 
 ## 3. The idea that keeps this small
 
@@ -283,6 +312,7 @@ director must treat an absent id as "over", not as an error.
 | 5 | The director (**security review**) and removal of the game route | SCO-42; depends on SCO-31 |
 | 6 | Pages | SCO-43 |
 | 7 | Saved-filter templates, with shared filter cases | SCO-35 |
+| alongside 1 | A final timed from the end of the game (section 2a): reducer, shared cases, site, panel | SCO-53 |
 
 Steps 1 to 4 change what is stored and shown on the site but not what any
 panel does. Step 5 is where panels start following schedules, and it is the
