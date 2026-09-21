@@ -1,8 +1,8 @@
 # Game schedules, templates and overlap resolution: design
 
-Status: **the owner's decisions are in (section 2); the design built on them
-is proposed and awaits approval.** Nothing here is built. Jira: epic SCO-36,
-this document is SCO-37.
+Status: **approved by the owner, 2026-09-21.** Every question is answered
+(sections 2 and 12). Nothing here is built. Jira: epic SCO-36, this document is
+SCO-37.
 
 It supersedes the "Templates, sketched" part of
 `2026-09-20-site-organization-design.md`, and it depends on that document's
@@ -289,11 +289,8 @@ panel does. Step 5 is where panels start following schedules, and it is the
 one to review hardest. The single-game picker is removed **in step 5, not
 before**, so there is never a day when a panel cannot be given a game.
 
-## 12. Open, for the owner
+## 12. Answered by the owner (2026-09-21)
 
-1. **Once a minute for the director**: agreed? (The alternative is the
-   existing ten-minute job, and openings missed by up to ten minutes.)
-2. ~~The panel's own games start at the top of the priority list but can be
-   moved. Or should they always win?~~ **Decided 2026-09-21: they always
-   win** (decision 8).
-3. **Nothing replaces "Show on panel" for bringing back a final.** Accepted?
+1. **The director runs once a minute.** Agreed.
+2. **The panel's own games always win** over a template's (decision 8).
+3. **Nothing replaces "Show on panel"** for bringing back a final. Accepted.
