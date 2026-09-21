@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
-  BUILT_IN, HOLD_CHOICES, HOLD_ZERO, LEAD_CHOICES, LEAD_ZERO, SettingsError, choicesWith, displayFor, durationLabel,
+  BUILT_IN, HOLD_CHOICES, OLDER_PANELS_NOTE, SETTINGS_SINCE, HOLD_ZERO, LEAD_CHOICES, LEAD_ZERO, SettingsError, choicesWith, displayFor, durationLabel,
   formFrom, layerFrom, sleepLabel, underlying, zoneList,
 } from "../assets/settings.js";
 
@@ -87,4 +87,16 @@ test("the settings a panel runs on reach the should-be-showing rule", () => {
   // but the panel list has already said less.
   assert.deepEqual(displayFor({}), BUILT_IN);
   assert.deepEqual(displayFor({ display: { resolved: { countdownLeadMin: "120" } } }), BUILT_IN);
+});
+
+test("the version the note names is the one whose panel reads settings", () => {
+  // parse_display arrived in the image after v0.1.5. If this number and the
+  // image that carries it ever part ways the note is a lie; the release
+  // notes for that image are where to check.
+  assert.equal(SETTINGS_SINCE, "v0.1.6");
+  const py = readFileSync(new URL("../../device/scoreboard/main.py", import.meta.url), "utf8");
+  assert.match(py, /^def parse_display\(/m, "the panel code that reads settings is gone");
+  // The built-in values the note quotes are the real ones.
+  assert.match(OLDER_PANELS_NOTE, /12 hours before/);
+  assert.match(OLDER_PANELS_NOTE, /up for 3 hours/);
 });

@@ -90,3 +90,11 @@ test("every control has a label that points at it", () => {
   const fors = nodes.filter((n) => n.tagName === "label").map((n) => n.attrs.for ?? n.htmlFor ?? n.for);
   for (const id of ids) assert.ok(fors.includes(id), `${id} has no label`);
 });
+
+test("the form says that older panels ignore it", () => {
+  // Both places the settings can be changed, because the form is both.
+  const { nodes } = build();
+  const text = nodes.map((n) => n.text).join(" ");
+  assert.match(text, /older than v0\.1\.6 ignore these settings/);
+  assert.match(text, /Should be showing/);
+});
