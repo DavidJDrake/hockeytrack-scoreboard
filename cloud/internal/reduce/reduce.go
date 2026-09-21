@@ -160,7 +160,12 @@ func Reduce(s State, e Event) (State, bool, error) {
 		// Judged against the state as it was, before this heartbeat is
 		// folded in; see where AsOf is set below.
 		nowMs := e.Time.UTC().UnixMilli()
-		repeat := s.Clock.Running && d.Running &&
+		// A clock that is counting: play with the clock running, or an
+		// intermission, whose countdown never stops. Both are counted down
+		// by the panel between samples, so both need a repeated sample to
+		// keep its anchor. They are never each other's repeat.
+		counting := func(c Clock) bool { return c.Running || c.Intermission }
+		repeat := counting(s.Clock) && s.Clock.Running == d.Running && s.Clock.Intermission == d.InIntermission &&
 			s.Clock.Seconds == d.SecondsRemaining && s.Period.Number == d.Period &&
 			s.AsOf != 0 && nowMs-s.AsOf < maxRepeatAnchorMs
 		if d.Period > 0 {
