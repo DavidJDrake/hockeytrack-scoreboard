@@ -94,3 +94,104 @@ def test_parse_size():
     assert parse_size("") is None
     with pytest.raises(ValueError):
         parse_size("wide")
+
+
+# --- the frame's height follows the panel's shape (SCO-55) -----------------
+
+from scoreboard.display import LAYOUT_H, LAYOUT_W, MAX_FRAME_H, STRIP_H, frame_size, regions  # noqa: E402
+from scoreboard import render  # noqa: E402
+
+
+@pytest.mark.parametrize("display, rotate, want", [
+    # A true 4:1 panel, either way it reports itself: today's frame exactly.
+    ((1920, 480), None, (1920, 480)),
+    ((480, 1920), None, (1920, 480)),
+    ((480, 1920), 270, (1920, 480)),
+    # The panel this was built for: 400x1280 is 3.2:1, which is 600 rows.
+    ((400, 1280), None, (1920, 600)),
+    ((400, 1280), 90, (1920, 600)),
+    ((1280, 400), 180, (1920, 600)),
+    # Between the two: what the shape gives, on an even row.
+    ((440, 1920), None, (1920, 480)),   # narrower than 4:1 never goes under the layout
+    ((1280, 351), None, (1920, 526)),   # 526.5 -> 526
+    ((1280, 352), None, (1920, 528)),
+    # A bench TV is capped, and letterboxed as before.
+    ((1920, 1080), None, (1920, 600)),
+    ((3840, 2160), None, (1920, 600)),
+    # Rotation forced off on a portrait panel: all the height it could want.
+    ((480, 1920), 0, (1920, 600)),
+])
+def test_the_frame_is_as_tall_as_the_panels_shape_allows(display, rotate, want):
+    assert frame_size(display, rotate) == want
+
+
+@pytest.mark.parametrize("display", [(0, 0), (0, 1280), (400, 0), (-400, 1280), (400, -1280)])
+def test_a_display_that_reports_nonsense_gets_the_plain_frame(display):
+    # The size comes from the hardware. It is not allowed to divide by zero
+    # or to ask pygame for a surface with no rows.
+    assert frame_size(display, None) == (LAYOUT_W, LAYOUT_H)
+
+
+@pytest.mark.parametrize("display, rotate", [
+    ((400, 1280), None), ((1280, 400), None), ((480, 1920), None), ((480, 1920), 0),
+    ((1920, 1080), None), ((400, 1280), 270), ((1280, 400), 180), ((1280, 400), 90),
+])
+def test_the_frame_is_sized_for_the_turn_placement_then_gives_it(display, rotate):
+    # frame_size decides the turn before placement does. If the two ever
+    # disagreed the frame would be sized for one orientation and drawn in the
+    # other; on the real panel that is a frame that fills the glass, or not.
+    from scoreboard.display import _turned
+    frame = frame_size(display, rotate)
+    place = placement(frame, display, rotate)
+    assert _turned(display, rotate) == (place.rotation in (90, 270))
+
+
+def test_the_real_panel_is_filled_edge_to_edge():
+    frame = frame_size((400, 1280), None)
+    assert placement(frame, (400, 1280), None) == Placement(90, (400, 1280), (0, 0))
+
+
+def test_a_four_to_one_frame_is_the_layout_and_nothing_else():
+    for strip in (False, True):
+        assert regions(480, strip) == ((0, 0, 1920, 480), None, ())
+
+
+def test_without_a_strip_the_layout_sits_where_the_letterbox_put_it():
+    # 60 rows of 600 is 40 physical px of 400: the measured band.
+    area = regions(600)
+    assert area.layout == (0, 60, 1920, 480)
+    assert area.strip is None
+    assert area.margins == ((0, 0, 1920, 60), (0, 540, 1920, 60))
+
+
+def test_with_a_strip_the_layout_moves_up_and_the_strip_takes_the_rest():
+    area = regions(600, strip=True)
+    assert area.layout == (0, 0, 1920, 480)
+    assert area.strip == (0, 480, 1920, STRIP_H)
+    assert area.margins == ()
+
+
+def test_a_frame_without_room_for_the_whole_strip_does_not_get_half_of_one():
+    area = regions(598, strip=True)
+    assert area.strip is None
+    assert area.layout == (0, 59, 1920, 480)
+
+
+@pytest.mark.parametrize("h", range(480, 602, 2))
+@pytest.mark.parametrize("strip", [False, True])
+def test_every_row_of_the_frame_belongs_to_exactly_one_region(h, strip):
+    area = regions(h, strip)
+    rects = [area.layout, *([area.strip] if area.strip else []), *area.margins]
+    rows = sorted((r[1], r[1] + r[3]) for r in rects)
+    assert rows[0][0] == 0 and rows[-1][1] == h
+    assert all(a[1] == b[0] for a, b in zip(rows, rows[1:]))
+    assert all(r[0] == 0 and r[2] == 1920 and r[3] > 0 for r in rects)
+
+
+def test_a_frame_shorter_than_the_layout_is_refused():
+    with pytest.raises(ValueError):
+        regions(478)
+
+
+def test_the_renderer_and_the_display_agree_on_the_layout():
+    assert (render.W, render.H) == (LAYOUT_W, LAYOUT_H)

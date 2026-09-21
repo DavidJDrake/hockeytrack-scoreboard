@@ -21,11 +21,11 @@ from . import enroll
 from . import screens
 from .assets import Assets
 from .config import Config, NotProvisioned, default_config_dir, parse_rotate
-from .display import display_failure, parse_size, placement, present
+from .display import Canvas, display_failure, frame_size, parse_size, placement, present
 from .link import Link
 from .model import GameState, parse_chosen_at, parse_today, parse_config
 from .netcfg import NetworkError, NetworkManager, Status, owner_hint, rotate_hint
-from .render import H, STALE_FRAME_S, W, draw, shift_frame
+from .render import BG, H, STALE_FRAME_S, W, draw, shift_frame
 from .reset import factory_reset
 from .settings import Settings
 
@@ -130,6 +130,13 @@ GRACE_S = 5 * 60
 # row's progress bar already reaches y=479, so the game screen's real bottom
 # margin is zero, while its top margin is 76). A ring rather than a random
 # walk so it is testable and repeatable, and so panels agree on the shape.
+#
+# On a panel taller than 4:1 the frame is taller than the layout
+# (display.frame_size) and the shift moves the whole frame, margins and all.
+# There the layout has rows to spare below it too, and the ring still never
+# goes down: it is one ring for every panel, a 4:1 panel is still bound by
+# the paragraph above, and the strip that will take those rows runs to the
+# frame's bottom edge the same way the penalty bars do.
 #
 # Schedule. Seven minutes a step: minutes rather than seconds, because at
 # 10 Hz anything faster reads as jitter from across the room, and a full
@@ -888,12 +895,13 @@ def main() -> None:
         owner = owner_hint()
         log.info("no identity yet; enrolling%s", " for a named owner" if owner else "")
         enrollment_thread(default_config_dir(), owner, events, enroll_stop)
-    place = placement((W, H), screen.get_size(), rotate)
+    canvas = Canvas(frame_size(screen.get_size(), rotate))
+    frame, layout = canvas.frame, canvas.layout
+    place = placement(frame.get_size(), screen.get_size(), rotate)
     log.info("pygame %s, SDL %s, %s driver, display %dx%d; frame turned %d° and drawn at %dx%d",
              pygame.version.ver, pygame.version.SDL, pygame.display.get_driver(),
              *screen.get_size(), place.rotation, *place.size)
     assets = Assets()
-    frame = pygame.Surface((W, H))
     build = screens.build_identity()
     nm = NetworkManager()
     net_ok = False
@@ -1215,6 +1223,7 @@ def main() -> None:
             # renderer, and there is no handler between here and the top of
             # the process. A panel showing the wrong thing can be reported;
             # a panel that has exited cannot be told from dead hardware.
+            canvas.clear_margins(BG)
             try:
                 if now_showing.show == OFF:
                     # Black, and that is all this change claims. Whether the
@@ -1224,24 +1233,24 @@ def main() -> None:
                     # docs/hardware-checks.md carries it as a follow-up.
                     frame.fill((0, 0, 0))
                 elif panel is not None:
-                    screens.draw_settings(frame, assets, panel, status, build)
+                    screens.draw_settings(layout, assets, panel, status, build)
                 elif showing == screens.WAITING:
-                    screens.draw_waiting(frame, assets, enroll_state.display,
+                    screens.draw_waiting(layout, assets, enroll_state.display,
                                          enroll.SITE, enroll_state.owner, build)
                 elif showing == screens.ENROLL_PROBLEM:
-                    screens.draw_enroll_problem(frame, assets, enroll_state.detail, build)
+                    screens.draw_enroll_problem(layout, assets, enroll_state.detail, build)
                 elif showing == screens.UNREGISTERED:
-                    screens.draw_unregistered(frame, assets, build)
+                    screens.draw_unregistered(layout, assets, build)
                 elif showing == screens.OFFLINE:
-                    screens.draw_offline(frame, assets, build)
+                    screens.draw_offline(layout, assets, build)
                 elif showing == screens.NO_SERVICE:
-                    screens.draw_no_service(frame, assets, build)
+                    screens.draw_no_service(layout, assets, build)
                 else:
                     # NO_GAME draws the no-game screen rather than the state
                     # behind it: it is what presentation says when the panel
                     # is following something it cannot show, such as a game
                     # whose start it cannot read.
-                    draw(frame, None if now_showing.show == NO_GAME else current,
+                    draw(layout, None if now_showing.show == NO_GAME else current,
                          now_ms, assets, link_ok, clock_ok=now_utc is not None,
                          stale_s=state_age)
             except Exception as e:
@@ -1255,7 +1264,7 @@ def main() -> None:
                 _complain_once(_where(e), "could not paint the panel: %s: %s",
                                type(e).__name__, e)
                 try:
-                    screens.draw_cannot_draw(frame, assets, build)
+                    screens.draw_cannot_draw(layout, assets, build)
                 except Exception:
                     # The fallback draws text, so it needs the same fonts
                     # that may be what just failed -- and an exception in
@@ -1272,7 +1281,7 @@ def main() -> None:
             # to move, and presentation returns (0, 0) with it.
             shift_frame(frame, now_showing.shift)
             if brightness < 1.0:
-                dim = pygame.Surface((W, H))
+                dim = pygame.Surface(frame.get_size())
                 dim.fill((0, 0, 0))
                 dim.set_alpha(int(255 * (1 - brightness)))
                 frame.blit(dim, (0, 0))
