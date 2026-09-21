@@ -459,8 +459,9 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 			return fail(502, "schedule unavailable")
 		}
 		return respond(200, struct {
-			Games []season.Game `json:"games"`
-		}{sn.Games})
+			Teams map[string]string `json:"teams"`
+			Games []season.Game     `json:"games"`
+		}{sn.Teams, sn.Games})
 
 	case "PUT /api/devices/{thing}/schedule":
 		// Size, then shape, then ownership, then the rules. Nothing is

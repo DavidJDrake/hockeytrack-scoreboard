@@ -20,9 +20,9 @@ func testSeason(t *testing.T) season.Season {
 	day := clock.AddDate(0, 0, 1).UTC().Format("2006-01-02")
 	next := clock.AddDate(0, 0, 2).UTC().Format("2006-01-02")
 	row := func(id int, at, away, home string) string {
-		return fmt.Sprintf(`{"id":%d,"start":"%s","away":"%s","home":"%s","type":2,"venue":"Rink"}`, id, at, away, home)
+		return fmt.Sprintf(`{"id":%d,"date":"`+at[:10]+`","start":"%s","away":"%s","home":"%s","type":2,"venue":"Rink"}`, id, at, away, home)
 	}
-	s, dropped, err := season.Parse([]byte(`{"games":[` + strings.Join([]string{
+	s, dropped, err := season.Parse([]byte(`{"teams":{"MTL":"Montréal Canadiens"},"games":[` + strings.Join([]string{
 		row(2026020001, day+"T17:00:00Z", "MTL", "TOR"),
 		row(2026020002, day+"T18:30:00Z", "BOS", "NYR"),
 		row(2026020003, day+"T23:00:00Z", "EDM", "CGY"),
@@ -51,10 +51,14 @@ func TestTheSeasonIsServedAsCheckedRows(t *testing.T) {
 	h, _, _ := scheduleHandler(t)
 	res, _ := h.Handle(context.Background(), req("GET", "GET /api/schedule", "sub-a", "", nil))
 	var out struct {
-		Games []season.Game `json:"games"`
+		Teams map[string]string `json:"teams"`
+		Games []season.Game     `json:"games"`
 	}
 	if err := json.Unmarshal([]byte(res.Body), &out); res.StatusCode != 200 || err != nil || len(out.Games) != 4 {
 		t.Fatalf("%d %s", res.StatusCode, res.Body)
+	}
+	if out.Teams["MTL"] != "Montréal Canadiens" || out.Games[0].Date == "" {
+		t.Errorf("club names and game dates are what the page groups and labels by: %s", res.Body[:200])
 	}
 	h.Season = func(context.Context) (season.Season, error) { return season.Season{}, errors.New("down") }
 	if res, _ := h.Handle(context.Background(), req("GET", "GET /api/schedule", "sub-a", "", nil)); res.StatusCode != 502 {
