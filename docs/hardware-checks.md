@@ -1984,6 +1984,23 @@ game screen's real bottom margin is zero, not the 20-odd px the layout
 implies. Worth a look on hardware — on a panel with any overscan the whole
 row may be closer to the edge than it appears in a screenshot.
 
+**Sleep hours on the panel: PASS (v0.1.6, 2026-09-21).** Set to 00:00 to 07:00
+America/New_York from the site. The owner's report: dark at midnight and still
+dark later in the night. **Found the same night:** choosing a game at about
+12:40 a.m. lit the countdown at once. That was the rule as written (anything
+the owner just did got five minutes whatever the hour) and the owner ruled
+against it: sleep hours are respected, a live game still beats them, and an
+explicit switch is how to say otherwise.
+
+**To check on v0.1.7** (the rule changed; SCO-58): (1) inside sleep hours,
+choose a game that is due a countdown: the panel stays dark. (2) On the
+panel's page press **Awake**: the countdown appears within a few seconds and
+the page says when the switch ends. (3) Press **Follow sleep hours**: dark
+again. (4) In the daytime, with something on screen, press **Asleep**: dark
+within a few seconds, and the page says until when. (5) With Asleep on, pull
+the network: the panel must still show its no-network screen. (6) Leave Asleep
+on overnight: the panel comes back by itself when sleep hours end.
+
 **Follow-up: can the display itself be put to sleep?** "Off" today is a
 black frame — the HDMI output stays up, the panel's own backlight stays lit,
 and a black 1920×480 frame on an IPS bar panel is dark grey in a dark room.

@@ -40,6 +40,7 @@ func marshalDevice(d Device) (map[string]types.AttributeValue, error) {
 		"chosenAt":  &types.AttributeValueMemberN{Value: strconv.FormatInt(d.ChosenAt, 10)},
 		"display":   &types.AttributeValueMemberS{Value: settings.Stored(d.Display)},
 		"schedule":  &types.AttributeValueMemberS{Value: schedule.Stored(d.Schedule)},
+		"wake":      &types.AttributeValueMemberS{Value: settings.StoredWake(d.Wake)},
 	}
 	if d.Owner != "" {
 		item["owner"] = &types.AttributeValueMemberS{Value: d.Owner}
@@ -88,6 +89,9 @@ func unmarshalDevice(item map[string]types.AttributeValue) (Device, error) {
 	d.Schedule = schedule.Load("")
 	if attr, ok := item["schedule"].(*types.AttributeValueMemberS); ok {
 		d.Schedule = schedule.Load(attr.Value)
+	}
+	if attr, ok := item["wake"].(*types.AttributeValueMemberS); ok {
+		d.Wake = settings.LoadWake(attr.Value)
 	}
 	return d, nil
 }
@@ -212,7 +216,7 @@ func (x *Dynamo) Update(ctx context.Context, d Device) error {
 	_, err := x.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName:                aws.String(x.table),
 		Key:                      map[string]types.AttributeValue{"thingName": &types.AttributeValueMemberS{Value: d.ThingName}},
-		UpdateExpression:         aws.String("SET #n = :n, gameId = :g, chosenAt = :c, display = :d, schedule = :s"),
+		UpdateExpression:         aws.String("SET #n = :n, gameId = :g, chosenAt = :c, display = :d, schedule = :s, wake = :w"),
 		ConditionExpression:      aws.String("#o = :o"),
 		ExpressionAttributeNames: map[string]string{"#n": "name", "#o": "owner"},
 		ExpressionAttributeValues: map[string]types.AttributeValue{
@@ -221,6 +225,7 @@ func (x *Dynamo) Update(ctx context.Context, d Device) error {
 			":c": &types.AttributeValueMemberN{Value: strconv.FormatInt(d.ChosenAt, 10)},
 			":d": &types.AttributeValueMemberS{Value: settings.Stored(d.Display)},
 			":s": &types.AttributeValueMemberS{Value: schedule.Stored(d.Schedule)},
+			":w": &types.AttributeValueMemberS{Value: settings.StoredWake(d.Wake)},
 			":o": &types.AttributeValueMemberS{Value: d.Owner},
 		},
 		ReturnValuesOnConditionCheckFailure: types.ReturnValuesOnConditionCheckFailureAllOld,
@@ -242,7 +247,7 @@ func (x *Dynamo) Unbind(ctx context.Context, thingName, owner string) error {
 	_, err := x.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName:                aws.String(x.table),
 		Key:                      map[string]types.AttributeValue{"thingName": &types.AttributeValueMemberS{Value: thingName}},
-		UpdateExpression:         aws.String("REMOVE #o SET #n = :empty, gameId = :zero, chosenAt = :zero, display = :nothing, schedule = :unasked"),
+		UpdateExpression:         aws.String("REMOVE #o SET #n = :empty, gameId = :zero, chosenAt = :zero, display = :nothing, schedule = :unasked, wake = :empty"),
 		ConditionExpression:      aws.String("#o = :o"),
 		ExpressionAttributeNames: map[string]string{"#o": "owner", "#n": "name"},
 		ExpressionAttributeValues: map[string]types.AttributeValue{

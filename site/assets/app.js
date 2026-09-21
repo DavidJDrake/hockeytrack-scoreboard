@@ -12,7 +12,7 @@ import { reformat } from "./claimcode.js";
 import { guessZone, underlying, zoneList } from "./settings.js";
 import { settingsForm } from "./settingsform.js";
 import { SETUP_FILE_NAME, SetupFileError, countryNoteFor, regionFromLocale, setupFileFor } from "./setupfile.js";
-import { claimedRow, homeRow, makeEl, panelControls, scheduleCard } from "./panel.js";
+import { claimedRow, homeRow, makeEl, panelControls, scheduleCard, wakeCard } from "./panel.js";
 import { cleanSeason, mountPicker, stateFrom } from "./picker.js";
 import { hrefFor, isPageAddress, parseRoute, recallRoute, rememberRoute, titleFor } from "./routes.js";
 import { emailVerified, messageFor, panelTitle } from "./view.js";
@@ -230,7 +230,7 @@ function render({ moved = false } = {}) {
     // API's answer, and the API gives the same 404 for "not yours" as for
     // "no such panel"; so does this.
     const detail = $("panel-detail");
-    if (device) detail.replaceChildren(panelPage(device, games, gamesFailed), scheduleCard(el, device), displayCard(device));
+    if (device) detail.replaceChildren(panelPage(device, games, gamesFailed), wakeSwitch(device), scheduleCard(el, device), displayCard(device));
     else detail.replaceChildren(el("p", {}, ready ? "That panel is not on your account." : ""));
   } else if (route.name === "games") {
     $("games-back").href = hrefFor(device ? { name: "panel", thing: device.thingName } : { name: "panels" });
@@ -358,6 +358,19 @@ function displayCard(device) {
     el("h2", {}, "Display settings"),
     el("p", {}, "Set here, these apply to this panel only. Anything left on “Use my default” follows ", el("a", { href: hrefFor({ name: "settings" }) }, "your settings"), "."),
     body);
+}
+
+const WAKE_SAID = {
+  auto: "The panel follows its sleep hours again.",
+  awake: "Awake. The panel picks this up within a few seconds.",
+  asleep: "Asleep. The panel goes dark within a few seconds.",
+};
+
+function wakeSwitch(device) {
+  return wakeCard(el, device, {
+    busy: () => busy,
+    setWake: (mode) => act("wake", () => api.setWake(device.thingName, mode), WAKE_SAID[mode]),
+  });
 }
 
 function panelPage(device, games, gamesFailed) {

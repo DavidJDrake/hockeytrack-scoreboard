@@ -533,17 +533,70 @@ def test_booting_lights_the_panel_whether_or_not_anything_is_due():
                  last_change=0.0).show == COUNTDOWN
 
 
-def test_the_grace_period_beats_sleep_hours():
-    # Somebody choosing a game at one in the morning is plainly awake, and
-    # needs to see that the panel heard them.
+def test_choosing_a_game_does_not_light_a_sleeping_panel():
+    # The owner's ruling, 2026-09-21. This test used to say the opposite --
+    # "somebody choosing a game at one in the morning is plainly awake" -- and
+    # a game chosen at one in the morning lit the panel at one in the morning.
     night = Sleep("23:00", "07:00", "America/Los_Angeles")
     at_one_am = datetime(2026, 10, 2, 8, 0, tzinfo=timezone.utc)
-    lit = shown(now=0.0, now_utc=at_one_am, state=pregame_state(),
-                last_change=0.0, display=Display(sleep=night))
-    assert lit.show == COUNTDOWN
-    dark = shown(now=GRACE_S, now_utc=at_one_am, state=pregame_state(),
-                 last_change=0.0, display=Display(sleep=night))
-    assert dark.show == OFF
+    tonight = pregame_state(start="2026-10-02T18:00:00Z")   # ten hours off: a countdown is due
+    for now in (0.0, GRACE_S):
+        assert shown(now=now, now_utc=at_one_am, state=tonight,
+                     last_change=0.0, display=Display(sleep=night)).show == OFF
+    # Saying "on" is what the switch is for.
+    until = int((at_one_am + timedelta(hours=6)).timestamp() * 1000)
+    awake = Display(sleep=night, wake=main_module.Wake("awake", until))
+    assert shown(now=GRACE_S, now_utc=at_one_am, state=tonight, display=awake).show == COUNTDOWN
+    # And outside sleep hours the grace period still does its job: a game
+    # thirteen hours off, just chosen, is shown so the owner sees it landed.
+    nine_am = datetime(2026, 10, 1, 16, 0, tzinfo=timezone.utc)   # in Los Angeles
+    late_game = pregame_state(start="2026-10-02T06:00:00Z")      # fourteen hours off
+    assert shown(now=0.0, now_utc=nine_am, state=late_game, last_change=0.0,
+                 display=Display(sleep=night)).show == COUNTDOWN
+    assert shown(now=GRACE_S, now_utc=nine_am, state=late_game, last_change=0.0,
+                 display=Display(sleep=night)).show == OFF
+
+
+def test_the_switch_set_to_asleep_is_dark_whatever_is_on():
+    now_utc = datetime(2026, 10, 1, 23, 45, tzinfo=timezone.utc)
+    asleep_until = Display(wake=main_module.Wake("asleep", int((now_utc + timedelta(hours=11)).timestamp() * 1000)))
+    for state in (live_state(), pregame_state(), final_state(), None):
+        assert shown(now=0.0, now_utc=now_utc, state=state, last_change=0.0, display=asleep_until).show == OFF
+    # But not the screens that ask for something: a panel that cannot say it
+    # has no network is just broken, and cannot be told to wake up again.
+    for screen in (screens.OFFLINE, screens.WAITING, screens.UNREGISTERED, screens.ENROLL_PROBLEM, screens.SETTINGS):
+        assert shown(now=0.0, now_utc=now_utc, screen=screen, display=asleep_until).show == MESSAGE
+    assert shown(now=0.0, now_utc=now_utc, screen=screens.NO_SERVICE, display=asleep_until).show == OFF
+
+
+def test_a_switch_ends_by_itself_and_is_not_believed_past_a_day_or_without_a_clock():
+    now_utc = datetime(2026, 10, 1, 23, 45, tzinfo=timezone.utc)
+    ms = lambda **k: int((now_utc + timedelta(**k)).timestamp() * 1000)
+    wake_now = main_module.wake_now
+    assert wake_now(Display(wake=main_module.Wake("asleep", ms(hours=1))), now_utc) == "asleep"
+    assert wake_now(Display(wake=main_module.Wake("asleep", ms(seconds=0))), now_utc) is None
+    assert wake_now(Display(wake=main_module.Wake("asleep", ms(hours=-1))), now_utc) is None
+    assert wake_now(Display(wake=main_module.Wake("asleep", ms(days=30))), now_utc) is None
+    assert wake_now(Display(wake=main_module.Wake("asleep", ms(hours=1))), None) is None
+    assert wake_now(Display(), now_utc) is None
+    # So a live game is back the moment a forgotten switch has run out.
+    ended = Display(wake=main_module.Wake("asleep", ms(hours=-1)))
+    assert shown(now=0.0, now_utc=now_utc, state=live_state(), display=ended).show == GAME
+
+
+@pytest.mark.parametrize("wake, want", [
+    ({"mode": "awake", "until": 1790000000000}, ("awake", 1790000000000)),
+    ({"mode": "asleep", "until": 1790000000000}, ("asleep", 1790000000000)),
+    ({"mode": "on", "until": 1790000000000}, None), ({"mode": "AWAKE", "until": 1790000000000}, None),
+    ({"mode": "asleep"}, None), ({"mode": "asleep", "until": True}, None), ({"mode": "asleep", "until": 1.79e12}, None),
+    ({"mode": "asleep", "until": "1790000000000"}, None), ({"mode": "asleep", "until": 0}, None),
+    ({"mode": "asleep", "until": -5}, None), ("asleep", None), ([], None), (7, None),
+])
+def test_the_switch_is_parsed_strictly_and_costs_nothing_else_when_it_is_wrong(wake, want):
+    doc = {"gameId": 5, "display": {"v": 1, "countdownLeadMin": 60, "finalHoldMin": 30, "wake": wake}}
+    display = main_module.parse_display(json.dumps(doc))
+    assert (display.wake and (display.wake.mode, display.wake.until_ms)) == want
+    assert (display.countdown_lead_s, display.final_hold_s) == (3600, 1800), "a bad switch must not cost the other settings"
 
 
 def test_the_grace_period_is_the_panels_own_business():
@@ -743,6 +796,8 @@ def test_a_screen_asking_the_owner_for_something_is_never_off(screen):
 # The settings are swept too, not just their defaults: a zero lead or a zero
 # hold is a perfectly orderable setting, and "off the moment it is chosen" and
 # "on for two days" are the two ends somebody will eventually ask for.
+SWITCH_ENDS_MS = int(datetime(2026, 10, 2, 15, 0, tzinfo=timezone.utc).timestamp() * 1000)
+
 SETTINGS_SWEPT = (
     DEFAULTS,
     Display(sleep=NIGHT),
@@ -750,7 +805,27 @@ SETTINGS_SWEPT = (
     Display(countdown_lead_s=48 * 3600),
     Display(final_hold_s=0),
     Display(final_hold_s=48 * 3600),
+    # The owner's switch, both ways, ending 2026-10-02 15:00Z: in force for
+    # some of the swept clocks and ended, or too far off to believe, for others.
+    Display(sleep=NIGHT, wake=main_module.Wake("awake", SWITCH_ENDS_MS)),
+    Display(wake=main_module.Wake("asleep", SWITCH_ENDS_MS)),
 )
+
+
+def switch_in_force(case) -> str | None:
+    """The switch, worked out again from the inputs rather than by asking
+    wake_now: in force while it has between nothing and a day left, on a
+    clock that has been set."""
+    wake, now_utc = case["display"].wake, case["now_utc"]
+    if wake is None or now_utc is None:
+        return None
+    left = wake.until_ms / 1000 - now_utc.timestamp()
+    return wake.mode if 0 < left <= 24 * 3600 else None
+
+
+def sleeping(case) -> bool:
+    switch = switch_in_force(case)
+    return switch == "asleep" or (switch != "awake" and asleep(case["now_utc"], case["display"].sleep))
 
 
 def every_condition():
@@ -798,7 +873,7 @@ def why_it_could_be_dark(case) -> dict:
         except ValueError:
             left = None
     return {
-        "inside sleep hours": asleep(now_utc, display.sleep),
+        "inside sleep hours, or switched asleep": sleeping(case),
         "no game is selected": state is None,
         "nothing to count down to":
             name in main_module.PREGAME and now_utc is not None and left is None,
@@ -833,28 +908,31 @@ def test_the_panel_is_only_ever_dark_for_a_stated_reason():
         if result.show != OFF:
             continue
         name = case["state"].state if case["state"] is not None else None
-        assert case["now"] - case["last_change"] >= GRACE_S, \
-            "switched off inside the grace period"
+        # Inside the grace period the only reason to be dark is sleep: the
+        # hours, or the owner's switch. (It used to be no reason at all; the
+        # owner's ruling of 2026-09-21 is that choosing a game does not light
+        # a sleeping panel.)
+        assert case["now"] - case["last_change"] >= GRACE_S or sleeping(case), \
+            "switched off inside the grace period, and not asleep"
         if case["screen"] != screens.SCOREBOARD:
             # One help screen may be dark, and only for one reason: see
             # test_the_help_screen_sleeps_like_everything_else.
             assert case["screen"] == screens.NO_SERVICE, "a help screen was switched off"
-            assert asleep(case["now_utc"], case["display"].sleep), \
-                "the service-unreachable screen went dark outside sleep hours"
+            assert sleeping(case), "the service-unreachable screen went dark while not asleep"
             continue
         # N-1. Not "a live game is never switched off" -- that assertion is
         # what forbade the fix, and it was true of a document from three
         # nights ago. A live game whose document is ARRIVING is never
         # switched off; one nobody is refreshing is bounded like everything
         # else, and says so on its own face while it lasts.
-        assert not live_and_fresh(case["state"], case["state_age"]), \
-            "a live game whose document is fresh was switched off"
+        assert not live_and_fresh(case["state"], case["state_age"]) or switch_in_force(case) == "asleep", \
+            "a live game whose document is fresh was switched off, and nobody asked for that"
         assert any(why_it_could_be_dark(case).values()), f"dark for no stated reason: {case}"
     # 7 screens x 8 states x 3 document ages x 6 clocks x 2 sightings
-    # x 2 last-changes x 6 settings x 3 monotonic times. Stated so that a
+    # x 2 last-changes x 8 settings x 3 monotonic times. Stated so that a
     # sweep that silently stops covering something is a failure, not a
     # quiet pass.
-    assert swept == 7 * 8 * 3 * 6 * 2 * 2 * 6 * 3 == 72_576, swept
+    assert swept == 7 * 8 * 3 * 6 * 2 * 2 * 8 * 3 == 96_768, swept
 
 
 def test_a_dark_frame_is_never_also_shifted():
@@ -1585,12 +1663,17 @@ def test_the_link_returning_inside_the_window_does_not_wake_the_panel():
                  state=live_state(), state_age=0.0, display=night).show == GAME
 
 
-def test_the_help_screen_still_answers_during_the_grace_at_night():
-    # An owner who has just pressed something at 3 a.m. still gets an answer.
+def test_the_service_unreachable_screen_sleeps_even_inside_the_grace_period():
+    # It used to answer for five minutes at 3 a.m. But the grace period also
+    # starts when a game comes or goes, and a link that drops at 3 a.m. is
+    # one of those: that was a help screen lighting a bedroom by itself.
     night = Display(sleep=NIGHT)
     at_three_am = datetime(2026, 10, 2, 10, 0, tzinfo=timezone.utc)
     assert shown(now=0.0, now_utc=at_three_am, screen=screens.NO_SERVICE,
-                 last_change=0.0, display=night).show == MESSAGE
+                 last_change=0.0, display=night).show == OFF
+    awake = Display(sleep=NIGHT, wake=main_module.Wake("awake", int((at_three_am + timedelta(hours=2)).timestamp() * 1000)))
+    assert shown(now=0.0, now_utc=at_three_am, screen=screens.NO_SERVICE,
+                 last_change=0.0, display=awake).show == MESSAGE
 
 
 def test_a_live_game_keeps_the_panel_when_the_link_drops():

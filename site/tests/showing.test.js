@@ -1,3 +1,4 @@
+import { wakeNow } from "../assets/showing.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -147,4 +148,32 @@ test("how far ahead an end may be is the panel's number", () => {
   const js = readFileSync(new URL("../assets/showing.js", import.meta.url), "utf8");
   assert.match(py, /^FINAL_AT_SKEW_S = 10 \* 60$/m);
   assert.match(js, /FINAL_AT_SKEW_MS = 10 \* 60 \* 1000/);
+});
+
+test("the owner's switch: in force only while it could be one of ours", () => {
+  const now = Date.parse("2026-09-21T05:00:00Z");
+  assert.equal(wakeNow(now, { mode: "awake", until: now + 3600e3 }), "awake");
+  assert.equal(wakeNow(now, { mode: "asleep", until: "2026-09-21T11:00:00Z" }), "asleep");
+  for (const dead of [null, undefined, "asleep", {}, { mode: "asleep" }, { mode: "asleep", until: now }, { mode: "asleep", until: now - 1 },
+    { mode: "asleep", until: now + 25 * 3600e3 }, { mode: "on", until: now + 1000 }, { mode: "asleep", until: "soon" }, { mode: "asleep", until: NaN }, { mode: "asleep", until: -5 }]) {
+    assert.equal(wakeNow(now, dead), null, JSON.stringify(dead));
+  }
+});
+
+test("the sentences for a panel somebody switched", () => {
+  const wake = { mode: "asleep", until: "2026-09-21T11:00:00Z" };
+  assert.equal(line({ now: "2026-09-21T00:30:00Z", game: g("LIVE", { period: { label: "2" } }), display: { ...BUILT_IN, wake } }),
+    "Off · put to sleep by you until about 7:00 AM");
+  const sleep = { start: "23:00", end: "07:00", zone: "America/Toronto" };
+  assert.equal(line({ now: "2026-09-20T10:00:00Z", game: g("PRE", { start: "2026-09-20T17:00:00Z" }), chosenAt: "2026-09-20T09:59:00Z", display: { ...BUILT_IN, sleep } }),
+    "Off · sleep hours until 07:00", "choosing a game does not light a sleeping panel");
+});
+
+test("how long a switch may last is the panel's number", () => {
+  const py = readFileSync(new URL("../../device/scoreboard/main.py", import.meta.url), "utf8");
+  const js = readFileSync(new URL("../assets/showing.js", import.meta.url), "utf8");
+  const go = readFileSync(new URL("../../cloud/internal/settings/wake.go", import.meta.url), "utf8");
+  assert.match(py, /^WAKE_MAX_S = 24 \* 60 \* 60$/m);
+  assert.match(js, /WAKE_MAX_MS = 24 \* 60 \* 60 \* 1000/);
+  assert.match(go, /WakeMax = 24 \* time\.Hour/);
 });

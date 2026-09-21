@@ -32,11 +32,14 @@ def run(case):
         state = GameState.pregame(TodayGame(1, "AAA", "BBB", game.get("start") or "", game["state"]))
         ended = int(instant(game["finalAt"]).timestamp() * 1000) if game.get("finalAt") else None
         state = state.__class__(**{**state.__dict__, "state": game["state"], "final_at_ms": ended})
-    sleep = d.get("sleep")
+    sleep, wake = d.get("sleep"), d.get("wake")
     display = main.Display(
         countdown_lead_s=d["countdownLeadMin"] * 60,
         final_hold_s=d["finalHoldMin"] * 60,
         sleep=main.Sleep(sleep["start"], sleep["end"], sleep["zone"]) if sleep else None,
+        # Through the panel's own parser, so a mode nobody defined is dropped
+        # where it would be dropped on the wire.
+        wake=main._wake_from({"mode": wake["mode"], "until": int(instant(wake["until"]).timestamp() * 1000)}) if wake else None,
     )
     chosen = ago(case["chosenAt"]) if case.get("chosenAt") else LONG_AGO
     final_seen = None

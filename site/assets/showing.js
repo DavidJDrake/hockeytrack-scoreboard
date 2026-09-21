@@ -20,6 +20,18 @@ const GRACE_MS = 5 * 60 * 1000;
 const STALE_AFTER_MS = 2 * 60 * 60 * 1000;
 // main.py: FINAL_AT_SKEW_S. An end further ahead than this is not believed.
 const FINAL_AT_SKEW_MS = 10 * 60 * 1000;
+// main.py: WAKE_MAX_S. A switch claiming to last longer is not believed.
+const WAKE_MAX_MS = 24 * 60 * 60 * 1000;
+
+// The owner's switch in force at nowMs: "awake", "asleep" or null (follow
+// sleep hours). main.py: wake_now.
+export function wakeNow(nowMs, wake) {
+  if (!wake || (wake.mode !== "awake" && wake.mode !== "asleep")) return null;
+  const until = typeof wake.until === "number" ? (Number.isFinite(wake.until) && wake.until > 0 ? wake.until : null) : instant(wake.until);
+  if (until === null) return null;
+  const left = until - nowMs;
+  return left > 0 && left <= WAKE_MAX_MS ? wake.mode : null;
+}
 
 export const BUILT_IN = Object.freeze({ countdownLeadMin: 720, finalHoldMin: 180, sleep: null });
 
@@ -73,8 +85,13 @@ export function decide({ now, game = null, chosenAt = null, display = BUILT_IN }
   const lit = (show, why) => ({ show, why });
   const dark = (why, extra = {}) => ({ show: "off", why, ...extra });
 
+  // The panel's order (main.presentation). Choosing a game does not light a
+  // sleeping panel: the switch is how an owner says "on".
+  const flip = wakeNow(nowMs, display?.wake);
+  const until = flip ? (typeof display.wake.until === "number" ? display.wake.until : instant(display.wake.until)) : null;
+  if (flip === "asleep") return dark("switched-off", { until });
   if (game?.state === "LIVE") return lit("game", "live");
-  if (!withinGrace && asleep(nowMs, display?.sleep)) return dark("asleep");
+  if (flip !== "awake" && asleep(nowMs, display?.sleep)) return dark("asleep");
   if (!game) return withinGrace ? lit("no-game", "none") : dark("none");
 
   if (game.state === "FINAL" || game.state === "OFF") {
@@ -153,6 +170,7 @@ export function showingLine(input, { timeZone, locale } = {}) {
   // which is not there unless the panel is in it.
   const off = {
     asleep: () => `Off · sleep hours until ${input.display.sleep.end}`,
+    "switched-off": () => `Off · put to sleep by you${until ? ` until about ${at(until)}` : ""}`,
     none: () => "Off · no game chosen",
     "no-start": () => `Off · ${teams(game)} has no start time yet`,
     "never-started": () => `Off · ${teams(game)} has not started`,

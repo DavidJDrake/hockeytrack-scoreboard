@@ -59,6 +59,9 @@ type Device struct {
 	// conflicts among them the owner has answered. Nothing acts on it until
 	// the director exists; GameID is still what the panel follows.
 	Schedule schedule.Panel
+	// Wake is the owner's hand on the sleep switch, with its own end. nil
+	// means the panel follows its sleep hours.
+	Wake *settings.Wake
 }
 
 // Store persists Devices. Claim is the only operation that may bind an owner,
@@ -153,7 +156,7 @@ func (f *Fake) Update(_ context.Context, in Device) error {
 		return ErrNotOwner
 	}
 	// Only these are mutable; ThingName and Owner are not.
-	d.Name, d.GameID, d.ChosenAt, d.Display, d.Schedule = in.Name, in.GameID, in.ChosenAt, in.Display, in.Schedule
+	d.Name, d.GameID, d.ChosenAt, d.Display, d.Schedule, d.Wake = in.Name, in.GameID, in.ChosenAt, in.Display, in.Schedule, in.Wake
 	f.items[in.ThingName] = d
 	return nil
 }
@@ -170,7 +173,7 @@ func (f *Fake) Unbind(_ context.Context, thingName, owner string) error {
 	}
 	// The next owner inherits nothing: not the name, the game, the stamp,
 	// the settings, or which games the last owner liked to watch.
-	d.Owner, d.Name, d.GameID, d.ChosenAt, d.Display, d.Schedule = "", "", 0, 0, settings.Settings{}, schedule.Panel{}
+	d.Owner, d.Name, d.GameID, d.ChosenAt, d.Display, d.Schedule, d.Wake = "", "", 0, 0, settings.Settings{}, schedule.Panel{}, nil
 	f.items[thingName] = d
 	return nil
 }

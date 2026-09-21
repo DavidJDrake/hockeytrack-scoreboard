@@ -12,8 +12,8 @@
 // this module knows the shape of a row, not what the API is or how failures
 // are reported.
 import { hrefFor } from "./routes.js";
-import { displayFor } from "./settings.js";
-import { inputFor, showingLine } from "./showing.js";
+import { SETTINGS_SINCE, displayFor } from "./settings.js";
+import { inputFor, showingLine, wakeNow } from "./showing.js";
 import { canResend, gameChoices, gameLabel, panelTitle } from "./view.js";
 
 export function makeEl(doc) {
@@ -177,4 +177,41 @@ export function scheduleCard(el, device, options = {}) {
     ...(count && schedule.known === false ? [el("p", {}, "The season could not be read just now, so what is coming up is not shown.")] : []),
     el("p", {}, el("strong", {}, "Not in use yet. "), "The panel still shows the one game chosen above. Chosen games start driving the panel in a later update."),
     el("div", { class: "row" }, link));
+}
+
+// The owner's hand on the sleep switch. Three positions and always exactly
+// one pressed: follow the sleep hours, awake through them, asleep now. The
+// two that override end by themselves, and the card says when -- a switch
+// that has to be remembered is a panel that stays dark for a week.
+export const WAKE_MODES = [
+  ["auto", "Follow sleep hours"],
+  ["awake", "Awake"],
+  ["asleep", "Asleep"],
+];
+
+export function wakeCard(el, device, on, nowMs = Date.now(), options = {}) {
+  const title = panelTitle(device);
+  const current = wakeNow(nowMs, device.wake) ?? "auto";
+  const buttons = WAKE_MODES.map(([mode, text]) => {
+    const b = el("button", { type: "button", "aria-pressed": String(mode === current),
+      onclick: () => {
+        if (on.busy() || mode === current) return;
+        on.setWake(mode);
+      } }, text);
+    b.dataset.focusKey = `${device.thingName}:wake:${mode}`;
+    return b;
+  });
+  const until = current === "auto" ? null : new Date(device.wake.until);
+  const when = until && !Number.isNaN(until.getTime())
+    ? new Intl.DateTimeFormat(options.locale, { weekday: "short", hour: "numeric", minute: "2-digit", timeZone: options.timeZone }).format(until) : "";
+  const says = {
+    auto: "The panel follows its sleep hours. Choosing a game during them does not light it; a live game still does.",
+    awake: `Awake through its sleep hours until ${when}, then it follows them again.`,
+    asleep: `Dark until ${when}, whatever is on, then it follows its sleep hours again. A live game does not light it; a panel that has lost its network still says so.`,
+  }[current];
+  return el("section", { class: "card", "aria-label": `Sleep switch for ${title}` },
+    el("h2", {}, "Sleep"),
+    el("div", { class: "switch", role: "group", "aria-label": "Sleep switch" }, ...buttons),
+    el("p", { role: "status" }, says),
+    el("p", { class: "fine" }, `Needs the panel image after ${SETTINGS_SINCE}. An older panel ignores the switch, and still lights for five minutes when a game is chosen during sleep hours.`));
 }

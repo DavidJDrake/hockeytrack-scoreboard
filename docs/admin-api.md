@@ -219,6 +219,33 @@ panel reads `0` as a game to select. `testdata/config-documents.json` is
 composed byte for byte by the Go suite and read by the panel's own parsers in
 the device suite.
 
+### `PUT /api/devices/{thing}/wake`
+
+The owner's hand on the sleep switch. Body: `{"mode":"awake"|"asleep"|"auto"}`
+and nothing else (unknown keys are refused).
+
+- `awake`: lit through its sleep hours. Everything else still applies: a game
+  thirteen hours off is still not counted down.
+- `asleep`: dark now, whatever the hour and **whatever is on, a live game
+  included**. The screens that ask the owner for something are not hidden.
+- `auto`: follow sleep hours. Clears the switch.
+
+**When it ends is the server's to decide, never the client's:** the next time
+the panel's sleep hours END (so `awake` at 1 a.m. lasts the night and `asleep`
+at 8 p.m. lasts until morning), or twelve hours on a panel with none, and
+never more than a day. The panel and the site hold the same day's bound and
+ignore a switch that claims more, so no number from anywhere can pin a panel
+lit or dark. A panel with no clock set ignores the switch.
+
+Publishes the whole config document (`display.wake`) with `chosenAt`
+**unchanged**, so the panel does not read it as a choice of game. `404` for a
+panel that is not the caller's. A switch that has ended is neither sent nor
+returned. Releasing a panel clears it.
+
+Why it exists: choosing a game used to light a sleeping panel for five
+minutes. It no longer does (owner's ruling, 2026-09-21); this is how to say
+"on" explicitly. A live game still beats sleep hours. Needs image v0.1.7.
+
 ### Game schedules
 
 What an owner has asked a panel to show. **Nothing here reaches a panel yet:**
