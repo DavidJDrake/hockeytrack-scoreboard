@@ -59,7 +59,12 @@ type State struct {
 	// cannot do that job: it is the clock's anchor, and it deliberately
 	// stands still while the feed repeats itself. Panels judge freshness by
 	// whether the document changed, so something in it has to.
-	SeenAt    int64     `json:"seenAt,omitempty" dynamodbav:"seenAt"`
+	SeenAt int64 `json:"seenAt,omitempty" dynamodbav:"seenAt"`
+	// FinalAt is when the game ended: the moment it was first seen FINAL,
+	// set once and never moved. A final comes down one hold after THIS, not
+	// after whenever a panel happened to first see it -- a panel given a game
+	// that ended two hours ago, with a one-hour hold, should show nothing.
+	FinalAt   int64     `json:"finalAt,omitempty" dynamodbav:"finalAt"`
 	Away      Team      `json:"away" dynamodbav:"away"`
 	Home      Team      `json:"home" dynamodbav:"home"`
 	Period    Period    `json:"period" dynamodbav:"period"`

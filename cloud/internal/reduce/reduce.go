@@ -103,6 +103,26 @@ type finalDetail struct {
 // Reduce folds one event into the state. The bool reports whether the
 // public document changed and should be republished.
 func Reduce(s State, e Event) (State, bool, error) {
+	wasFinal, lastHeard := s.GameState == "FINAL", max(s.SeenAt, s.AsOf)
+	next, changed, err := fold(s, e)
+	if err != nil || next.GameState != "FINAL" || next.FinalAt != 0 {
+		return next, changed, err
+	}
+	// The end of the game, stamped once. Three events can make a game FINAL
+	// (status, clock, final) and delivery is at-least-once, so it is done
+	// here rather than in each: whichever arrives first sets it, and nothing
+	// after moves it.
+	if wasFinal && lastHeard != 0 {
+		// A row from before this field existed. "Now" would be hours late;
+		// heartbeats stop at the final, so the last one is when it ended.
+		next.FinalAt = lastHeard
+	} else {
+		next.FinalAt = e.Time.UTC().UnixMilli()
+	}
+	return next, true, err
+}
+
+func fold(s State, e Event) (State, bool, error) {
 	s.V = 1
 	if s.Roster == nil {
 		s.Roster = map[int64]int{}
