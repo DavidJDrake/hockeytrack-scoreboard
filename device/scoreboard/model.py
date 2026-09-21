@@ -90,7 +90,12 @@ class GameState:
         return max(0, (now_ms - self.as_of_ms) // 1000)
 
     def clock_at(self, now_ms: int) -> int:
-        if not self.clock_running:
+        # Two clocks count: play with the clock running, and an intermission,
+        # whose countdown never stops. A stoppage in play holds. The reducer
+        # anchors asOf to when the reading was TAKEN for both (a cached feed
+        # repeats one value for about twenty seconds), so counting from it
+        # does not jump back.
+        if not (self.clock_running or self.intermission):
             return self.clock_seconds
         return max(0, self.clock_seconds - self._elapsed_s(now_ms))
 

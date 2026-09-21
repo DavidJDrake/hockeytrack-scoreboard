@@ -65,6 +65,9 @@ BANNER_BG = (96, 60, 12)
 # final IS -- so their age says nothing and neither may ever carry the
 # banner, or the panel would accuse the cloud of failing every time a game
 # ended.
+# Where the first penalty row starts. See draw().
+PENALTY_ROWS_Y = 382
+
 STATIC_STATES = ("PRE", "FINAL", "OFF")
 INK = (250, 250, 250)
 MUTED = (150, 158, 168)
@@ -288,7 +291,12 @@ def draw(surface: pygame.Surface, state: GameState | None, now_ms: int, assets: 
         pygame.draw.line(surface, RULE, (60, 372), (W - 60, 372), 2)
         # Both penalty rows, stalled or not: the band lives in the gutter
         # above the rule line now, so it no longer costs the second row.
-        _penalty_rows(surface, assets, state, clock_ms, 386)
+        # 382, not the 386 this was: with two rows the second bar ran to
+        # y=482 on a 480 px frame and lost its last two rows to the edge of
+        # the surface. Four up puts it at 470..477. The burn-in shift only
+        # ever moves the frame up or sideways (main.SHIFT_PATTERN), so
+        # nothing pushes it back off the bottom.
+        _penalty_rows(surface, assets, state, clock_ms, PENALTY_ROWS_Y)
 
     if stale:
         _stale_banner(surface, assets, stale_s, link_ok)
