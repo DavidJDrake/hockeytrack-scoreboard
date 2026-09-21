@@ -214,19 +214,37 @@ reads the same stamp.
 
 One component, used for a panel's own games and for both kinds of template.
 
-- The whole season, grouped by day, as on HockeyTrack's schedule page.
-- HockeyTrack's filters: clubs (multi-select), search by club or building,
-  home and away, preseason. The pure parts of
-  `hockeytrack/site/assets/schedule.js` are ported; its `innerHTML` rendering
-  is not. This site builds every node with `createElement` and text nodes and
-  its CSP requires Trusted Types.
+- **It is HockeyTrack's schedule page** (`hockeytrack/site/schedule/`): the
+  same header counts, rail, chips, quick picks, team line, day sections and
+  rows, from the same CSS (vendored as `site/assets/schedule.css`, every
+  selector under `.sched`, with the source commit noted).
+- **HockeyTrack's filters, exactly:** clubs (a multi-select disclosure with
+  full names), All / Preseason / Regular, months (multi-select), and a search
+  of codes, club names and arenas. *Corrected 2026-09-21: this list used to
+  say "home and away", which HockeyTrack does not have. Home/away belongs to
+  saved-filter templates (SCO-35) only, and is a parameter of the pure filter,
+  not a control on the page.*
+- **Ported:** the look, the filters and their behavior, the per-club context
+  (game numbers, rest days, back-to-backs). **Not ported:** how that page
+  draws. It assigns `innerHTML` behind an escape function; this site builds
+  every node with `createElement` and text nodes and its CSP requires Trusted
+  Types.
+- Times are Eastern and days are the NHL's game dates, as there.
 - A checkbox per game; **select all shown** and **clear all shown** act on
   the current filter.
 - **Save as a filter** keeps the filter instead of the ticks.
 - Conflicts appear as boxes are ticked, grouped by sequence, each group saying
   whether the current choice is valid.
-- About 1,400 games: rendered by day with a bounded DOM, real checkboxes whose
-  labels name the game and the date, usable by keyboard and screen reader.
+- About 1,400 games, all listed, as HockeyTrack lists them (`content-visibility`
+  keeps it cheap: 54 ms to mount, measured). Ticking a game updates the counts,
+  the overlaps and the save bar and does NOT rebuild the list. Each row is the
+  label of its own checkbox, named with the game and the date.
+
+**How the first picker missed this (SCO-61).** It was built from this
+document's summary of HockeyTrack's page instead of from the page, and the
+summary was wrong. It had its own look, a filter HockeyTrack lacks, and a month
+at a time. The check that would have caught it is a side-by-side look in a
+browser before the PR; that is now a build note on the ticket.
 
 **Where the schedule comes from.** Measured 2026-09-20: 1,402 games, 185 KB
 (17 KB gzipped), served by HockeyTrack with no CORS header. Two ways to get

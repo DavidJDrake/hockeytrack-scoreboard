@@ -228,7 +228,11 @@ owner's wishes. Saving a schedule publishes nothing, and a test holds that.
 
 #### `GET /api/schedule`
 
-The whole NHL season, for the picker: `{"games":[{"gameId","start","away","home","venue","type"}]}`.
+The whole NHL season, for the picker:
+`{"teams":{"TOR":"Toronto Maple Leafs"},"games":[{"gameId","date","start","away","home","venue","type"}]}`.
+`date` is the NHL's game date, which days are grouped by; it is not derived
+from `start` (a late Pacific game is the next day in UTC). A club name is one
+printable line of at most 40 characters or the club is left out.
 It is public data. It is served here because the browser cannot read it from
 HockeyTrack's origin without a CORS header there and a wider `connect-src`
 here; the API already fetches the file server-side. The address is this

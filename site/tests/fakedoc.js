@@ -14,7 +14,15 @@ export function fakeDoc() {
             if (typeof kid === "string") this.text += kid;
           }
         },
-        fire(type) { for (const fn of this.listeners[type] ?? []) fn({ preventDefault() {} }); },
+        replaceChildren(...kids) {
+          this.children = [];
+          this.text = "";
+          this.append(...kids);
+        },
+        contains(other) { return every(this).includes(other); },
+        focus() { this.focused = true; },
+        scrollIntoView() { this.scrolledTo = true; },
+        fire(type, event = {}) { for (const fn of this.listeners[type] ?? []) fn({ preventDefault() {}, ...event }); },
       };
     },
   };

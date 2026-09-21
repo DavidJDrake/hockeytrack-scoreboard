@@ -13,7 +13,7 @@ import { guessZone, underlying, zoneList } from "./settings.js";
 import { settingsForm } from "./settingsform.js";
 import { SETUP_FILE_NAME, SetupFileError, countryNoteFor, regionFromLocale, setupFileFor } from "./setupfile.js";
 import { claimedRow, homeRow, makeEl, panelControls, scheduleCard } from "./panel.js";
-import { cleanSeason, pickerView, stateFrom } from "./picker.js";
+import { cleanSeason, mountPicker, stateFrom } from "./picker.js";
 import { hrefFor, isPageAddress, parseRoute, recallRoute, rememberRoute, titleFor } from "./routes.js";
 import { emailVerified, messageFor, panelTitle } from "./view.js";
 
@@ -38,7 +38,7 @@ let loaded = { devices: [], games: [], gamesFailed: false, settings: null, ready
 // The season, fetched the first time somebody opens a picker and kept for
 // the life of the tab: 1,400 rows nobody needs on Home. `failed` is a fetch
 // that did not work, so the page can say so and offer to try again.
-let season = { games: null, loading: false, failed: false };
+let season = { data: null, loading: false, failed: false };
 // What is ticked on the picker that is open, which must survive a redraw.
 // One panel at a time; leaving for another panel starts from what is saved.
 let picking = null;
@@ -252,11 +252,12 @@ function render({ moved = false } = {}) {
 
 async function loadSeason() {
   if (season.loading) return;
-  season = { games: null, loading: true, failed: false };
+  season = { data: null, loading: true, failed: false };
   try {
-    season = { games: cleanSeason(await api.getSchedule()), loading: false, failed: false };
+    season = { data: cleanSeason(await api.getSchedule()), loading: false, failed: false };
+    picking = null;
   } catch (err) {
-    season = { games: null, loading: false, failed: true };
+    season = { data: null, loading: false, failed: true };
     if (!(err instanceof ApiError) || err.kind !== "unauthorized") reportFailure("season", err);
   }
   render();
@@ -265,7 +266,7 @@ async function loadSeason() {
 // Choosing a panel's games. The picker is built in picker.js, where a test
 // can tick its boxes; what saving DOES is here.
 function gamesPage(device) {
-  if (season.games === null) {
+  if (season.data === null) {
     if (season.failed) {
       return el("p", {}, "The season could not be loaded. ",
         el("button", { class: "link", type: "button", onclick: loadSeason }, "Try again"));
@@ -273,25 +274,35 @@ function gamesPage(device) {
     loadSeason();
     return el("p", {}, "Loading the season…");
   }
-  if (picking?.thing !== device.thingName) picking = { thing: device.thingName, state: stateFrom(device.schedule) };
-  return pickerView(el, {
-    season: season.games,
-    state: picking.state,
-    title: panelTitle(device),
-    on: {
-      busy: () => busy,
-      change: () => {
-        const focusKey = document.activeElement?.dataset?.focusKey ?? null;
-        render();
-        restoreFocus(focusKey);
+  // Mounted once for a panel and kept: the page updates itself in place, as
+  // HockeyTrack's does, and a redraw of this site around it (a refresh, a
+  // status line) must not throw away 1,400 rows, the scroll position or what
+  // is ticked. Saving drops it, so the next draw starts from what the server
+  // stored rather than from what was sent.
+  if (picking?.thing !== device.thingName) {
+    const state = stateFrom(device.schedule);
+    let storage = null;
+    try {
+      storage = globalThis.localStorage ?? null;
+    } catch {
+      // Storage can be refused outright; filters are then just not remembered.
+    }
+    picking = { thing: device.thingName, node: mountPicker(el, {
+      season: season.data,
+      state,
+      title: panelTitle(device),
+      storage,
+      doc: document,
+      on: {
+        busy: () => busy,
+        save: (body) => act("saveSchedule", async () => {
+          await api.setSchedule(device.thingName, body);
+          picking = null;
+        }, "Saved. Nothing changes on the panel yet."),
       },
-      save: (body) => act("saveSchedule", async () => {
-        await api.setSchedule(device.thingName, body);
-        // Start again from what the server stored, not from what was sent.
-        picking = null;
-      }, "Saved. Nothing changes on the panel yet."),
-    },
-  });
+    }) };
+  }
+  return picking.node;
 }
 
 // Which panels the last save of the defaults could not reach.
