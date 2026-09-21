@@ -9,6 +9,8 @@
 import { beginSignIn, completeSignIn, forgetSignIn, logoutUrl, mayReauth, wasSignedIn } from "./auth.js";
 import { ApiError, createApi } from "./api.js";
 import { reformat } from "./claimcode.js";
+import { guessZone, underlying, zoneList } from "./settings.js";
+import { settingsForm } from "./settingsform.js";
 import { SETUP_FILE_NAME, SetupFileError, countryNoteFor, regionFromLocale, setupFileFor } from "./setupfile.js";
 import { claimedRow, homeRow, makeEl, panelControls } from "./panel.js";
 import { hrefFor, isPageAddress, parseRoute, recallRoute, rememberRoute, titleFor } from "./routes.js";
@@ -31,7 +33,9 @@ let busy = false;
 // The page being shown. Kept because the fragment stops naming it the moment
 // someone follows an anchor inside the page (the skip link, #main).
 let shownRoute = { name: "home" };
-let loaded = { devices: [], games: [], gamesFailed: false, ready: false };
+let loaded = { devices: [], games: [], gamesFailed: false, settings: null, ready: false };
+// Read once: the browser's list does not change while the page is open.
+const ZONES = zoneList();
 
 const el = makeEl(document);
 
@@ -115,6 +119,7 @@ function showSignedOut(message = "") {
   $("sign-out").hidden = true;
   $("nav-home").hidden = true;
   $("nav-panels").hidden = true;
+  $("nav-settings").hidden = true;
   $("title").textContent = titleFor({ name: "home" });
   setStatus(message, { error: Boolean(message) });
 }
@@ -126,6 +131,7 @@ async function showSignedIn() {
   $("sign-out").hidden = false;
   $("nav-home").hidden = false;
   $("nav-panels").hidden = false;
+  $("nav-settings").hidden = false;
   $("signed-out").hidden = true;
   $("signed-in").hidden = false;
   renderAdd(claims);
@@ -137,9 +143,13 @@ async function showSignedIn() {
 // success message still describes what is on screen.
 async function refresh({ quiet = false } = {}) {
   if (!quiet) setStatus("Loading your panels…");
-  const [devices, games] = await Promise.all([
+  const [devices, games, settings] = await Promise.all([
     api.listDevices().catch((err) => ({ err })),
     api.listGames().then((doc) => (Array.isArray(doc?.games) ? doc.games : [])).catch((err) => ({ err })),
+    // Settings failing to load does not take the panels off the page. The
+    // forms that need them say so instead of offering defaults that might
+    // not be the account's.
+    api.getSettings().catch(() => null),
   ]);
   if (devices.err) {
     // A quiet refresh that fails leaves the page as it was: what is on
@@ -148,7 +158,8 @@ async function refresh({ quiet = false } = {}) {
     return false;
   }
   const gamesFailed = Boolean(games.err);
-  loaded = { devices, games: gamesFailed ? [] : games, gamesFailed, ready: true };
+  const usable = settings && typeof settings === "object" && settings.defaults && typeof settings.defaults === "object" ? settings : null;
+  loaded = { devices, games: gamesFailed ? [] : games, gamesFailed, settings: usable, ready: true };
   render();
   if (quiet) return true;
   if (gamesFailed) reportFailure("games", games.err);
@@ -168,7 +179,7 @@ async function act(action, run, success) {
       reportFailure(action, err);
       return;
     }
-    if (await refresh()) setStatus(success);
+    if (await refresh()) setStatus(typeof success === "function" ? success() : success);
   } finally {
     setBusy(false);
     restoreFocus(focusKey);
@@ -185,10 +196,10 @@ function render({ moved = false } = {}) {
   const route = shownRoute;
   const device = route.name === "panel" ? loaded.devices.find((d) => d.thingName === route.thing) : null;
 
-  for (const name of ["home", "panels", "panel", "unknown"]) $(`view-${name}`).hidden = name !== route.name;
+  for (const name of ["home", "panels", "panel", "settings", "unknown"]) $(`view-${name}`).hidden = name !== route.name;
   // A panel's own page sits under Panels, so Panels stays marked there.
-  const current = { home: "nav-home", panels: "nav-panels", panel: "nav-panels" }[route.name];
-  for (const id of ["nav-home", "nav-panels"]) {
+  const current = { home: "nav-home", panels: "nav-panels", panel: "nav-panels", settings: "nav-settings" }[route.name];
+  for (const id of ["nav-home", "nav-panels", "nav-settings"]) {
     if (id === current) $(id).setAttribute("aria-current", route.name === "panel" ? "true" : "page");
     else $(id).removeAttribute("aria-current");
   }
@@ -211,8 +222,10 @@ function render({ moved = false } = {}) {
     // API's answer, and the API gives the same 404 for "not yours" as for
     // "no such panel"; so does this.
     const detail = $("panel-detail");
-    if (device) detail.replaceChildren(panelPage(device, games, gamesFailed));
+    if (device) detail.replaceChildren(panelPage(device, games, gamesFailed), displayCard(device));
     else detail.replaceChildren(el("p", {}, ready ? "That panel is not on your account." : ""));
+  } else if (route.name === "settings") {
+    $("defaults-form").replaceChildren(defaultsForm());
   }
 
   // A page change made by the person, not by a refresh: put focus on the
@@ -223,6 +236,61 @@ function render({ moved = false } = {}) {
     if (!busy) setStatus("");
     $("title").focus();
   }
+}
+
+// Which panels the last save of the defaults could not reach.
+let missed = [];
+
+const SETTINGS_UNAVAILABLE = "Your settings could not be loaded, so they cannot be changed right now. Reload the page to try again.";
+
+// The account's defaults. A field left alone says nothing, and the built-in
+// value shows through.
+function defaultsForm() {
+  if (!loaded.settings) return el("p", {}, loaded.ready ? SETTINGS_UNAVAILABLE : "");
+  return settingsForm(el, {
+    idPrefix: "defaults",
+    layer: loaded.settings.defaults,
+    shownThrough: underlying({}, loaded.settings.builtIn),
+    inheritWord: "Built-in",
+    zones: ZONES,
+    guessedZone: guessZone(),
+    busy: () => busy,
+    onError: (message) => setStatus(message, { error: true }),
+    onSave: (layer) => act("saveSettings", async () => {
+      const result = await api.saveSettings(layer);
+      // The server saved the defaults and then told each panel. One it could
+      // not reach is not an error here -- the panel gets the whole document
+      // on its next publish -- but the owner should know which.
+      missed = Array.isArray(result?.notSent) ? result.notSent : [];
+    }, () => (missed.length
+      ? `Saved. ${missed.length === 1 ? "One panel" : `${missed.length} panels`} could not be told just now; save again in a moment.`
+      : "Saved. Your panels pick this up within a few seconds.")),
+  });
+}
+
+
+// One panel's own settings, under its other controls. A field left alone
+// uses the account's default, and says what that is.
+function displayCard(device) {
+  const title = panelTitle(device);
+  const body = loaded.settings
+    ? settingsForm(el, {
+      idPrefix: `display-${device.thingName}`,
+      layer: device.display?.overrides ?? {},
+      shownThrough: underlying(loaded.settings.defaults, loaded.settings.builtIn),
+      inheritWord: "Use my default",
+      zones: ZONES,
+      guessedZone: guessZone(),
+      busy: () => busy,
+      onError: (message) => setStatus(message, { error: true }),
+      onSave: (layer) => act("saveDisplay", () => api.setDisplay(device.thingName, layer),
+        "Saved. The panel picks this up within a few seconds."),
+    })
+    : el("p", {}, SETTINGS_UNAVAILABLE);
+  return el("section", { class: "card", "aria-label": `Display settings for ${title}` },
+    el("h2", {}, "Display settings"),
+    el("p", {}, "Set here, these apply to this panel only. Anything left on “Use my default” follows ", el("a", { href: hrefFor({ name: "settings" }) }, "your settings"), "."),
+    body);
 }
 
 function panelPage(device, games, gamesFailed) {

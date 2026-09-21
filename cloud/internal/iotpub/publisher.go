@@ -4,6 +4,7 @@ package iotpub
 
 import (
 	"context"
+	"errors"
 	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -27,11 +28,17 @@ type Message struct {
 type Fake struct {
 	mu       sync.Mutex
 	Messages []Message
+	// FailTopics makes a publish to any of these topics fail, for testing
+	// what happens to the rest of a fan-out.
+	FailTopics map[string]bool
 }
 
 func (f *Fake) Publish(_ context.Context, topic string, payload []byte, retain bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.FailTopics[topic] {
+		return errors.New("publish failed")
+	}
 	f.Messages = append(f.Messages, Message{Topic: topic, Payload: append([]byte(nil), payload...), Retain: retain})
 	return nil
 }

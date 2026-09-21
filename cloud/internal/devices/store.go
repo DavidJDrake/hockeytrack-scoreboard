@@ -8,6 +8,8 @@ import (
 	"errors"
 	"regexp"
 	"sync"
+
+	"hockeytrack-scoreboard/internal/settings"
 )
 
 var (
@@ -49,6 +51,9 @@ type Device struct {
 	// screen and re-arms a final's hold) and so a later publish that is not
 	// a choice can re-send the same stamp.
 	ChosenAt int64
+	// Display is what the owner set on this panel in particular; a field it
+	// leaves unset shows the account's default through.
+	Display settings.Settings
 }
 
 // Store persists Devices. Claim is the only operation that may bind an owner,
@@ -142,8 +147,8 @@ func (f *Fake) Update(_ context.Context, in Device) error {
 	if d.Owner != in.Owner {
 		return ErrNotOwner
 	}
-	// Only Name, GameID and ChosenAt are mutable; ThingName is immutable.
-	d.Name, d.GameID, d.ChosenAt = in.Name, in.GameID, in.ChosenAt
+	// Only Name, GameID, ChosenAt and Display are mutable; ThingName is immutable.
+	d.Name, d.GameID, d.ChosenAt, d.Display = in.Name, in.GameID, in.ChosenAt, in.Display
 	f.items[in.ThingName] = d
 	return nil
 }
@@ -158,7 +163,9 @@ func (f *Fake) Unbind(_ context.Context, thingName, owner string) error {
 	if d.Owner != owner {
 		return ErrNotOwner
 	}
-	d.Owner, d.Name, d.GameID, d.ChosenAt = "", "", 0, 0
+	// The next owner inherits nothing: not the name, the game, the stamp or
+	// the settings.
+	d.Owner, d.Name, d.GameID, d.ChosenAt, d.Display = "", "", 0, 0, settings.Settings{}
 	f.items[thingName] = d
 	return nil
 }

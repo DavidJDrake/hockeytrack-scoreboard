@@ -157,6 +157,15 @@ test("a home row uses the game state the API sent over today's schedule", () => 
   assert.match(textOf(homeRow(makeEl(fakeDoc()), live, games, false, NOON, opts)), /Live: TBL 2, NYR 1 · 2nd period/);
 });
 
+test("a home row runs the rule on the settings the panel actually has", () => {
+  // Seven and a half hours before puck drop: a countdown on the built-in
+  // twelve hours, and nothing at all on a panel set to two.
+  const short = { ...following, display: { resolved: { v: 1, countdownLeadMin: 120, finalHoldMin: 180 } } };
+  assert.match(textOf(homeRow(makeEl(fakeDoc()), short, games, false, NOON, opts)), /Off · the countdown to TBL at NYR starts at 5:30 PM/);
+  const asleep = { ...following, display: { resolved: { v: 1, countdownLeadMin: 720, finalHoldMin: 180, sleep: { start: "11:00", end: "13:00", zone: "America/New_York" } } } };
+  assert.match(textOf(homeRow(makeEl(fakeDoc()), asleep, games, false, NOON, opts)), /Off · sleep hours until 13:00/);
+});
+
 test("a home row for a panel following nothing says so", () => {
   assert.match(textOf(homeRow(makeEl(fakeDoc()), nothing, games, false, NOON, opts)), /Off · no game chosen/);
 });

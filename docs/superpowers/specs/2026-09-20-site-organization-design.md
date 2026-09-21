@@ -281,7 +281,7 @@ Each step ships alone and leaves the site working.
 |---|---|---|
 | 1 | Home, Panels and Panel, with today's abilities moved into them. Release keeps its current behavior under its new name. **Built: PR #34.** | site only |
 | 2 | "Should be showing": the shared vectors, the JavaScript port, game state in `GET /api/devices`. | site + API |
-| 3 | Defaults and overrides: accounts table, routes, the compose function, stored `chosenAt`; Settings page and the Panel page's settings. | site + API + Terraform. Panels act on it from image v0.1.6 (`parse_display`); older panels ignore it safely. |
+| 3 | **Built: PRs #37 (panel) and #39.** Defaults and overrides: accounts table, routes, the compose function, stored `chosenAt`; Settings page and the Panel page's settings. | site + API + Terraform. Panels act on it from image v0.1.6 (`parse_display`); older panels ignore it safely. |
 | 4 | Retire from the site: the retire Lambda, `releasedBy`, the Released list, the alarm. | site + new Lambda + Terraform |
 | 5 | The 365-day sweep. | each panel's last connection recorded first |
 | 7 | Templates, starting with "follow a team". Its own design first. | API + today Lambda + site. No panel change. |
