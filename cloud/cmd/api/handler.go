@@ -78,6 +78,10 @@ type gameView struct {
 	// heartbeat, in milliseconds. Heartbeats stop when a game ends, so for a
 	// final this is about when it ended.
 	LastSeenAt int64 `json:"lastSeenAt,omitempty"`
+	// FinalAt is when the game ended, from the reducer. The site times a
+	// final's hold from this; LastSeenAt is only the fallback for a game
+	// that went final before the reducer recorded it.
+	FinalAt int64 `json:"finalAt,omitempty"`
 }
 
 type teamView struct {
@@ -88,7 +92,7 @@ type teamView struct {
 func viewOf(s reduce.State) *gameView {
 	v := &gameView{State: s.GameState, Start: s.Start,
 		Away: teamView{s.Away.Abbrev, s.Away.Score}, Home: teamView{s.Home.Abbrev, s.Home.Score},
-		Intermission: s.Clock.Intermission, LastSeenAt: max(s.AsOf, s.SeenAt)}
+		Intermission: s.Clock.Intermission, LastSeenAt: max(s.AsOf, s.SeenAt), FinalAt: s.FinalAt}
 	v.Period.Label = s.Period.Label
 	return v
 }

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -574,5 +575,70 @@ func TestPlayAndIntermissionAreNeverTheSameReading(t *testing.T) {
 	s, _, _ = Reduce(s, runningClock(369, 2, false, at))
 	if s.AsOf != at.UnixMilli() {
 		t.Error("a stopped clock kept its anchor; only a counting clock should")
+	}
+}
+
+// A final comes down one hold after the game ENDED (the owner's ruling,
+// 2026-09-21), so something has to say when that was. Before this the panel
+// counted from when it first saw the final, and a panel given a game that had
+// ended two hours earlier, with a one-hour hold, showed it for an hour.
+func TestFinalAtIsWhenTheGameWasFirstSeenFinalAndNeverMoves(t *testing.T) {
+	live := time.Date(2026, 9, 21, 1, 30, 0, 0, time.UTC)
+	s, _, _ := Reduce(State{}, runningClock(12, 3, true, live))
+	if s.FinalAt != 0 {
+		t.Fatalf("a live game has finalAt %d", s.FinalAt)
+	}
+	end := time.Date(2026, 9, 21, 1, 34, 35, 0, time.UTC)
+	ev := load(t, "nhl.game.final", "final.json")
+	ev.Time = end
+	s, changed, _ := Reduce(s, ev)
+	if !changed || s.GameState != "FINAL" || s.FinalAt != end.UnixMilli() {
+		t.Fatalf("changed=%v state=%s finalAt=%d, want %d", changed, s.GameState, s.FinalAt, end.UnixMilli())
+	}
+	// The same final delivered again an hour later, and a late status event:
+	// at-least-once delivery must not move the end of the game.
+	ev.Time = end.Add(time.Hour)
+	s, _, _ = Reduce(s, ev)
+	st := load(t, "nhl.game.status", "status_final.json")
+	st.Time = end.Add(2 * time.Hour)
+	s, _, _ = Reduce(s, st)
+	if s.FinalAt != end.UnixMilli() {
+		t.Errorf("finalAt moved to %d", s.FinalAt)
+	}
+}
+
+func TestFinalAtReachesThePanelsDocument(t *testing.T) {
+	ev := load(t, "nhl.game.final", "final.json")
+	s, _, _ := Reduce(State{}, ev)
+	body, err := s.JSON()
+	if err != nil || !strings.Contains(string(body), `"finalAt":`) {
+		t.Errorf("document lacks finalAt: %s (%v)", body, err)
+	}
+	live, _, _ := Reduce(State{}, runningClock(600, 2, true, time.Date(2026, 9, 21, 1, 0, 0, 0, time.UTC)))
+	body, _ = live.JSON()
+	if strings.Contains(string(body), "finalAt") {
+		t.Errorf("a live game's document mentions finalAt: %s", body)
+	}
+}
+
+// Rows written before this field existed are already FINAL with no finalAt.
+// The next event about one must not stamp "now", hours after the game: the
+// last heartbeat is when it ended, to within seconds, because heartbeats stop
+// at the final.
+func TestAGameThatWasAlreadyFinalIsTimedFromItsLastHeartbeat(t *testing.T) {
+	ended := time.Date(2026, 9, 21, 1, 34, 35, 0, time.UTC).UnixMilli()
+	old := State{GameID: 2025020001, GameState: "FINAL", AsOf: ended - 9000, SeenAt: ended}
+	old.setTeams("CHI", "FLA")
+	ev := load(t, "nhl.game.final", "final.json")
+	ev.Time = time.Date(2026, 9, 21, 6, 0, 0, 0, time.UTC)
+	s, _, _ := Reduce(old, ev)
+	if s.FinalAt != ended {
+		t.Errorf("finalAt = %d, want the last heartbeat %d", s.FinalAt, ended)
+	}
+	// Older still: no seenAt either, only the clock's anchor.
+	older := State{GameID: 2025020001, GameState: "FINAL", AsOf: ended}
+	s, _, _ = Reduce(older, ev)
+	if s.FinalAt != ended {
+		t.Errorf("finalAt = %d, want asOf %d", s.FinalAt, ended)
 	}
 }
