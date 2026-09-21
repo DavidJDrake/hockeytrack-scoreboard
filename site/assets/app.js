@@ -12,7 +12,8 @@ import { reformat } from "./claimcode.js";
 import { guessZone, underlying, zoneList } from "./settings.js";
 import { settingsForm } from "./settingsform.js";
 import { SETUP_FILE_NAME, SetupFileError, countryNoteFor, regionFromLocale, setupFileFor } from "./setupfile.js";
-import { claimedRow, homeRow, makeEl, panelControls } from "./panel.js";
+import { claimedRow, homeRow, makeEl, panelControls, scheduleCard } from "./panel.js";
+import { cleanSeason, pickerView, stateFrom } from "./picker.js";
 import { hrefFor, isPageAddress, parseRoute, recallRoute, rememberRoute, titleFor } from "./routes.js";
 import { emailVerified, messageFor, panelTitle } from "./view.js";
 
@@ -34,6 +35,13 @@ let busy = false;
 // someone follows an anchor inside the page (the skip link, #main).
 let shownRoute = { name: "home" };
 let loaded = { devices: [], games: [], gamesFailed: false, settings: null, ready: false };
+// The season, fetched the first time somebody opens a picker and kept for
+// the life of the tab: 1,400 rows nobody needs on Home. `failed` is a fetch
+// that did not work, so the page can say so and offer to try again.
+let season = { games: null, loading: false, failed: false };
+// What is ticked on the picker that is open, which must survive a redraw.
+// One panel at a time; leaving for another panel starts from what is saved.
+let picking = null;
 // Read once: the browser's list does not change while the page is open.
 const ZONES = zoneList();
 
@@ -194,13 +202,13 @@ function render({ moved = false } = {}) {
   // page is remembered rather than re-read.
   if (isPageAddress(location.hash)) shownRoute = parseRoute(location.hash);
   const route = shownRoute;
-  const device = route.name === "panel" ? loaded.devices.find((d) => d.thingName === route.thing) : null;
+  const device = route.name === "panel" || route.name === "games" ? loaded.devices.find((d) => d.thingName === route.thing) : null;
 
-  for (const name of ["home", "panels", "panel", "settings", "unknown"]) $(`view-${name}`).hidden = name !== route.name;
+  for (const name of ["home", "panels", "panel", "games", "settings", "unknown"]) $(`view-${name}`).hidden = name !== route.name;
   // A panel's own page sits under Panels, so Panels stays marked there.
-  const current = { home: "nav-home", panels: "nav-panels", panel: "nav-panels", settings: "nav-settings" }[route.name];
+  const current = { home: "nav-home", panels: "nav-panels", panel: "nav-panels", games: "nav-panels", settings: "nav-settings" }[route.name];
   for (const id of ["nav-home", "nav-panels", "nav-settings"]) {
-    if (id === current) $(id).setAttribute("aria-current", route.name === "panel" ? "true" : "page");
+    if (id === current) $(id).setAttribute("aria-current", route.name === "panel" || route.name === "games" ? "true" : "page");
     else $(id).removeAttribute("aria-current");
   }
 
@@ -222,11 +230,15 @@ function render({ moved = false } = {}) {
     // API's answer, and the API gives the same 404 for "not yours" as for
     // "no such panel"; so does this.
     const detail = $("panel-detail");
-    if (device) detail.replaceChildren(panelPage(device, games, gamesFailed), displayCard(device));
+    if (device) detail.replaceChildren(panelPage(device, games, gamesFailed), scheduleCard(el, device), displayCard(device));
     else detail.replaceChildren(el("p", {}, ready ? "That panel is not on your account." : ""));
+  } else if (route.name === "games") {
+    $("games-back").href = hrefFor(device ? { name: "panel", thing: device.thingName } : { name: "panels" });
+    $("games-detail").replaceChildren(device ? gamesPage(device) : el("p", {}, ready ? "That panel is not on your account." : ""));
   } else if (route.name === "settings") {
     $("defaults-form").replaceChildren(defaultsForm());
   }
+  if (route.name !== "games") picking = null;
 
   // A page change made by the person, not by a refresh: put focus on the
   // heading so a keyboard or screen-reader user lands on the new page.
@@ -236,6 +248,50 @@ function render({ moved = false } = {}) {
     if (!busy) setStatus("");
     $("title").focus();
   }
+}
+
+async function loadSeason() {
+  if (season.loading) return;
+  season = { games: null, loading: true, failed: false };
+  try {
+    season = { games: cleanSeason(await api.getSchedule()), loading: false, failed: false };
+  } catch (err) {
+    season = { games: null, loading: false, failed: true };
+    if (!(err instanceof ApiError) || err.kind !== "unauthorized") reportFailure("season", err);
+  }
+  render();
+}
+
+// Choosing a panel's games. The picker is built in picker.js, where a test
+// can tick its boxes; what saving DOES is here.
+function gamesPage(device) {
+  if (season.games === null) {
+    if (season.failed) {
+      return el("p", {}, "The season could not be loaded. ",
+        el("button", { class: "link", type: "button", onclick: loadSeason }, "Try again"));
+    }
+    loadSeason();
+    return el("p", {}, "Loading the season…");
+  }
+  if (picking?.thing !== device.thingName) picking = { thing: device.thingName, state: stateFrom(device.schedule) };
+  return pickerView(el, {
+    season: season.games,
+    state: picking.state,
+    title: panelTitle(device),
+    on: {
+      busy: () => busy,
+      change: () => {
+        const focusKey = document.activeElement?.dataset?.focusKey ?? null;
+        render();
+        restoreFocus(focusKey);
+      },
+      save: (body) => act("saveSchedule", async () => {
+        await api.setSchedule(device.thingName, body);
+        // Start again from what the server stored, not from what was sent.
+        picking = null;
+      }, "Saved. Nothing changes on the panel yet."),
+    },
+  });
 }
 
 // Which panels the last save of the defaults could not reach.

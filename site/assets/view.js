@@ -91,6 +91,16 @@ const MESSAGES = {
     "not-found": "That panel is no longer on your account.",
     "bad-request": "Those settings were not accepted. Check the times and the time zone.",
   },
+  saveSchedule: {
+    "not-found": "That panel is no longer on your account.",
+    "bad-request": "Those games were not accepted. Reload the page and choose again: the season may have changed.",
+    conflict: "Some of those games overlap. Decide which to keep, then save again.",
+    unavailable: "The season could not be checked just now, so nothing was saved. Try again in a moment.",
+  },
+  season: {
+    unavailable: "The season could not be loaded, so games cannot be chosen right now.",
+    failed: "The season could not be loaded, so games cannot be chosen right now.",
+  },
   saveSettings: { "bad-request": "Those settings were not accepted. Check the times and the time zone." },
   settings: {
     unavailable: "Your settings could not be loaded, so they cannot be changed right now.",

@@ -128,3 +128,13 @@ test("no page links to an anchor the router would have to guess at", () => {
     }
   }
 });
+
+test("a panel's games page is a page, for a panel's name and nothing else", () => {
+  assert.deepEqual(parseRoute("#/panel/scoreboard-7qf2/games"), { name: "games", thing: "scoreboard-7qf2" });
+  assert.equal(hrefFor({ name: "games", thing: "scoreboard-7qf2" }), "#/panel/scoreboard-7qf2/games");
+  assert.equal(titleFor({ name: "games" }, "Den"), "Games for Den");
+  for (const bad of ["#/panel/scoreboard-7qf2/games/", "#/panel/../games", "#/panel/<script>/games", "#/panel/scoreboard-7qf2/game", "#/panel//games"]) {
+    assert.equal(parseRoute(bad).name, "unknown", bad);
+  }
+  assert.equal(hrefFor({ name: "games", thing: "javascript:alert(1)" }), "#/");
+});
