@@ -14,7 +14,7 @@
 import { hrefFor } from "./routes.js";
 import { displayFor } from "./settings.js";
 import { inputFor, showingLine } from "./showing.js";
-import { canResend, gameChoices, panelTitle } from "./view.js";
+import { canResend, gameChoices, gameLabel, panelTitle } from "./view.js";
 
 export function makeEl(doc) {
   return function el(tag, props = {}, ...children) {
@@ -151,4 +151,30 @@ export function panelControls(el, device, games, gamesFailed, on) {
     // panels were unbound and reflashed with their certificates still live.
     el("p", {}, "Releasing takes the panel off your account. It shows a claim code again and anyone you give it to can claim it. It does not revoke the panel's certificate: if the panel is gone, or you are about to reflash its card, it needs retiring instead, which this site cannot do yet."),
     el("div", { class: "row" }, release));
+}
+
+// What the owner has asked this panel to show, and the way to change it.
+// It says plainly that nothing acts on it yet: until the director exists the
+// panel follows the one game chosen above, and a page that implied otherwise
+// would have somebody waiting for a game that never comes on.
+export function scheduleCard(el, device, options = {}) {
+  const title = panelTitle(device);
+  const schedule = device.schedule && typeof device.schedule === "object" ? device.schedule : {};
+  const count = Array.isArray(schedule.games) ? schedule.games.length : 0;
+  const next = Array.isArray(schedule.next) ? schedule.next.filter((g) => g && typeof g === "object").slice(0, 3) : [];
+  const undecided = Array.isArray(schedule.undecided) ? schedule.undecided.length : 0;
+  const link = el("a", { class: "btn", href: hrefFor({ name: "games", thing: device.thingName }), "aria-label": `Choose games for ${title}` }, "Choose games");
+  link.dataset.focusKey = `${device.thingName}:games`;
+  const day = (g) => {
+    const when = new Date(g.start);
+    return Number.isNaN(when.getTime()) ? "" : new Intl.DateTimeFormat(options.locale, { weekday: "short", month: "short", day: "numeric", timeZone: options.timeZone }).format(when);
+  };
+  return el("section", { class: "card", "aria-label": `Games for ${title}` },
+    el("h2", {}, "Games for this panel"),
+    el("p", {}, count === 0 ? "No games chosen." : count === 1 ? "1 game chosen." : `${count} games chosen.`),
+    ...(undecided ? [el("p", {}, el("strong", {}, "Needs a decision: "), undecided === 1 ? "two or more chosen games now overlap." : `${undecided} sets of chosen games now overlap.`, " Open the games to decide which to keep.")] : []),
+    ...(next.length ? [el("p", {}, "Coming up:"), el("ol", {}, ...next.map((g) => el("li", {}, `${gameLabel(g, options)} · ${day(g)}`)))] : []),
+    ...(count && schedule.known === false ? [el("p", {}, "The season could not be read just now, so what is coming up is not shown.")] : []),
+    el("p", {}, el("strong", {}, "Not in use yet. "), "The panel still shows the one game chosen above. Chosen games start driving the panel in a later update."),
+    el("div", { class: "row" }, link));
 }

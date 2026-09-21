@@ -1,5 +1,5 @@
 // The site's pages. They are views of one document, addressed by the URL's
-// fragment: #/ , #/panels , #/panel/<thing> , #/settings.
+// fragment: #/ , #/panels , #/panel/<thing> , #/panel/<thing>/games , #/settings.
 //
 // Not separate documents, on purpose. The ID token lives in one variable for
 // the life of the tab (app.js) and nowhere else, so a second document would
@@ -38,6 +38,8 @@ export function parseRoute(hash) {
   if (path === "" || path === "/") return { name: "home" };
   if (path === "/panels" || path === "/panels/") return { name: "panels" };
   if (path === "/settings" || path === "/settings/") return { name: "settings" };
+  const games = path.match(/^\/panel\/([^/]+)\/games$/);
+  if (games && THING.test(games[1])) return { name: "games", thing: games[1] };
   const panel = path.match(/^\/panel\/([^/]+)$/);
   if (panel && THING.test(panel[1])) return { name: "panel", thing: panel[1] };
   return { name: "unknown" };
@@ -46,6 +48,7 @@ export function parseRoute(hash) {
 export function hrefFor(route) {
   if (route?.name === "panels") return "#/panels";
   if (route?.name === "settings") return "#/settings";
+  if (route?.name === "games" && typeof route.thing === "string" && THING.test(route.thing)) return `#/panel/${route.thing}/games`;
   if (route?.name === "panel" && typeof route.thing === "string" && THING.test(route.thing)) return `#/panel/${route.thing}`;
   return "#/";
 }
@@ -55,6 +58,7 @@ export function titleFor(route, panelName = "") {
   if (route?.name === "panels") return "Panels";
   if (route?.name === "settings") return "Settings";
   if (route?.name === "panel") return panelName || "Panel";
+  if (route?.name === "games") return panelName ? `Games for ${panelName}` : "Games";
   return "Not found";
 }
 

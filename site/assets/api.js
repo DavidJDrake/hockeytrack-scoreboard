@@ -17,6 +17,7 @@ function kindFor(status) {
   if (status === 401) return "unauthorized";
   if (status === 404) return "not-found";
   if (status === 400) return "bad-request";
+  if (status === 409) return "conflict";
   if (status === 502 || status === 503 || status === 504) return "unavailable";
   return "failed";
 }
@@ -66,5 +67,9 @@ export function createApi({ base, getToken, onUnauthorized, fetchImpl = globalTh
     getSettings: () => call("GET", "/api/settings"),
     saveSettings: (layer) => call("PUT", "/api/settings", layer),
     setDisplay: (thing, layer) => call("PUT", `${device(thing)}/display`, layer),
+    // The season is public; which games are ticked is not, and is sent only
+    // here. The server re-checks every id and every answer to an overlap.
+    getSchedule: () => call("GET", "/api/schedule"),
+    setSchedule: (thing, body) => call("PUT", `${device(thing)}/schedule`, body),
   };
 }
