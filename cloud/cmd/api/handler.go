@@ -16,6 +16,8 @@ import (
 	"hockeytrack-scoreboard/internal/iotpub"
 	"hockeytrack-scoreboard/internal/panelconfig"
 	"hockeytrack-scoreboard/internal/reduce"
+	"hockeytrack-scoreboard/internal/schedule"
+	"hockeytrack-scoreboard/internal/season"
 	"hockeytrack-scoreboard/internal/settings"
 )
 
@@ -33,6 +35,9 @@ type Handler struct {
 	// Accounts holds each account's default settings. Nil means nobody has
 	// any, and the route that would save them says so.
 	Accounts accounts.Store
+	// Season is the NHL schedule, checked and cached (internal/season). Nil
+	// means the picker has nothing to show and a schedule cannot be saved.
+	Season func(ctx context.Context) (season.Season, error)
 	// Now is the clock stamped onto a config message as chosenAt. Injected
 	// so a test can move it; nil means time.Now.
 	Now func() time.Time
@@ -60,6 +65,58 @@ type deviceView struct {
 	// came from. Absent when the account's defaults could not be read: the
 	// list then says less rather than something untrue.
 	Display *settings.View `json:"display,omitempty"`
+	// Schedule is what the owner asked this panel to show, and what the
+	// rules make of it today.
+	Schedule scheduleView `json:"schedule"`
+}
+
+// scheduleView is a panel's schedule as stored, plus what follows from it.
+// Kept, Next and Undecided need the season; when it could not be read they
+// are absent and Known is false, so the site can say so rather than show an
+// empty list as if it were an answer.
+type scheduleView struct {
+	Games       []int64               `json:"games"`
+	Templates   []string              `json:"templates"`
+	Resolutions []schedule.Resolution `json:"resolutions"`
+	Known       bool                  `json:"known"`
+	Next        []season.Game         `json:"next,omitempty"`
+	Undecided   [][]int64             `json:"undecided,omitempty"`
+}
+
+// nextShown is how many coming games a panel's row lists.
+const nextShown = 3
+
+func scheduleViewOf(p schedule.Panel, s *season.Season, now time.Time) scheduleView {
+	v := scheduleView{Games: p.Games, Templates: p.Templates, Resolutions: p.Resolutions}
+	if v.Games == nil {
+		v.Games = []int64{}
+	}
+	if v.Templates == nil {
+		v.Templates = []string{}
+	}
+	if v.Resolutions == nil {
+		v.Resolutions = []schedule.Resolution{}
+	}
+	if s == nil {
+		return v
+	}
+	v.Known = true
+	out := schedule.Resolve(p, p.Games, nil, s.Starts(p.Games))
+	v.Undecided = out.Undecided
+	for _, id := range out.Kept {
+		g, ok := s.Find(id)
+		if !ok {
+			continue
+		}
+		start, err := time.Parse(time.RFC3339, g.Start)
+		if err != nil || !start.Add(schedule.Occupies).After(now) {
+			continue
+		}
+		if v.Next = append(v.Next, g); len(v.Next) == nextShown {
+			break
+		}
+	}
+	return v
 }
 
 // gameView is the little of a reducer State the site's sentence is made of.
@@ -120,12 +177,41 @@ func (h *Handler) send(ctx context.Context, d devices.Device, account settings.S
 	return h.Pub.Publish(ctx, panelconfig.Topic(d.ThingName), payload, true)
 }
 
+// maxScheduleBody is the design's bound on a schedule request (section 8):
+// 1,500 ten-digit ids and their answers fit with room to spare.
+const maxScheduleBody = 64 << 10
+
 // maxSettingsBody is far more than any settings document needs. Decode is
 // strict about keys; this is strict about size before it parses anything.
 const maxSettingsBody = 4 << 10
 
-func (h *Handler) view(ctx context.Context, d devices.Device, account *settings.Settings) deviceView {
-	v := deviceView{ThingName: d.ThingName, Name: d.Name, GameID: d.GameID, ChosenAt: d.ChosenAt}
+// seasonOrNil reads the season for a view. A schedule source that is down
+// must not take the panels off the page; they are listed without what
+// follows from it.
+func (h *Handler) seasonOrNil(ctx context.Context) *season.Season {
+	if h.Season == nil {
+		return nil
+	}
+	s, err := h.Season(ctx)
+	if err != nil {
+		slog.Warn("season unavailable; listing panels without coming games", "err", err)
+		return nil
+	}
+	return &s
+}
+
+// seasonOrNilFor is seasonOrNil for one panel, skipping the read when the
+// panel has no schedule for it to explain.
+func (h *Handler) seasonOrNilFor(ctx context.Context, d devices.Device) *season.Season {
+	if d.Schedule.IsZero() {
+		return nil
+	}
+	return h.seasonOrNil(ctx)
+}
+
+func (h *Handler) view(ctx context.Context, d devices.Device, account *settings.Settings, sn *season.Season) deviceView {
+	v := deviceView{ThingName: d.ThingName, Name: d.Name, GameID: d.GameID, ChosenAt: d.ChosenAt,
+		Schedule: scheduleViewOf(d.Schedule, sn, h.now())}
 	if account != nil {
 		view := settings.ViewOf(*account, d.Display)
 		v.Display = &view
@@ -219,9 +305,16 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 		} else {
 			slog.Warn("defaults lookup failed; listing panels without resolved settings", "err", err)
 		}
+		var sn *season.Season
+		for _, d := range devs {
+			if !d.Schedule.IsZero() { // nobody has a schedule: no need to fetch one
+				sn = h.seasonOrNil(ctx)
+				break
+			}
+		}
 		out := make([]deviceView, 0, len(devs))
 		for _, d := range devs {
-			out = append(out, h.view(ctx, d, account))
+			out = append(out, h.view(ctx, d, account, sn))
 		}
 		return respond(200, out)
 
@@ -302,7 +395,7 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 			return fail(500, "save failed")
 		}
 		slog.Info("panel settings saved", "sub", sub, "thing", d.ThingName)
-		return respond(200, h.view(ctx, d, &account))
+		return respond(200, h.view(ctx, d, &account, h.seasonOrNilFor(ctx, d)))
 
 	case "PUT /api/devices/{thing}/game":
 		var body struct {
@@ -351,7 +444,82 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 		if err := h.Store.Update(ctx, d); err != nil {
 			return fail(500, "save failed")
 		}
-		return respond(200, h.view(ctx, d, &account))
+		return respond(200, h.view(ctx, d, &account, h.seasonOrNilFor(ctx, d)))
+
+	case "GET /api/schedule":
+		// The whole season, for the picker. Public data, served here only
+		// because the browser cannot fetch it from another origin without
+		// widening this site's policy; nothing about the caller goes into it.
+		if h.Season == nil {
+			return fail(500, "no schedule source")
+		}
+		sn, err := h.Season(ctx)
+		if err != nil {
+			slog.Warn("season unavailable", "err", err)
+			return fail(502, "schedule unavailable")
+		}
+		return respond(200, struct {
+			Games []season.Game `json:"games"`
+		}{sn.Games})
+
+	case "PUT /api/devices/{thing}/schedule":
+		// Size, then shape, then ownership, then the rules. Nothing is
+		// published: until the director exists a panel follows gameId, and
+		// this only records what the owner asked for.
+		if len(rawBody) > maxScheduleBody {
+			return fail(400, "invalid schedule")
+		}
+		asked, err := schedule.Decode(rawBody)
+		if err != nil {
+			return fail(400, "invalid schedule")
+		}
+		d, ok, err := h.owned(ctx, thing, sub)
+		if err != nil {
+			return fail(500, "lookup failed")
+		}
+		if !ok {
+			return fail(404, "no such device")
+		}
+		if len(asked.Templates) > 0 {
+			// A template is looked up under the caller, and the caller has
+			// none: there is nowhere to make one yet. Not-yours and
+			// not-there are the same answer on purpose.
+			return fail(404, "no such template")
+		}
+		if h.Season == nil {
+			return fail(500, "no schedule source")
+		}
+		sn, err := h.Season(ctx)
+		if err != nil {
+			// Without the season a game id cannot be vouched for, and an
+			// overlap cannot be seen. Nothing is stored on a guess.
+			slog.Warn("season unavailable; schedule not saved", "err", err)
+			return fail(502, "schedule unavailable")
+		}
+		saved, err := schedule.Save(asked, d.Schedule, sn.Starts(asked.Games))
+		switch {
+		case errors.Is(err, schedule.ErrUnknownGame):
+			return fail(400, "unknown game")
+		case errors.Is(err, schedule.ErrBadResolution):
+			return fail(400, "invalid resolution")
+		case err != nil:
+			return fail(400, "invalid schedule")
+		}
+		if len(saved.Unresolved) > 0 {
+			// The owner is right here, so nothing is decided for them
+			// (decision 8). The conflicts go back; nothing is stored.
+			return respond(409, struct {
+				Error      string    `json:"error"`
+				Unresolved [][]int64 `json:"unresolved"`
+			}{"unresolved conflicts", saved.Unresolved})
+		}
+		d.Schedule = saved.Panel
+		if err := h.Store.Update(ctx, d); err != nil {
+			return fail(500, "save failed")
+		}
+		slog.Info("panel schedule saved", "sub", sub, "thing", d.ThingName,
+			"games", len(d.Schedule.Games), "resolutions", len(d.Schedule.Resolutions))
+		return respond(200, scheduleViewOf(d.Schedule, &sn, h.now()))
 
 	case "PATCH /api/devices/{thing}":
 		var body struct {
@@ -371,7 +539,7 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 		if err := h.Store.Update(ctx, d); err != nil {
 			return fail(500, "save failed")
 		}
-		return respond(200, h.view(ctx, d, nil))
+		return respond(200, h.view(ctx, d, nil, h.seasonOrNilFor(ctx, d)))
 
 	case "DELETE /api/devices/{thing}":
 		_, ok, err := h.owned(ctx, thing, sub)

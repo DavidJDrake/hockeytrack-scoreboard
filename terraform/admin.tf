@@ -429,6 +429,8 @@ locals {
     "GET /api/devices",
     "PUT /api/devices/{thing}/game",
     "PUT /api/devices/{thing}/display",
+    "PUT /api/devices/{thing}/schedule",
+    "GET /api/schedule",
     "GET /api/settings",
     "PUT /api/settings",
     "PATCH /api/devices/{thing}",

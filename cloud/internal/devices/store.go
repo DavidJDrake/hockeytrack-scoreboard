@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"sync"
 
+	"hockeytrack-scoreboard/internal/schedule"
 	"hockeytrack-scoreboard/internal/settings"
 )
 
@@ -54,6 +55,10 @@ type Device struct {
 	// Display is what the owner set on this panel in particular; a field it
 	// leaves unset shows the account's default through.
 	Display settings.Settings
+	// Schedule is the games the owner has asked this panel to show, and the
+	// conflicts among them the owner has answered. Nothing acts on it until
+	// the director exists; GameID is still what the panel follows.
+	Schedule schedule.Panel
 }
 
 // Store persists Devices. Claim is the only operation that may bind an owner,
@@ -147,8 +152,8 @@ func (f *Fake) Update(_ context.Context, in Device) error {
 	if d.Owner != in.Owner {
 		return ErrNotOwner
 	}
-	// Only Name, GameID, ChosenAt and Display are mutable; ThingName is immutable.
-	d.Name, d.GameID, d.ChosenAt, d.Display = in.Name, in.GameID, in.ChosenAt, in.Display
+	// Only these are mutable; ThingName and Owner are not.
+	d.Name, d.GameID, d.ChosenAt, d.Display, d.Schedule = in.Name, in.GameID, in.ChosenAt, in.Display, in.Schedule
 	f.items[in.ThingName] = d
 	return nil
 }
@@ -163,9 +168,9 @@ func (f *Fake) Unbind(_ context.Context, thingName, owner string) error {
 	if d.Owner != owner {
 		return ErrNotOwner
 	}
-	// The next owner inherits nothing: not the name, the game, the stamp or
-	// the settings.
-	d.Owner, d.Name, d.GameID, d.ChosenAt, d.Display = "", "", 0, 0, settings.Settings{}
+	// The next owner inherits nothing: not the name, the game, the stamp,
+	// the settings, or which games the last owner liked to watch.
+	d.Owner, d.Name, d.GameID, d.ChosenAt, d.Display, d.Schedule = "", "", 0, 0, settings.Settings{}, schedule.Panel{}
 	f.items[thingName] = d
 	return nil
 }
