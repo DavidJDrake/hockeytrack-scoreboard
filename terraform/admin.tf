@@ -27,6 +27,35 @@ resource "aws_dynamodb_table" "devices" {
     hash_key        = "owner"
     projection_type = "ALL"
   }
+
+  # SCO-23. This table is the record of who owns which panel, and now of each
+  # panel's settings too. Neither can be rebuilt from anything else: a bad
+  # write, or a destroy somebody did not mean, used to be unrecoverable.
+  # Recovery covers the first; deletion protection makes the second a
+  # two-step act (turn this off, apply, then destroy).
+  point_in_time_recovery {
+    enabled = true
+  }
+  deletion_protection_enabled = true
+}
+
+# What belongs to an account rather than to a panel: today, the owner's
+# default display settings. Keyed by the Cognito subject and nothing else, so
+# there is no way to ask for another account's row -- no index, no id to guess.
+resource "aws_dynamodb_table" "accounts" {
+  name         = "scoreboard-accounts"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "owner"
+
+  attribute {
+    name = "owner"
+    type = "S"
+  }
+
+  point_in_time_recovery {
+    enabled = true
+  }
+  deletion_protection_enabled = true
 }
 
 resource "aws_cognito_user_pool" "admin" {
@@ -241,6 +270,13 @@ data "aws_iam_policy_document" "api" {
     actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
     resources = [aws_dynamodb_table.devices.arn]
   }
+  # An account's default settings: read one row, write one row, always the
+  # caller's own (accounts.go keys every call by the token's subject). No
+  # Scan, no Query, no DeleteItem.
+  statement {
+    actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
+    resources = [aws_dynamodb_table.accounts.arn]
+  }
   # Read one game, and nothing else, from the table the reducer keeps: the
   # panel list says what each panel should be showing, which needs the game's
   # state. GetItem only -- this role cannot write a score, scan the table or
@@ -281,12 +317,13 @@ resource "aws_lambda_function" "api" {
   memory_size      = 128
   environment {
     variables = {
-      DEVICES_TABLE = aws_dynamodb_table.devices.name
-      GAMES_TABLE   = aws_dynamodb_table.games.name
-      IOT_ENDPOINT  = "https://${data.aws_iot_endpoint.data.endpoint_address}"
-      SCHEDULE_URL  = var.schedule_url
-      USER_POOL_ID  = aws_cognito_user_pool.admin.id
-      APP_CLIENT_ID = aws_cognito_user_pool_client.site.id
+      DEVICES_TABLE  = aws_dynamodb_table.devices.name
+      ACCOUNTS_TABLE = aws_dynamodb_table.accounts.name
+      GAMES_TABLE    = aws_dynamodb_table.games.name
+      IOT_ENDPOINT   = "https://${data.aws_iot_endpoint.data.endpoint_address}"
+      SCHEDULE_URL   = var.schedule_url
+      USER_POOL_ID   = aws_cognito_user_pool.admin.id
+      APP_CLIENT_ID  = aws_cognito_user_pool_client.site.id
     }
   }
   depends_on = [aws_cloudwatch_log_group.api]
@@ -391,6 +428,9 @@ locals {
   admin_routes = [
     "GET /api/devices",
     "PUT /api/devices/{thing}/game",
+    "PUT /api/devices/{thing}/display",
+    "GET /api/settings",
+    "PUT /api/settings",
     "PATCH /api/devices/{thing}",
     "DELETE /api/devices/{thing}",
     "GET /api/games",

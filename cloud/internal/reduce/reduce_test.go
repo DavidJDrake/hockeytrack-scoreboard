@@ -393,3 +393,186 @@ func TestARepeatIsNotTrustedForEver(t *testing.T) {
 		t.Errorf("after %v of one value, asOf = %d, want re-anchored to %d", at.Sub(t0), s.AsOf, at.UnixMilli())
 	}
 }
+
+// folded reports whether a play is in the state, which is not what `changed`
+// says: the handler saves the state after every event, and `changed` only
+// decides whether a new document is worth publishing. A faceoff folds and
+// changes nothing anybody can see.
+func folded(s State, eventID int64) bool {
+	for _, id := range s.SeenEvents {
+		if id == eventID {
+			return true
+		}
+	}
+	return false
+}
+
+func playEvent(eventID, seq int64, playType string, score map[string]int, at time.Time) Event {
+	body, _ := json.Marshal(map[string]any{
+		"gameId": 2025020001, "eventId": eventID, "seq": seq, "playType": playType,
+		"homeTeam": "FLA", "awayTeam": "CHI", "scoringTeam": "", "period": 2, "timeInPeriod": "01:00",
+		"score": score, "raw": map[string]any{"details": map[string]any{}},
+	})
+	if eventID == 0 { // a publisher from before eventId existed
+		var m map[string]any
+		_ = json.Unmarshal(body, &m)
+		delete(m, "eventId")
+		body, _ = json.Marshal(m)
+	}
+	return Event{DetailType: "nhl.game.play", Detail: json.RawMessage(body), Time: at}
+}
+
+// Found 2026-09-20 from a panel missing a penalty. The NHL gives the plays
+// that open a period provisional sort orders in the 9000s and renumbers them
+// a minute later. This reducer kept the highest seq it had folded and dropped
+// anything at or below it, so one such play meant every later play of the
+// game was dropped as a duplicate. HockeyTrack's poller had the same fault
+// and is fixed the same way: identity is the eventId, which does not change.
+func TestOneHighSeqDoesNotSilenceTheRestOfTheGame(t *testing.T) {
+	at := time.Date(2026, 9, 20, 1, 0, 3, 0, time.UTC)
+	s, _, _ := Reduce(State{}, playEvent(19, 276, "period-end", map[string]int{"CHI": 0, "FLA": 1}, at))
+	s, _, _ = Reduce(s, playEvent(385, 9004, "faceoff", map[string]int{"CHI": 0, "FLA": 1}, at))
+	if !folded(s, 385) {
+		t.Fatal("the provisional play was not folded at all")
+	}
+	if s.LastSeq >= provisionalSeq {
+		t.Errorf("lastSeq = %d: a provisional number was recorded", s.LastSeq)
+	}
+	s, _, _ = Reduce(s, playEvent(24, 285, "stoppage", map[string]int{"CHI": 0, "FLA": 2}, at))
+	if !folded(s, 24) || s.Home.Score != 2 {
+		t.Fatalf("a play after a 9004 was dropped: folded=%v score=%d", folded(s, 24), s.Home.Score)
+	}
+	// And the kind that matters: a penalty after it reaches the panel.
+	_, changed, _ := Reduce(s, playEvent(25, 290, "penalty", map[string]int{"CHI": 0, "FLA": 2}, at))
+	if !changed {
+		t.Error("a penalty after a 9004 was not published")
+	}
+}
+
+func TestAPlayDeliveredTwiceIsFoldedOnce(t *testing.T) {
+	at := time.Date(2026, 9, 20, 1, 0, 3, 0, time.UTC)
+	s, _, _ := Reduce(State{}, playEvent(24, 285, "stoppage", map[string]int{"CHI": 0, "FLA": 1}, at))
+	s, _, _ = Reduce(s, playEvent(40, 300, "penalty", map[string]int{"CHI": 0, "FLA": 1}, at))
+	pens := len(s.Penalties)
+	again, changed, _ := Reduce(s, playEvent(40, 300, "penalty", map[string]int{"CHI": 0, "FLA": 1}, at))
+	if changed || len(again.Penalties) != pens {
+		t.Errorf("the same penalty was folded twice: %d then %d", pens, len(again.Penalties))
+	}
+	// The same play after the NHL renumbered it is still the same play.
+	again, changed, _ = Reduce(s, playEvent(40, 307, "penalty", map[string]int{"CHI": 0, "FLA": 1}, at))
+	if changed || len(again.Penalties) != pens || len(again.SeenEvents) != len(s.SeenEvents) {
+		t.Error("a renumbered play was folded again")
+	}
+}
+
+// Now that a play arriving late is folded rather than dropped, it must not
+// drag the score back to what it was when the play happened.
+func TestALatePlayDoesNotLowerTheScore(t *testing.T) {
+	at := time.Date(2026, 9, 20, 1, 0, 3, 0, time.UTC)
+	s, _, _ := Reduce(State{}, playEvent(30, 300, "stoppage", map[string]int{"CHI": 1, "FLA": 3}, at))
+	s, _, _ = Reduce(s, playEvent(29, 275, "faceoff", map[string]int{"CHI": 0, "FLA": 2}, at))
+	if !folded(s, 29) {
+		t.Error("a play inserted late, below the highest seq seen, was dropped")
+	}
+	if s.Away.Score != 1 || s.Home.Score != 3 {
+		t.Errorf("score = %d-%d, want it left at 1-3", s.Away.Score, s.Home.Score)
+	}
+}
+
+func TestAPublisherWithoutEventIdsIsHandledAsBefore(t *testing.T) {
+	at := time.Date(2026, 9, 20, 1, 0, 3, 0, time.UTC)
+	s, _, _ := Reduce(State{}, playEvent(0, 285, "stoppage", map[string]int{"CHI": 0, "FLA": 1}, at))
+	if got, _, _ := Reduce(s, playEvent(0, 285, "stoppage", map[string]int{"CHI": 0, "FLA": 5}, at)); got.Home.Score != 1 {
+		t.Error("without eventIds, a repeated seq should still be dropped")
+	}
+	if got, _, _ := Reduce(s, playEvent(0, 286, "faceoff", map[string]int{"CHI": 0, "FLA": 2}, at)); got.Home.Score != 2 || got.LastSeq != 286 {
+		t.Error("without eventIds, a higher seq should still be folded")
+	}
+}
+
+func TestAGameAlreadyPoisonedRecoversOnItsNextPlay(t *testing.T) {
+	// The stored state of four live games on 2026-09-20: lastSeq in the
+	// 9000s, no list of events.
+	s := State{GameID: 2025020001, LastSeq: 9006}
+	s.setTeams("CHI", "FLA")
+	s, changed, _ := Reduce(s, playEvent(999, 640, "penalty", map[string]int{"CHI": 0, "FLA": 1}, time.Date(2026, 9, 20, 23, 0, 0, 0, time.UTC)))
+	if !changed {
+		t.Fatal("still stuck behind the old mark")
+	}
+	if s.LastSeq >= 9000 {
+		t.Errorf("lastSeq = %d; a provisional number should not survive", s.LastSeq)
+	}
+}
+
+func TestTheListOfSeenEventsIsBounded(t *testing.T) {
+	at := time.Date(2026, 9, 20, 1, 0, 3, 0, time.UTC)
+	s := State{}
+	for i := int64(1); i <= maxSeenEvents+50; i++ {
+		s, _, _ = Reduce(s, playEvent(i, i, "shot-on-goal", map[string]int{"CHI": 0, "FLA": 0}, at))
+	}
+	if len(s.SeenEvents) > maxSeenEvents {
+		t.Errorf("kept %d event ids, want at most %d", len(s.SeenEvents), maxSeenEvents)
+	}
+	// The most recent are the ones kept: duplicates arrive soon, not hours later.
+	if !folded(s, maxSeenEvents+50) || folded(s, 1) {
+		t.Error("the list should keep the most recent events and let the oldest go")
+	}
+}
+
+func intermissionClock(seconds, period int, at time.Time) Event {
+	body := fmt.Sprintf(`{"gameId":2025020001,"gameState":"LIVE","period":%d,"periodType":"REG",`+
+		`"secondsRemaining":%d,"running":false,"inIntermission":true,"situationCode":"1551",`+
+		`"homeTeam":"FLA","awayTeam":"CHI","score":{"CHI":0,"FLA":2},"shots":{"CHI":3,"FLA":4},`+
+		`"observedAt":%q}`, period, seconds, at.Format(time.RFC3339))
+	return Event{DetailType: "nhl.game.clock", Detail: json.RawMessage(body), Time: at}
+}
+
+// Measured on 2026-09-19 (VAN at SEA, second intermission): the feed's
+// intermission countdown read 108 for twenty seconds, then 71, then 58 -- it
+// is cached like everything else in that feed. An intermission clock always
+// runs, so a panel can count it down between samples, but only if a repeated
+// sample keeps the anchor of the reading it repeats. Otherwise it is the
+// five-seconds-and-jump-back fault over again.
+func TestARepeatedIntermissionSampleKeepsItsAnchor(t *testing.T) {
+	t0 := time.Date(2026, 9, 20, 2, 56, 40, 0, time.UTC)
+	s, _, _ := Reduce(State{}, intermissionClock(108, 2, t0))
+	for i := 1; i <= 3; i++ {
+		at := t0.Add(time.Duration(i) * 5 * time.Second)
+		var changed bool
+		s, changed, _ = Reduce(s, intermissionClock(108, 2, at))
+		if s.AsOf != t0.UnixMilli() {
+			t.Fatalf("repeat %d: asOf moved to %d", i, s.AsOf)
+		}
+		if !changed || s.SeenAt != at.UnixMilli() {
+			t.Fatalf("repeat %d: the document must still say it was just confirmed", i)
+		}
+	}
+	t1 := t0.Add(21 * time.Second)
+	s, _, _ = Reduce(s, intermissionClock(71, 2, t1))
+	if s.AsOf != t1.UnixMilli() {
+		t.Errorf("a new reading: asOf = %d, want %d", s.AsOf, t1.UnixMilli())
+	}
+}
+
+func TestPlayAndIntermissionAreNeverTheSameReading(t *testing.T) {
+	// The period ends at 0:00 and the intermission clock can start from a
+	// number play also passed through. Same seconds, different clocks.
+	t0 := time.Date(2026, 9, 20, 2, 40, 0, 0, time.UTC)
+	at := t0.Add(5 * time.Second)
+	s, _, _ := Reduce(State{}, runningClock(1080, 2, true, t0))
+	s, _, _ = Reduce(s, intermissionClock(1080, 2, at))
+	if s.AsOf != at.UnixMilli() {
+		t.Error("play into intermission kept play's anchor")
+	}
+	s, _, _ = Reduce(State{}, intermissionClock(1200, 2, t0))
+	s, _, _ = Reduce(s, runningClock(1200, 3, true, at))
+	if s.AsOf != at.UnixMilli() {
+		t.Error("intermission into play kept the intermission's anchor")
+	}
+	// A stoppage in play is still not a running clock.
+	s, _, _ = Reduce(State{}, runningClock(369, 2, false, t0))
+	s, _, _ = Reduce(s, runningClock(369, 2, false, at))
+	if s.AsOf != at.UnixMilli() {
+		t.Error("a stopped clock kept its anchor; only a counting clock should")
+	}
+}

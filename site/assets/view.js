@@ -87,6 +87,15 @@ const MESSAGES = {
     "bad-request": "A panel needs a name.",
   },
   release: { "not-found": "That panel is no longer on your account." },
+  saveDisplay: {
+    "not-found": "That panel is no longer on your account.",
+    "bad-request": "Those settings were not accepted. Check the times and the time zone.",
+  },
+  saveSettings: { "bad-request": "Those settings were not accepted. Check the times and the time zone." },
+  settings: {
+    unavailable: "Your settings could not be loaded, so they cannot be changed right now.",
+    failed: "Your settings could not be loaded, so they cannot be changed right now.",
+  },
   list: {},
   games: {
     unavailable: "Today's games could not be loaded, so a game cannot be chosen right now.",

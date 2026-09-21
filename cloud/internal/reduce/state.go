@@ -69,7 +69,12 @@ type State struct {
 	LastGoal  *Goal     `json:"lastGoal,omitempty" dynamodbav:"lastGoal,omitempty"`
 	Start     string    `json:"start,omitempty" dynamodbav:"start,omitempty"`
 
-	LastSeq    int64         `json:"-" dynamodbav:"lastSeq"`
+	// LastSeq is the highest real sort order folded. It decides nothing when
+	// plays carry an eventId; see applyPlay.
+	LastSeq int64 `json:"-" dynamodbav:"lastSeq"`
+	// SeenEvents is the plays already folded, by the NHL's eventId, newest
+	// last, bounded. It is what makes a play delivered twice fold once.
+	SeenEvents []int64       `json:"-" dynamodbav:"seenEvents,omitempty"`
 	Roster     map[int64]int `json:"-" dynamodbav:"roster"`
 	OTLen      int           `json:"-" dynamodbav:"otLen"`
 	ObservedAt int64         `json:"-" dynamodbav:"observedAt"`

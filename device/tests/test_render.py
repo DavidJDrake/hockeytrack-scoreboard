@@ -225,7 +225,7 @@ def test_penalty_row_shrinks_as_time_passes():
     s = GameState.from_json((FIX / "state_live.json").read_bytes())
     def bar_width(t):
         draw(surf, s, t, assets)
-        row = [x for x in range(0, W) if surf.get_at((x, 426))[:3] == (0x00, 0x38, 0xA8)]  # the bar sits at y 422-430
+        row = [x for x in range(0, W) if surf.get_at((x, 422))[:3] == (0x00, 0x38, 0xA8)]  # the bar sits at y 418-425
         return len(row)
     assert bar_width(s.as_of_ms) > bar_width(s.as_of_ms + 40_000) > 0
 
@@ -510,3 +510,37 @@ def test_a_final_that_has_stopped_updating_is_not_stale():
                                 .replace('"state":"LIVE"', '"state":"FINAL"'))
     _, drawn = drawn_with(link_ok=False, stale_s=3 * 3600, state=final)
     assert not banners(drawn), drawn
+
+
+def _bar_rows(surf, colour):
+    """The rows of the frame on which a penalty's progress bar is drawn."""
+    return [y for y in range(372, H) if any(surf.get_at((x, y))[:3] == colour for x in range(60, W - 60, 2))]
+
+
+def test_the_second_penalty_row_is_all_on_the_frame():
+    # Measured on 2026-09-19 and again before this fix: with two penalties a
+    # side the second row's bar was drawn at y 474..482 on a 480 px surface,
+    # so its last two rows were clipped by the surface itself. Both bars must
+    # be whole: eight rows each, the second one ending on the frame.
+    # Drawn at the document's own moment: five minutes on, the two minors
+    # have been served and there is only one row a side to look at.
+    state = busy_state()
+    surf, _ = drawn_with(state=state, at=state.as_of_ms)
+    for colour in ((0x00, 0x28, 0x68), (0x00, 0x38, 0xA8)):
+        rows = _bar_rows(surf, colour)
+        assert len(rows) == 16, f"two bars of eight rows, got rows {rows}"
+        first, second = rows[:8], rows[8:]
+        assert first == list(range(first[0], first[0] + 8)) and second == list(range(second[0], second[0] + 8))
+        assert second[-1] <= H - 2, f"the second bar ends at y={second[-1]} on a {H} px frame"
+
+
+def test_the_penalty_rows_do_not_touch_the_rule_line_or_each_other():
+    state = busy_state()
+    surf, _ = drawn_with(state=state, at=state.as_of_ms)
+    bg = surf.get_at((5, 5))[:3]
+    lit = [y for y in range(374, H) if any(surf.get_at((x, y))[:3] != bg for x in range(60, W - 60, 2))]
+    assert lit[0] >= 374 + 8, f"the first row starts at y={lit[0]}, hard against the rule at 372"
+    # Between the first row's bar and the second row's text there is clear space.
+    bar = _bar_rows(surf, (0x00, 0x28, 0x68))
+    gap = [y for y in range(bar[7] + 1, bar[8]) if y not in lit]
+    assert len(gap) >= 6, f"only {len(gap)} clear rows between the two penalty rows"

@@ -42,6 +42,9 @@ test("each call uses the documented method, path and body", async () => {
     [(api) => api.setGame("t1", 2025020001), "PUT", "/api/devices/t1/game", { gameId: 2025020001 }],
     [(api) => api.rename("t1", " Den "), "PATCH", "/api/devices/t1", { name: "Den" }],
     [(api) => api.unbind("t1"), "DELETE", "/api/devices/t1", undefined],
+    [(api) => api.getSettings(), "GET", "/api/settings", undefined],
+    [(api) => api.saveSettings({ finalHoldMin: 30 }), "PUT", "/api/settings", { finalHoldMin: 30 }],
+    [(api) => api.setDisplay("t1", { sleep: { enabled: false } }), "PUT", "/api/devices/t1/display", { sleep: { enabled: false } }],
   ];
   for (const [call, method, path, body] of cases) {
     const { api, calls } = harness({ status: 200, body: {} });

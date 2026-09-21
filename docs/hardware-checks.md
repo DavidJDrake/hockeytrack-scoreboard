@@ -1908,7 +1908,7 @@ change would make both impossible to judge). Worth deciding later whether
 the frame should be authored at the panel's real aspect, or the shift scaled
 up so it is ±4 *physical* pixels.
 
-**Finding, not fixed: the second penalty row is drawn 2 px off the bottom.**
+**Fixed in v0.1.6 (the rows start at y=382, the second bar now ends at y=477; `test_the_second_penalty_row_is_all_on_the_frame`). As found:** **the second penalty row is drawn 2 px off the bottom.**
 With two penalties a side, the second row's progress bar is drawn at
 y = 474..482 on a 480 px surface, so its last two rows of pixels are clipped
 by the surface itself. It predates all of this and is not being touched here
@@ -1980,7 +1980,7 @@ judges freshness.
 **Result: PASS.** Applied during the third period of the same game. The owner
 reports the clock ticking smoothly with corrections of a second or two.
 
-**Not fixed.** An intermission countdown moves in 20-second steps, because a
+**Fixed in v0.1.6, with a reducer change that must be deployed first.** The panel now counts an intermission clock down between samples and leaves penalties alone (`GameState.clock_at`), and the reducer keeps a repeated *intermission* sample's anchor exactly as it does a running one's, so the count does not jump back. Not yet seen on hardware. As found: an intermission countdown moves in 20-second steps, because a
 panel only counts between samples while the clock is running, and marking an
 intermission as running would make it tick penalties down during the break.
 That needs a panel change: count the intermission clock, leave penalties

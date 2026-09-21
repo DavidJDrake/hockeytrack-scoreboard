@@ -1,6 +1,8 @@
 package devices
 
 import (
+	"hockeytrack-scoreboard/internal/settings"
+
 	"context"
 	"errors"
 	"testing"
@@ -170,5 +172,42 @@ func TestWhenAGameWasChosenRoundTripsAndOldRowsReadAsNever(t *testing.T) {
 	old, err := unmarshalDevice(item)
 	if err != nil || old.ChosenAt != 0 {
 		t.Fatalf("a row with no chosenAt: %+v, %v", old, err)
+	}
+}
+
+func TestAPanelsOwnSettingsRoundTripAndOldRowsHaveNone(t *testing.T) {
+	lead := 120
+	in := Device{ThingName: "scoreboard-7qf2", Owner: "sub-a", Display: settings.Settings{CountdownLeadMin: &lead}}
+	item, err := marshalDevice(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, err := unmarshalDevice(item)
+	if err != nil || back.Display.CountdownLeadMin == nil || *back.Display.CountdownLeadMin != 120 {
+		t.Fatalf("round trip: %+v, %v", back.Display, err)
+	}
+	delete(item, "display")
+	old, err := unmarshalDevice(item)
+	if err != nil || old.Display != (settings.Settings{}) {
+		t.Fatalf("a row with no display: %+v, %v", old.Display, err)
+	}
+	// A damaged attribute must not take the panel off its owner's list.
+	item["display"] = &types.AttributeValueMemberS{Value: "{not json"}
+	if got, err := unmarshalDevice(item); err != nil || got.Display != (settings.Settings{}) {
+		t.Fatalf("a damaged display: %+v, %v", got.Display, err)
+	}
+}
+
+func TestReleasingAPanelClearsItsSettings(t *testing.T) {
+	f := NewFake()
+	ctx := context.Background()
+	_ = f.Register(ctx, "scoreboard-7qf2")
+	_ = f.Claim(ctx, "scoreboard-7qf2", "sub-a")
+	hold := 30
+	_ = f.Update(ctx, Device{ThingName: "scoreboard-7qf2", Owner: "sub-a", Display: settings.Settings{FinalHoldMin: &hold}})
+	_ = f.Unbind(ctx, "scoreboard-7qf2", "sub-a")
+	d, _, _ := f.Get(ctx, "scoreboard-7qf2")
+	if d.Display != (settings.Settings{}) {
+		t.Errorf("the next owner inherits %+v", d.Display)
 	}
 }

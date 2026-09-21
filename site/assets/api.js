@@ -61,5 +61,10 @@ export function createApi({ base, getToken, onUnauthorized, fetchImpl = globalTh
     setGame: (thing, gameId) => call("PUT", `${device(thing)}/game`, { gameId }),
     rename: (thing, name) => call("PATCH", device(thing), { name: String(name).trim() }),
     unbind: (thing) => call("DELETE", device(thing)),
+    // Settings are sent as the layer the form produced and nothing else; the
+    // server decodes strictly and refuses any key it does not know.
+    getSettings: () => call("GET", "/api/settings"),
+    saveSettings: (layer) => call("PUT", "/api/settings", layer),
+    setDisplay: (thing, layer) => call("PUT", `${device(thing)}/display`, layer),
   };
 }

@@ -16,6 +16,7 @@ test("the three pages, and the empty fragment is home", () => {
   assert.deepEqual(parseRoute("#/"), { name: "home" });
   assert.deepEqual(parseRoute("#/panels"), { name: "panels" });
   assert.deepEqual(parseRoute("#/panels/"), { name: "panels" });
+  assert.deepEqual(parseRoute("#/settings"), { name: "settings" });
   assert.deepEqual(parseRoute("#/panel/scoreboard-cwhqb2ews4qd"), { name: "panel", thing: "scoreboard-cwhqb2ews4qd" });
   assert.deepEqual(parseRoute("#/panel/scoreboard-01"), { name: "panel", thing: "scoreboard-01" }, "an older hand-made name");
 });
@@ -24,7 +25,7 @@ test("anything else is not a page, and says so rather than guessing", () => {
   for (const bad of [
     "#/nope", "#/panel", "#/panel/", "#/panel/prod-db", "#/panel/scoreboard-", "#/panel/scoreboard-ABC",
     "#/panel/scoreboard-abc/extra", "#/panel/scoreboard-abc?x=1", "#/panel/../panels", "#/panel/scoreboard-" + "a".repeat(33),
-    "#/panel/scoreboard-abc%0a", "#//evil.example", "#/panels/extra", "#main",
+    "#/panel/scoreboard-abc%0a", "#//evil.example", "#/panels/extra", "#/settings/extra", "#main",
   ]) {
     assert.deepEqual(parseRoute(bad), { name: "unknown" }, bad);
   }
@@ -33,7 +34,7 @@ test("anything else is not a page, and says so rather than guessing", () => {
 });
 
 test("a link is built from a route, and reads back as the same route", () => {
-  for (const route of [{ name: "home" }, { name: "panels" }, { name: "panel", thing: "scoreboard-cwhqb2ews4qd" }]) {
+  for (const route of [{ name: "home" }, { name: "panels" }, { name: "settings" }, { name: "panel", thing: "scoreboard-cwhqb2ews4qd" }]) {
     assert.deepEqual(parseRoute(hrefFor(route)), route);
   }
   assert.equal(hrefFor({ name: "home" }), "#/");
@@ -50,6 +51,7 @@ test("a link is never built from a name that is not a panel's", () => {
 test("each page has a title", () => {
   assert.equal(titleFor({ name: "home" }), "Scoreboards");
   assert.equal(titleFor({ name: "panels" }), "Panels");
+  assert.equal(titleFor({ name: "settings" }), "Settings");
   assert.equal(titleFor({ name: "panel", thing: "scoreboard-abc" }, "Living room"), "Living room");
   assert.equal(titleFor({ name: "panel", thing: "scoreboard-abc" }), "Panel");
   assert.equal(titleFor({ name: "unknown" }), "Not found");

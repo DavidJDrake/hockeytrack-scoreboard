@@ -142,8 +142,12 @@ func TestTheConfigPayloadStillLeadsWithGameId(t *testing.T) {
 	if _, ok := flat["gameId"].(float64); !ok {
 		t.Errorf("gameId is not a top-level number in %s", pub.Messages[0].Payload)
 	}
-	if len(flat) != 2 {
-		t.Errorf("payload has %d keys, want gameId and chosenAt: %s", len(flat), pub.Messages[0].Payload)
+	// Exactly these three. "display" arrived with settings from the site
+	// (2026-09-20); v0.1.3 to v0.1.5 ignore it, which device/tests checks
+	// against the documents in testdata/config-documents.json. Anything
+	// else appearing here is a change somebody should have to defend.
+	if _, ok := flat["display"].(map[string]any); !ok || len(flat) != 3 || flat["chosenAt"] == nil {
+		t.Errorf("payload keys want gameId, chosenAt, display: %s", pub.Messages[0].Payload)
 	}
 }
 

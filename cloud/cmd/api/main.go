@@ -20,6 +20,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/iotdataplane"
 
+	"hockeytrack-scoreboard/internal/accounts"
 	"hockeytrack-scoreboard/internal/devices"
 	"hockeytrack-scoreboard/internal/gamestore"
 	"hockeytrack-scoreboard/internal/idtoken"
@@ -84,6 +85,11 @@ func main() {
 	// Optional, so a deployment without it still lists panels. This role may
 	// only GetItem on the games table: it reads what the reducer wrote and
 	// can change none of it.
+	// Optional in the same way: without it nobody has account defaults and
+	// the route that would save them says so.
+	if accountsTable := os.Getenv("ACCOUNTS_TABLE"); accountsTable != "" {
+		h.Accounts = accounts.NewDynamo(db, accountsTable)
+	}
 	if gamesTable := os.Getenv("GAMES_TABLE"); gamesTable != "" {
 		h.Game = gamestore.NewDynamo(db, gamesTable).Get
 	}
