@@ -219,6 +219,55 @@ panel reads `0` as a game to select. `testdata/config-documents.json` is
 composed byte for byte by the Go suite and read by the panel's own parsers in
 the device suite.
 
+### Game schedules
+
+What an owner has asked a panel to show. **Nothing here reaches a panel yet:**
+until the director exists (SCO-42) a panel follows the one `gameId` set with
+`PUT /api/devices/{thing}/game`, and these routes only record and check the
+owner's wishes. Saving a schedule publishes nothing, and a test holds that.
+
+#### `GET /api/schedule`
+
+The whole NHL season, for the picker: `{"games":[{"gameId","start","away","home","venue","type"}]}`.
+It is public data. It is served here because the browser cannot read it from
+HockeyTrack's origin without a CORS header there and a wider `connect-src`
+here; the API already fetches the file server-side. The address is this
+function's configuration and no request can influence it.
+
+Every row is rebuilt from checked fields (`internal/season`): an id above
+zero, a start that parses (re-written in UTC), two different abbreviations of
+two to four capitals, a known game type, a venue cut to one printable line.
+A row that fails is left out and counted in the log; a file with more than
+3,000 rows is refused whole. The result is cached for ten minutes, and a bad
+fetch does not replace a good season for six hours. `502` when there is no
+season to give.
+
+#### `PUT /api/devices/{thing}/schedule`
+
+Body: `{"games":[ids],"templates":[],"resolutions":[{"sequence":[ids],"keep":[ids]}]}`.
+
+Checked in this order: size (64 KB), shape (strict keys; at most 1,500
+distinct positive ids), ownership (`404` if the panel is not the caller's),
+then the rules.
+
+| Status | When |
+|---|---|
+| `200` | Stored. The body is the schedule with `next` (the coming kept games) and `undecided`. |
+| `400` | Malformed; a game id that is not in the season and was not already on the panel; or a resolution that keeps nothing, keeps a game from outside its conflict, or keeps two games that overlap. |
+| `404` | Not the caller's panel, or a template id (the caller has none yet; not-yours and not-there are one answer). |
+| `409` | **A conflict among these games was left unanswered.** Body: `{"error","unresolved":[[ids]]}`. Nothing is stored. The owner is present, so nothing is decided for them; the default rule exists only for conflicts nobody caused. |
+| `502` | The season could not be read. Nothing is stored on a guess. |
+
+A game already on the panel that has since left the season is over, and is
+dropped without complaint. A resolution for a conflict that no longer exists
+is dropped. Resolutions are stored against their exact sequence and are never
+stretched to fit a different one. Releasing a panel clears its schedule with
+everything else: the next owner does not learn what the last one watched.
+
+`GET /api/devices` carries each panel's `schedule`: `games`, `templates`,
+`resolutions`, and, when the season could be read (`known: true`), `next` and
+`undecided`. With the season down the panels are still listed.
+
 ### `PATCH /api/devices/{thing}`
 
 Renames a device. Purely cosmetic — the display name shown by the site, not

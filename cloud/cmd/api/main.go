@@ -25,6 +25,7 @@ import (
 	"hockeytrack-scoreboard/internal/gamestore"
 	"hockeytrack-scoreboard/internal/idtoken"
 	"hockeytrack-scoreboard/internal/iotpub"
+	"hockeytrack-scoreboard/internal/season"
 	"hockeytrack-scoreboard/internal/today"
 )
 
@@ -57,6 +58,27 @@ func games(ctx context.Context, scheduleURL string) ([]byte, error) {
 	return json.Marshal(doc)
 }
 
+// fetchSchedule reads HockeyTrack's schedule file. The address comes from
+// this function's configuration and from nowhere else: no request reaches it.
+func fetchSchedule(ctx context.Context, scheduleURL string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, scheduleURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "hockeytrack-scoreboard/1.0 (+https://github.com/DavidJDrake/hockeytrack-scoreboard)")
+	// Six seconds, inside this function's ten: a slow source must produce an
+	// answer the site can show, not a timeout it cannot explain.
+	resp, err := (&http.Client{Timeout: 6 * time.Second}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("schedule: status %d", resp.StatusCode)
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+}
+
 func main() {
 	ctx := context.Background()
 	cfg, err := config.LoadDefaultConfig(ctx)
@@ -82,6 +104,14 @@ func main() {
 		Games:  func(ctx context.Context) ([]byte, error) { return games(ctx, scheduleURL) },
 		Tokens: idtoken.New(cfg.Region, pool, client),
 	}
+	seasons := &season.Cache{
+		Fetch:    func(ctx context.Context) ([]byte, error) { return fetchSchedule(ctx, scheduleURL) },
+		Now:      time.Now,
+		FreshFor: 10 * time.Minute,
+		StaleFor: 6 * time.Hour,
+		Dropped:  func(n int) { slog.Warn("schedule rows failed a check and were left out", "rows", n) },
+	}
+	h.Season = seasons.Get
 	// Optional, so a deployment without it still lists panels. This role may
 	// only GetItem on the games table: it reads what the reducer wrote and
 	// can change none of it.

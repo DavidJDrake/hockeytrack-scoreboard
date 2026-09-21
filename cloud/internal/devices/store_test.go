@@ -1,10 +1,13 @@
 package devices
 
 import (
+	"hockeytrack-scoreboard/internal/schedule"
 	"hockeytrack-scoreboard/internal/settings"
 
 	"context"
 	"errors"
+	"fmt"
+	"reflect"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
@@ -116,7 +119,8 @@ func TestItemRoundTripsThroughDynamoAttributes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out != in {
+	in.Schedule = schedule.Load("") // nothing asked for reads back as empty lists
+	if !reflect.DeepEqual(out, in) {
 		t.Errorf("round trip = %+v, want %+v", out, in)
 	}
 }
@@ -209,5 +213,40 @@ func TestReleasingAPanelClearsItsSettings(t *testing.T) {
 	d, _, _ := f.Get(ctx, "scoreboard-7qf2")
 	if d.Display != (settings.Settings{}) {
 		t.Errorf("the next owner inherits %+v", d.Display)
+	}
+}
+
+func TestAScheduleSurvivesTheRoundTripAndDamageReadsAsNothing(t *testing.T) {
+	want := schedule.Panel{Games: []int64{2026020001, 2026020002}, Templates: []string{},
+		Resolutions: []schedule.Resolution{{Sequence: []int64{2026020001, 2026020002}, Keep: []int64{2026020002}}}}
+	item, err := marshalDevice(Device{ThingName: "scoreboard-7qf2", Owner: "sub-a", Schedule: want})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := unmarshalDevice(item)
+	if err != nil || fmt.Sprint(got.Schedule) != fmt.Sprint(want) {
+		t.Fatalf("%+v %v", got.Schedule, err)
+	}
+	delete(item, "schedule") // a row from before schedules existed
+	if got, err := unmarshalDevice(item); err != nil || !got.Schedule.IsZero() || got.Schedule.Games == nil {
+		t.Fatalf("no attribute: %+v %v", got.Schedule, err)
+	}
+	item["schedule"] = &types.AttributeValueMemberS{Value: `{"games":[-1]}`}
+	if got, err := unmarshalDevice(item); err != nil || !got.Schedule.IsZero() {
+		t.Fatalf("damaged: %+v %v", got.Schedule, err)
+	}
+}
+
+func TestReleasingAPanelClearsItsSchedule(t *testing.T) {
+	// Which games somebody chose to watch is theirs. The next owner of the
+	// panel does not get to read it.
+	f := NewFake()
+	ctx := context.Background()
+	_ = f.Register(ctx, "scoreboard-7qf2")
+	_ = f.Claim(ctx, "scoreboard-7qf2", "sub-a")
+	_ = f.Update(ctx, Device{ThingName: "scoreboard-7qf2", Owner: "sub-a", Schedule: schedule.Panel{Games: []int64{2026020001}}})
+	_ = f.Unbind(ctx, "scoreboard-7qf2", "sub-a")
+	if d, _, _ := f.Get(ctx, "scoreboard-7qf2"); !d.Schedule.IsZero() {
+		t.Errorf("the next owner inherits %+v", d.Schedule)
 	}
 }
