@@ -57,12 +57,3 @@ h2.section { font-family: var(--display); font-weight: 700; font-size: 24px; mar
 #panel-detail .card { margin: 0; }
 .settings .notice { border-left: 3px solid var(--rule); padding-left: 12px; }
 
-/* Choosing games. */
-.picker { display: grid; gap: 16px; }
-.picker fieldset { border: 2px solid var(--rule); background: var(--ice); padding: 12px 16px; margin: 0; display: grid; gap: 8px; min-width: 0; }
-.picker legend { font-family: var(--display); font-weight: 700; font-size: 20px; padding: 0 6px; }
-.picker .pick-conflict.open { border-color: var(--red); }
-.picker .pick-summary { font-weight: 600; margin: 0; }
-.picker .hint { color: var(--muted); font-size: 14px; max-width: 70ch; margin: 0; }
-.picker input[type="checkbox"] { width: 20px; height: 20px; }
-.picker select[multiple] { min-width: 8ch; }

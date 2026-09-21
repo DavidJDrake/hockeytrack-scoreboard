@@ -11,7 +11,7 @@ import (
 )
 
 func file(rows ...string) []byte {
-	return []byte(`{"generatedAt":"x","teams":{},"games":[` + strings.Join(rows, ",") + `]}`)
+	return []byte(`{"generatedAt":"x","teams":{"MTL":"Montréal Canadiens","TOR":"Toronto Maple Leafs"},"games":[` + strings.Join(rows, ",") + `]}`)
 }
 
 const good = `{"id":2026020001,"date":"2026-10-07","start":"2026-10-07T23:00:00Z","away":"MTL","home":"TOR","type":2,"venue":"Scotiabank Arena"}`
@@ -21,7 +21,7 @@ func TestAGoodRowIsRebuiltFieldByField(t *testing.T) {
 	if err != nil || dropped != 0 || len(s.Games) != 1 {
 		t.Fatalf("%v %d %+v", err, dropped, s.Games)
 	}
-	want := Game{GameID: 2026020001, Start: "2026-10-07T23:00:00Z", Away: "MTL", Home: "TOR", Venue: "Scotiabank Arena", Type: 2}
+	want := Game{GameID: 2026020001, Date: "2026-10-07", Start: "2026-10-07T23:00:00Z", Away: "MTL", Home: "TOR", Venue: "Scotiabank Arena", Type: 2}
 	if s.Games[0] != want {
 		t.Errorf("got %+v", s.Games[0])
 	}
@@ -29,7 +29,7 @@ func TestAGoodRowIsRebuiltFieldByField(t *testing.T) {
 		t.Errorf("Find: %+v %v", g, ok)
 	}
 	out, _ := json.Marshal(s.Games[0])
-	if strings.Contains(string(out), "date") {
+	if strings.Contains(string(out), "generatedAt") {
 		t.Errorf("a field nobody checked was passed through: %s", out)
 	}
 }
@@ -52,6 +52,7 @@ func TestARowThatFailsACheckIsDroppedAndCounted(t *testing.T) {
 		`{"id":0}`, `{"id":-4}`, `{"start":"soon"}`, `{"start":"2026-10-07T23:00:00"}`, `{"start":""}`,
 		`{"away":"mtl"}`, `{"away":"<b>"}`, `{"home":"TORONTO"}`, `{"home":"T"}`, `{"home":"MTL"}`,
 		`{"away":"M\u0000L"}`, `{"type":0}`, `{"type":9}`,
+		`{"date":""}`, `{"date":"2026-13-01"}`, `{"date":"2026-02-30"}`, `{"date":"10/07/2026"}`, `{"date":"2026-10-07T00:00:00Z"}`, `{"date":"<b>2026-1"}`,
 	} {
 		s, dropped, err := Parse(file(row(change), good))
 		if err != nil {
@@ -181,5 +182,28 @@ func TestDroppedRowsAreReported(t *testing.T) {
 	_, _ = c.Get(context.Background())
 	if n != 1 {
 		t.Errorf("reported %d", n)
+	}
+}
+
+func TestClubNamesAreCheckedLikeEverythingElse(t *testing.T) {
+	body := []byte(`{"teams":{"MTL":"Montréal Canadiens","TOR":"  Toronto\n Maple\tLeafs ","bos":"Boston Bruins","NYR":"","SEA":"` +
+		strings.Repeat("Kraken ", 20) + `","<b>":"x"},"games":[` + good + `]}`)
+	s, dropped, err := Parse(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Teams["MTL"] != "Montréal Canadiens" || s.Teams["TOR"] != "Toronto Maple Leafs" {
+		t.Errorf("%v", s.Teams)
+	}
+	if _, ok := s.Teams["bos"]; ok || len(s.Teams) != 3 || dropped != 3 {
+		t.Errorf("kept %v, dropped %d", s.Teams, dropped)
+	}
+	if n := len([]rune(s.Teams["SEA"])); n > 40 {
+		t.Errorf("a name of %d characters", n)
+	}
+	// A game whose clubs have no names still lists.
+	s, _, _ = Parse([]byte(`{"games":[` + good + `]}`))
+	if len(s.Games) != 1 || s.Teams == nil {
+		t.Errorf("%+v", s)
 	}
 }

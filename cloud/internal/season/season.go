@@ -25,15 +25,25 @@ import (
 // this is not a schedule, and is refused whole.
 const MaxGames = 3000
 
-const maxVenueRunes = 60
+const (
+	maxVenueRunes = 60
+	maxNameRunes  = 40
+	// maxTeams is several leagues' worth. More than this is not a list of
+	// clubs.
+	maxTeams = 128
+)
 
 // Game is one row. The JSON names are the API's.
 type Game struct {
-	GameID int64  `json:"gameId"`
-	Start  string `json:"start"` // RFC 3339, UTC, always readable
-	Away   string `json:"away"`
-	Home   string `json:"home"`
-	Venue  string `json:"venue,omitempty"`
+	GameID int64 `json:"gameId"`
+	// Date is the NHL's game date, YYYY-MM-DD: what a schedule groups by. It
+	// is not derived from Start -- a 10 PM Pacific game is the next day in
+	// UTC and the same day to the league.
+	Date  string `json:"date"`
+	Start string `json:"start"` // RFC 3339, UTC, always readable
+	Away  string `json:"away"`
+	Home  string `json:"home"`
+	Venue string `json:"venue,omitempty"`
 	// Type is the NHL's game type: 1 preseason, 2 regular season, 3 playoffs.
 	Type int `json:"type"`
 }
@@ -41,6 +51,9 @@ type Game struct {
 // Season is every game that passed, by start then id.
 type Season struct {
 	Games []Game
+	// Teams maps an abbreviation to the club's name, for the clubs that
+	// passed. A game may name a club that is not here; it still lists.
+	Teams map[string]string
 	byID  map[int64]int
 }
 
@@ -71,8 +84,10 @@ var ErrTooLarge = errors.New("season: more games than a schedule holds")
 // dropped and counted; the second value is how many were.
 func Parse(body []byte) (Season, int, error) {
 	var in struct {
+		Teams map[string]string `json:"teams"`
 		Games []struct {
 			ID    int64  `json:"id"`
+			Date  string `json:"date"`
 			Start string `json:"start"`
 			Away  string `json:"away"`
 			Home  string `json:"home"`
@@ -86,18 +101,28 @@ func Parse(body []byte) (Season, int, error) {
 	if len(in.Games) > MaxGames {
 		return Season{}, 0, ErrTooLarge
 	}
-	s := Season{Games: make([]Game, 0, len(in.Games)), byID: map[int64]int{}}
+	if len(in.Teams) > maxTeams {
+		return Season{}, 0, ErrTooLarge
+	}
+	s := Season{Games: make([]Game, 0, len(in.Games)), Teams: map[string]string{}, byID: map[int64]int{}}
 	dropped := 0
+	for ab, name := range in.Teams {
+		if name = cleanLine(name, maxNameRunes); abbrev(ab) && name != "" {
+			s.Teams[ab] = name
+		} else {
+			dropped++
+		}
+	}
 	seen := map[int64]bool{}
 	for _, g := range in.Games {
 		start, err := time.Parse(time.RFC3339, g.Start)
 		if err != nil || g.ID <= 0 || seen[g.ID] || !abbrev(g.Away) || !abbrev(g.Home) || g.Away == g.Home ||
-			g.Type < 1 || g.Type > 4 {
+			g.Type < 1 || g.Type > 4 || !gameDate(g.Date) {
 			dropped++
 			continue
 		}
 		seen[g.ID] = true
-		s.Games = append(s.Games, Game{GameID: g.ID, Start: start.UTC().Format(time.RFC3339),
+		s.Games = append(s.Games, Game{GameID: g.ID, Date: g.Date, Start: start.UTC().Format(time.RFC3339),
 			Away: g.Away, Home: g.Home, Venue: cleanVenue(g.Venue), Type: g.Type})
 	}
 	sort.Slice(s.Games, func(i, j int) bool {
@@ -125,8 +150,19 @@ func abbrev(s string) bool {
 	return true
 }
 
+// gameDate: exactly YYYY-MM-DD, and a day that exists.
+func gameDate(s string) bool {
+	if len(s) != 10 {
+		return false
+	}
+	t, err := time.Parse("2006-01-02", s)
+	return err == nil && t.Format("2006-01-02") == s
+}
+
 // cleanVenue makes a building's name one short printable line.
-func cleanVenue(v string) string {
+func cleanVenue(v string) string { return cleanLine(v, maxVenueRunes) }
+
+func cleanLine(v string, maxRunes int) string {
 	v = strings.Map(func(r rune) rune {
 		if unicode.IsControl(r) || r == unicode.ReplacementChar {
 			return ' '
@@ -134,8 +170,8 @@ func cleanVenue(v string) string {
 		return r
 	}, v)
 	v = strings.Join(strings.Fields(v), " ")
-	if r := []rune(v); len(r) > maxVenueRunes {
-		v = strings.TrimSpace(string(r[:maxVenueRunes]))
+	if r := []rune(v); len(r) > maxRunes {
+		v = strings.TrimSpace(string(r[:maxRunes]))
 	}
 	return v
 }
