@@ -15,7 +15,7 @@ Spec: `docs/superpowers/specs/2026-09-12-device-image-design.md`
 | H6 | CMA on the Zero 2 W | A bar panel renders without CMA exhaustion | **SHELVED, 2026-09-19** — the owner cannot find their Zero 2 W and the board is not affordably available. The project targets the Pi 4B only for now. Not a failure and not pending: nothing is waiting on it, and no claim anywhere should depend on it |
 | H7 | Keyboard under kmsdrm | A USB keyboard drives the settings screen | not yet run |
 | H8 | A panel enrolls itself | Pairing, claim and restart all work end to end against real AWS | **PASS on the core path, 2026-09-19 (v0.1.3, Pi 4)** — steps 0, 1, 2, 5 and 7. Steps 3, 4, 6 and 8 are not yet run |
-| H9 | The hardened image answers nothing | It still boots, joins Wi-Fi and enrolls on a Pi 4B; the serial console appeared and the serial getty did not; and from another machine on the same LAN every mDNS query goes unanswered and no TCP port is open, each check backed by a positive control | **PASS on parts 1–3, 2026-09-19 (v0.1.4, Pi 4B)** — still boots, joins Wi-Fi and enrolls; from the LAN it answers ping and refuses everything else: 0 of 65,535 TCP ports open, all four mDNS queries **refused**, `scoreboard.local` unresolvable. **Not yet shown:** Bluetooth off and the serial console's state (both are read from the card's journal), and first-paint time against v0.1.3 |
+| H9 | The hardened image answers nothing | It still boots, joins Wi-Fi and enrolls on a Pi 4B; the serial console appeared and the serial getty did not; and from another machine on the same LAN every mDNS query goes unanswered and no TCP port is open, each check backed by a positive control | **PASS on parts 1–3, 2026-09-19 (v0.1.4, Pi 4B)** — still boots, joins Wi-Fi and enrolls; from the LAN it answers ping and refuses everything else: 0 of 65,535 TCP ports open, all four mDNS queries **refused**, `scoreboard.local` unresolvable. **Shown 2026-09-20 from the card's journal (v0.1.5):** Bluetooth off, the serial console up with no getty on it, first paint at 20.6 s; the SysRq mask is `0x01b6`, not the `0x1f6` the spec predicted |
 
 H4, H5 and H6 need an image, so they belong to B2. H1, H2, H3 and H7 can be run
 as soon as this plan is installed on a Pi. **H6 is shelved as of 2026-09-19**
@@ -1472,6 +1472,58 @@ longer tells the network its hostname or its hardware address.
 - **First-paint time** against v0.1.3, which is the one cost the serial console
   could have. It was not timed on this boot.
 - **The shipped kernel's SysRq mask**, from `/boot/config-<version>` on the card.
+
+### Read off the card: 2026-09-20 (v0.1.5, Pi 4B, two boots, about 28 hours)
+
+The card was taken out after the panel had passed the overnight display check.
+Its first 8 GB were copied read-only and the journal extracted with
+`debugfs rdump`; the boot partition was read through Windows. Nothing was
+written to the card. v0.1.5 carries v0.1.4's hardening unchanged, so this is
+the evidence the list above was waiting for.
+
+| Item | Found | Verdict |
+|---|---|---|
+| **Bluetooth** | No `Bluetooth:`, `hci0`, `btbcm` or `hci_uart` line in either boot's kernel log. `bluetooth.service` is a symlink to `/dev/null` on the card. `dtoverlay=disable-bt` is in `config.txt` under `[all]`. The only match for "bluetooth" anywhere is NetworkManager loading its BlueZ **plugin**, a library with no adapter to talk to. | **PASS** |
+| **Serial console** | `ttyAMA0` registered and `printk: console [ttyAMA0] enabled`, in both boots; `cmdline.txt` has `console=serial0,115200 console=tty1`. So kernel messages do go out on GPIO 14/15, as spec 9.13 said they would. **No getty was started on it, or on anything**: `serial-getty@.service` is a symlink to `/dev/null`, and no `Started ...getty@` line exists in the journal at all. A console that prints and cannot be logged in to. | **PASS**, as designed |
+| **First paint** | Display opened **20.6 s** after the kernel started on an ordinary boot; **25.0 s** on the first boot, of which 7.4 s was joining Wi-Fi. v0.1.3 was not timed, so there is no before-and-after, but against a promise of "up to two minutes" the serial console's cost is not visible. | **PASS**; the comparison is moot |
+| **SysRq** | The compiled-in default is `0x1f6`, as predicted. **It is not the live value.** systemd's `/usr/lib/sysctl.d/50-default.conf` is on the card and sets `kernel.sysrq = 0x01b6`; nothing later overrides it (`/etc/sysctl.d/98-rpi.conf` does not mention it). | **Spec corrected**, see below |
+| **Unit masks** | `bluetooth.service`, `serial-getty@.service` and `userconfig.service` are each a symlink to `/dev/null`. | PASS |
+| **Listeners** | No `sshd`, `avahi-daemon`, `rpi-connect` or VNC line in 28 hours. | PASS |
+| **The Wi-Fi password** | `scoreboard-setup.txt` on the boot partition has an empty `psk=` line: the panel removed it after reading it, as the file says it will. | PASS |
+| **Health** | No tracebacks, no kernel errors, no under-voltage or throttling, one service restart (the one enrollment asks for). Journal 6.3 MB against a 50 MB cap. One MQTT keep-alive timeout, reconnected in 3 min 9 s. | — |
+
+**The SysRq correction.** Spec 9.13 said nothing in the image sets
+`kernel.sysrq`, listed the sysctl files Debian's systemd ships, and concluded
+that the compiled-in `0x1f6` applies. The list was incomplete: systemd also
+ships `50-default.conf`, and it sets `0x01b6`. The difference is `0x40`,
+"signal processes", so over the serial console **`e`, `f` and `i` (SIGTERM,
+the OOM killer, SIGKILL to everything but init) are not available**; `b`
+(reboot), `s` (sync), `u` (remount read-only) and console log level still are.
+The error was in the safe direction, and it was still an error: the spec
+reasoned from a package listing instead of from a card. This table is from a
+card.
+
+**Two things the journal showed that nobody was looking for.**
+
+- **Both boots ended without a shutdown.** No `Reached target Shutdown`, and
+  the second boot began with `EXT4-fs: orphan cleanup`. The second ending is
+  the owner pulling the plug, which is the only way to turn this panel off.
+  The first, at about 14:10 on 2026-09-20, is unexplained: a power blip, a
+  moved cable, or the 1-minute hardware watchdog firing on a hang. Up to five
+  minutes of journal before an unclean stop is lost (journald's sync
+  interval), so the journal cannot say which. Worth a follow-up: ask the
+  firmware for the reset reason at boot and log it.
+- **Pulling the plug is the normal way off, and the filesystem is mounted
+  read-write.** It came back clean both times, which is ext4's journal doing
+  its job, not a design. A panel that is meant to be unplugged should either
+  run with a read-only root or be shown to survive many cuts; neither has
+  been done.
+
+**And one thing it confirmed.** At 17,551 s into the second boot the panel
+logged `admin site re-chose game 2026010011; holding it again`. That is the
+moment the owner saved display settings on the site. v0.1.5 read the saved
+document as a button press, exactly as predicted, which is the behavior
+v0.1.6 removes.
 
 **A note on how the next release was approved, because it belongs in the
 record.** `v0.1.5` was built the same evening while the owner had only a
