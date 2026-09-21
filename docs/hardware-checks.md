@@ -1908,6 +1908,20 @@ change would make both impossible to judge). Worth deciding later whether
 the frame should be authored at the panel's real aspect, or the shift scaled
 up so it is ±4 *physical* pixels.
 
+**Decided 2026-09-21, and half built: the frame follows the panel's shape.**
+The frame is 1920 wide and as tall as the display's shape allows, from 480
+(4:1) to 600 (this panel) and no further (`display.frame_size`). The layout
+is still 1920x480 and is drawn on a window of the frame (`display.Canvas`),
+centred until the information strip the owner chose (docs/mockups, C) takes
+the rows under it. `device/tests/test_canvas.py` proves by comparing bytes
+that a 4:1 panel shows what it always showed and that this panel shows the
+same 480 rows in the same place. **What changes on the glass, to be checked
+on the next image:** the 40 px bands were true black (outside the frame) and
+are now the layout's background, (10, 10, 12), so the seam between them and
+the picture should be gone; the frame is no longer scaled, so the ±4 px
+shift is ±4 drawn pixels of 1920, still ±2.7 physical; and the log line at
+start-up should read `frame turned 90° and drawn at 400x1280`.
+
 **Fixed in v0.1.6 (the rows start at y=382, the second bar now ends at y=477; `test_the_second_penalty_row_is_all_on_the_frame`). As found:** **the second penalty row is drawn 2 px off the bottom.**
 With two penalties a side, the second row's progress bar is drawn at
 y = 474..482 on a 480 px surface, so its last two rows of pixels are clipped
