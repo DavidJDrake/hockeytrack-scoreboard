@@ -36,6 +36,7 @@ what a panel shows a **schedule**.
 | 5 | A chosen set misses games scheduled later | The **saved-filter template is wanted** (SCO-35 joins this epic). |
 | 6 | Keep the single-game picker and "Show on panel"? | **No.** What a panel shows comes from its schedule only. |
 | 7 | Two kept games in one day | The first game's final holds for the usual time **or until the second game's puck drop**, whichever is first. |
+| 8 | Who resolves a conflict? | **The user, always.** Any time games conflict the site asks them to resolve it. Only in the rare case where a conflict arises with no user action and is never resolved does a rule decide, and the rule is: **the panel's own games win over a template's.** (2026-09-21) |
 
 Three consequences follow from these, and are designed for below rather than
 discovered later:
@@ -44,9 +45,13 @@ discovered later:
   starts, and the two were never flagged. The panel stays on the live game
   until it ends and joins the next one late. Cutting off a live game for a
   countdown would be the worse failure.
-- **From 4, with 3.** "Flagged immediately" still leaves the question of what
-  the panel shows until the owner looks. The priority order answers it, so a
-  panel is **never undecided**; the flag stays up until the owner resolves it.
+- **From 4, 3 and 8.** A conflict is the user's to resolve, and the site asks
+  every time one exists. A conflict made by the user's own action is resolved
+  then and there: the save is not finished until it is (section 5). What is
+  left is the conflict nobody caused by doing anything, which appears while
+  nobody is looking. It is flagged at once, and until the user answers the
+  panel is still **never undecided**: the panel's own games win over a
+  template's, and between templates the user's priority order decides.
 - **From 6.** "Show this one game tonight" becomes "add it to this panel's
   games". And "Show on panel" was the only way to bring a final back after its
   hold ran out; nothing replaces that. The panel's `chosenAt` handling stays in
@@ -75,9 +80,10 @@ the server, so playoff and make-up games join by themselves. That is decision
 5. It also means a saved filter can create a conflict on a day nobody was
 looking, which is decision 4's case.
 
-A panel has an ordered list of sources: its own games, and up to five
-templates. The order **is** the priority (decision 3). The panel's own games
-start first in the list and can be moved like any other entry.
+A panel has its own games, and an ordered list of up to five templates. The
+order of the templates **is** their priority (decision 3). The panel's own
+games are not in that list and cannot be outranked: they win over any
+template (decision 8).
 
 The panel's **candidate games** are the union. A game that arrives from two
 sources is one game, carrying the higher priority.
@@ -96,13 +102,35 @@ sources is one game, carrying the higher priority.
 - A game whose start cannot be read is **reported**, never dropped quietly
   and never kept: it cannot be placed, so it cannot be shown.
 
-### Until the owner decides
+### Who decides
 
-Sort the sequence by (source priority, start, game id) and keep greedily:
-take each game that does not overlap one already kept. This is deterministic,
-it respects decision 3, and it is what the director uses while a conflict is
-unresolved. The panel is flagged on Home ("needs a decision") from the moment
-the conflict exists until it is resolved.
+**The user does, every time** (decision 8). There are two ways a conflict
+comes to exist, and they are handled differently on purpose.
+
+**The user did something**: ticked games in the picker, attached a template
+to a panel, edited a template that panels use. The conflict is shown as part
+of that action and **the action is not complete until it is resolved**. The
+picker will not save a panel's games with an unresolved overlap among them;
+attaching a template shows the overlaps it creates on that panel first;
+saving a template lists each panel it now conflicts on and takes the user
+through them. Nothing is decided on the user's behalf while they are there to
+decide it.
+
+**Nobody did anything**: a saved filter picked up a game that was scheduled
+later, or the NHL moved a game into another's time. This is the rare case.
+Nobody is there to ask, so:
+
+- the panel is flagged on Home ("needs a decision") from that moment, and
+  stays flagged until the user resolves it;
+- until then a rule decides, because a panel must never be undecided:
+  **a game set on the panel itself wins over a game from a template.**
+  Between two templates the user's priority order decides (decision 3), and
+  after that the earlier start, then the lower game id, so the answer is
+  always the same one. Applied greedily across the sequence: take each game,
+  in that order, that does not overlap one already kept.
+
+The rule is a backstop and is written to be boring. It is never a substitute
+for asking: the flag does not clear because the rule produced an answer.
 
 ### When a resolution goes stale
 
@@ -190,7 +218,7 @@ director must treat an absent id as "over", not as an error.
 
 - `scoreboard-templates`: hash `owner` (Cognito subject), range `templateId`
   (random, server-made). Point-in-time recovery on.
-- On the panel's row: `games` (ids), `sources` (the ordered list),
+- On the panel's row: `games` (ids), `templates` (the ordered list),
   `resolutions`, and `sent` (what the director last published).
 - Bounds: 1,500 games in any one list; 20 templates an account; 5 templates a
   panel; 32 clubs in a filter; names 1 to 40 characters, no control
@@ -200,7 +228,7 @@ director must treat an absent id as "over", not as an error.
 |---|---|
 | `GET /api/schedule` | the season, as the picker needs it |
 | `GET/POST /api/templates`, `PUT/DELETE /api/templates/{id}` | templates. Delete is refused (409, with a count) while panels use it. |
-| `PUT /api/devices/{thing}/schedule` | `{games, sources, resolutions}`; the server re-runs the rules and rejects an invalid resolution |
+| `PUT /api/devices/{thing}/schedule` | `{games, templates, resolutions}`; the server re-runs the rules, rejects an invalid resolution, and **rejects a save that leaves a conflict among these games unresolved** (409, listing the sequences), so the rule in section 5 is only ever reached by conflicts nobody caused |
 | `GET /api/devices` | adds, per panel: the next few kept games, and whether a decision is needed |
 | ~~`PUT /api/devices/{thing}/game`~~ | **removed** (decision 6). Less surface, and one fewer way to publish to a panel. |
 
@@ -236,10 +264,11 @@ director must treat an absent id as "over", not as an error.
 
 - **Templates** `#/templates`, `#/template/<id>`: list, create, rename,
   delete; edit with the picker.
-- **Panel**: "What this panel shows" is the ordered sources (reorder to set
-  priority), a button to choose this panel's own games, the conflicts to
-  resolve, and the next few kept games. The single-game picker and "Show on
-  panel" are gone.
+- **Panel**: "What this panel shows" is this panel's own games (with a
+  button to choose them), its templates in priority order (reorder to set
+  priority), any conflicts to resolve, and the next few kept games. A change
+  that creates a conflict is not saved until the conflict is resolved. The
+  single-game picker and "Show on panel" are gone.
 - **Home**: "Should be showing" is unchanged; added are the next game and a
   plain "needs a decision" link when a conflict is unresolved.
 
@@ -264,6 +293,7 @@ before**, so there is never a day when a panel cannot be given a game.
 
 1. **Once a minute for the director**: agreed? (The alternative is the
    existing ten-minute job, and openings missed by up to ten minutes.)
-2. **The panel's own games start at the top of the priority list** but can be
-   moved. Or should they always win?
+2. ~~The panel's own games start at the top of the priority list but can be
+   moved. Or should they always win?~~ **Decided 2026-09-21: they always
+   win** (decision 8).
 3. **Nothing replaces "Show on panel" for bringing back a final.** Accepted?
