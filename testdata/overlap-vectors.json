@@ -1,0 +1,649 @@
+{
+ "about": "Which chosen games overlap, and what a panel shows until its owner decides. One file, two readers: cloud/internal/schedule (the answer that counts) and site/assets/overlap.js (so the picker can show conflicts as boxes are ticked). A game occupies its start to 2 h 40 min after it (the owner's figure: regulation length); touching is not overlapping. A sequence is a maximal chain of games joined by overlaps. defaultKept is what is shown until the owner resolves a conflict: the panel's own games beat a template's, templates rank in the owner's order, then earlier start, then lower id, taken greedily. `source` is \"panel\" or a template id; `order` is the template ids in priority order.",
+ "occupiesMinutes": 160,
+ "cases": [
+  {
+   "name": "nothing chosen",
+   "games": [],
+   "order": [],
+   "sequences": [],
+   "defaultKept": [],
+   "unreadable": []
+  },
+  {
+   "name": "two games hours apart are no conflict",
+   "games": [
+    {
+     "id": 1,
+     "start": "2026-10-10T17:00:00Z",
+     "source": "panel"
+    },
+    {
+     "id": 2,
+     "start": "2026-10-10T23:00:00Z",
+     "source": "panel"
+    }
+   ],
+   "order": [],
+   "sequences": [],
+   "defaultKept": [
+    1,
+    2
+   ],
+   "unreadable": []
+  },
+  {
+   "name": "two games at the same time",
+   "games": [
+    {
+     "id": 1,
+     "start": "2026-10-10T23:00:00Z",
+     "source": "panel"
+    },
+    {
+     "id": 2,
+     "start": "2026-10-10T23:00:00Z",
+     "source": "panel"
+    }
+   ],
+   "order": [],
+   "sequences": [
+    [
+     1,
+     2
+    ]
+   ],
+   "defaultKept": [
+    1
+   ],
+   "unreadable": [],
+   "why": "same source and start: the lower id"
+  },
+  {
+   "name": "a game starting inside another",
+   "games": [
+    {
+     "id": 1,
+     "start": "2026-10-10T23:00:00Z",
+     "source": "panel"
+    },
+    {
+     "id": 2,
+     "start": "2026-10-10T23:30:00Z",
+     "source": "panel"
+    }
+   ],
+   "order": [],
+   "sequences": [
+    [
+     1,
+     2
+    ]
+   ],
+   "defaultKept": [
+    1
+   ],
+   "unreadable": []
+  },
+  {
+   "name": "touching exactly is not overlapping",
+   "games": [
+    {
+     "id": 1,
+     "start": "2026-10-10T20:00:00Z",
+     "source": "panel"
+    },
+    {
+     "id": 2,
+     "start": "2026-10-10T22:40:00Z",
+     "source": "panel"
+    }
+   ],
+   "order": [],
+   "sequences": [],
+   "defaultKept": [
+    1,
+    2
+   ],
+   "unreadable": [],
+   "why": "2 h 40 min to the second"
+  },
+  {
+   "name": "one second short of touching is overlapping",
+   "games": [
+    {
+     "id": 1,
+     "start": "2026-10-10T20:00:00Z",
+     "source": "panel"
+    },
+    {
+     "id": 2,
+     "start": "2026-10-10T22:39:59Z",
+     "source": "panel"
+    }
+   ],
+   "order": [],
+   "sequences": [
+    [
+     1,
+     2
+    ]
+   ],
+   "defaultKept": [
+    1
+   ],
+   "unreadable": []
+  },
+  {
+   "name": "a chain: A overlaps B, B overlaps C, A and C do not",
+   "games": [
+    {
+     "id": 1,
+     "start": "2026-10-10T17:00:00Z",
+     "source": "panel"
+    },
+    {
+     "id": 2,
+     "start": "2026-10-10T19:00:00Z",
+     "source": "panel"
+    },
+    {
+     "id": 3,
+     "start": "2026-10-10T21:00:00Z",
+     "source": "panel"
+    }
+   ],
+   "order": [],
+   "sequences": [
+    [
+     1,
+     2,
+     3
+    ]
+   ],
+   "defaultKept": [
+    1,
+    3
+   ],
+   "unreadable": [],
+   "why": "one sequence; the default keeps the two ends"
+  },
+  {
+   "name": "two separate conflicts on one day",
+   "games": [
+    {
+     "id": 1,
+     "start": "2026-10-10T17:00:00Z",
+     "source": "panel"
+    },
+    {
+     "id": 2,
+     "start": "2026-10-10T17:30:00Z",
+     "source": "panel"
+    },
+    {
+     "id": 3,
+     "start": "2026-10-10T23:00:00Z",
+     "source": "panel"
+    },
+    {
+     "id": 4,
+     "start": "2026-10-10T23:10:00Z",
+     "source": "panel"
+    }
+   ],
+   "order": [],
+   "sequences": [
+    [
+     1,
+     2
+    ],
+    [
+     3,
+     4
+    ]
+   ],
+   "defaultKept": [
+    1,
+    3
+   ],
+   "unreadable": []
+  },
+  {
+   "name": "given out of order",
+   "games": [
+    {
+     "id": 9,
+     "start": "2026-10-10T23:30:00Z",
+     "source": "panel"
+    },
+    {
+     "id": 4,
+     "start": "2026-10-10T23:00:00Z",
+     "source": "panel"
+    }
+   ],
+   "order": [],
+   "sequences": [
+    [
+     4,
+     9
+    ]
+   ],
+   "defaultKept": [
+    4
+   ],
+   "unreadable": [],
+   "why": "a sequence lists its games by start, then id"
+  },
+  {
+   "name": "the panel's own game beats a template's, even a later one",
+   "games": [
+    {
+     "id": 1,
+     "start": "2026-10-10T23:00:00Z",
+     "source": "t1"
+    },
+    {
+     "id": 2,
+     "start": "2026-10-10T23:30:00Z",
+     "source": "panel"
+    }
+   ],
+   "order": [
+    "t1"
+   ],
+   "sequences": [
+    [
+     1,
+     2
+    ]
+   ],
+   "defaultKept": [
+    2
+   ],
+   "unreadable": []
+  },
+  {
+   "name": "between templates the owner's order decides",
+   "games": [
+    {
+     "id": 1,
+     "start": "2026-10-10T23:00:00Z",
+     "source": "t2"
+    },
+    {
+     "id": 2,
+     "start": "2026-10-10T23:30:00Z",
+     "source": "t1"
+    }
+   ],
+   "order": [
+    "t1",
+    "t2"
+   ],
+   "sequences": [
+    [
+     1,
+     2
+    ]
+   ],
+   "defaultKept": [
+    2
+   ],
+   "unreadable": []
+  },
+  {
+   "name": "the same game from two sources is one game, at its best priority",
+   "games": [
+    {
+     "id": 1,
+     "start": "2026-10-10T23:00:00Z",
+     "source": "t2"
+    },
+    {
+     "id": 1,
+     "start": "2026-10-10T23:00:00Z",
+     "source": "panel"
+    },
+    {
+     "id": 2,
+     "start": "2026-10-10T23:30:00Z",
+     "source": "t1"
+    }
+   ],
+   "order": [
+    "t1",
+    "t2"
+   ],
+   "sequences": [
+    [
+     1,
+     2
+    ]
+   ],
+   "defaultKept": [
+    1
+   ],
+   "unreadable": [],
+   "why": "not a conflict with itself; and it is the panel's"
+  },
+  {
+   "name": "a template not in the order ranks last",
+   "games": [
+    {
+     "id": 1,
+     "start": "2026-10-10T23:00:00Z",
+     "source": "tX"
+    },
+    {
+     "id": 2,
+     "start": "2026-10-10T23:30:00Z",
+     "source": "t1"
+    }
+   ],
+   "order": [
+    "t1"
+   ],
+   "sequences": [
+    [
+     1,
+     2
+    ]
+   ],
+   "defaultKept": [
+    2
+   ],
+   "unreadable": []
+  },
+  {
+   "name": "priority in a chain: the middle game is the panel's",
+   "games": [
+    {
+     "id": 1,
+     "start": "2026-10-10T17:00:00Z",
+     "source": "t1"
+    },
+    {
+     "id": 2,
+     "start": "2026-10-10T19:00:00Z",
+     "source": "panel"
+    },
+    {
+     "id": 3,
+     "start": "2026-10-10T21:00:00Z",
+     "source": "t1"
+    }
+   ],
+   "order": [
+    "t1"
+   ],
+   "sequences": [
+    [
+     1,
+     2,
+     3
+    ]
+   ],
+   "defaultKept": [
+    2
+   ],
+   "unreadable": [],
+   "why": "keeping the panel's game costs both of the template's"
+  },
+  {
+   "name": "a game whose start cannot be read is reported, never kept and never dropped quietly",
+   "games": [
+    {
+     "id": 1,
+     "start": "2026-10-10T23:00:00Z",
+     "source": "panel"
+    },
+    {
+     "id": 2,
+     "start": "soon",
+     "source": "panel"
+    },
+    {
+     "id": 3,
+     "start": "",
+     "source": "panel"
+    },
+    {
+     "id": 4,
+     "start": "2026-10-10T23:00:00",
+     "source": "panel"
+    }
+   ],
+   "order": [],
+   "sequences": [],
+   "defaultKept": [
+    1
+   ],
+   "unreadable": [
+    2,
+    3,
+    4
+   ],
+   "why": "no zone is no instant"
+  },
+  {
+   "name": "across midnight UTC",
+   "games": [
+    {
+     "id": 1,
+     "start": "2026-10-10T23:00:00Z",
+     "source": "panel"
+    },
+    {
+     "id": 2,
+     "start": "2026-10-11T01:00:00Z",
+     "source": "panel"
+    }
+   ],
+   "order": [],
+   "sequences": [
+    [
+     1,
+     2
+    ]
+   ],
+   "defaultKept": [
+    1
+   ],
+   "unreadable": []
+  },
+  {
+   "name": "an offset instead of Z",
+   "games": [
+    {
+     "id": 1,
+     "start": "2026-10-10T19:00:00-04:00",
+     "source": "panel"
+    },
+    {
+     "id": 2,
+     "start": "2026-10-10T23:30:00Z",
+     "source": "panel"
+    }
+   ],
+   "order": [],
+   "sequences": [
+    [
+     1,
+     2
+    ]
+   ],
+   "defaultKept": [
+    1
+   ],
+   "unreadable": []
+  },
+  {
+   "name": "in a chain, two games that only touch are both kept",
+   "games": [
+    {
+     "id": 1,
+     "start": "2026-10-10T20:00:00Z",
+     "source": "panel"
+    },
+    {
+     "id": 2,
+     "start": "2026-10-10T21:00:00Z",
+     "source": "panel"
+    },
+    {
+     "id": 3,
+     "start": "2026-10-10T22:40:00Z",
+     "source": "panel"
+    }
+   ],
+   "order": [],
+   "sequences": [
+    [
+     1,
+     2,
+     3
+    ]
+   ],
+   "defaultKept": [
+    1,
+    3
+   ],
+   "unreadable": [],
+   "why": "1 and 3 touch exactly; the keep rule has its own boundary, separate from the one that finds chains, and this is the case that pins it"
+  }
+ ],
+ "resolutions": [
+  {
+   "name": "keeping one of two",
+   "sequence": [
+    1,
+    2
+   ],
+   "starts": {
+    "1": "2026-10-10T23:00:00Z",
+    "2": "2026-10-10T23:30:00Z"
+   },
+   "kept": [
+    2
+   ],
+   "valid": true
+  },
+  {
+   "name": "keeping both of two that overlap",
+   "sequence": [
+    1,
+    2
+   ],
+   "starts": {
+    "1": "2026-10-10T23:00:00Z",
+    "2": "2026-10-10T23:30:00Z"
+   },
+   "kept": [
+    1,
+    2
+   ],
+   "valid": false
+  },
+  {
+   "name": "keeping the two ends of a chain",
+   "sequence": [
+    1,
+    2,
+    3
+   ],
+   "starts": {
+    "1": "2026-10-10T17:00:00Z",
+    "2": "2026-10-10T19:00:00Z",
+    "3": "2026-10-10T21:00:00Z"
+   },
+   "kept": [
+    1,
+    3
+   ],
+   "valid": true
+  },
+  {
+   "name": "keeping nothing",
+   "sequence": [
+    1,
+    2
+   ],
+   "starts": {
+    "1": "2026-10-10T23:00:00Z",
+    "2": "2026-10-10T23:30:00Z"
+   },
+   "kept": [],
+   "valid": false,
+   "why": "a resolution chooses something; to show neither, untick both"
+  },
+  {
+   "name": "keeping a game that is not in the sequence",
+   "sequence": [
+    1,
+    2
+   ],
+   "starts": {
+    "1": "2026-10-10T23:00:00Z",
+    "2": "2026-10-10T23:30:00Z"
+   },
+   "kept": [
+    7
+   ],
+   "valid": false
+  },
+  {
+   "name": "keeping the same game twice",
+   "sequence": [
+    1,
+    2
+   ],
+   "starts": {
+    "1": "2026-10-10T23:00:00Z",
+    "2": "2026-10-10T23:30:00Z"
+   },
+   "kept": [
+    1,
+    1
+   ],
+   "valid": false
+  },
+  {
+   "name": "keeping two games that only touch",
+   "sequence": [
+    1,
+    2,
+    3
+   ],
+   "starts": {
+    "1": "2026-10-10T20:00:00Z",
+    "2": "2026-10-10T21:00:00Z",
+    "3": "2026-10-10T22:40:00Z"
+   },
+   "kept": [
+    1,
+    3
+   ],
+   "valid": true
+  },
+  {
+   "name": "keeping two games one second short of touching",
+   "sequence": [
+    1,
+    2,
+    3
+   ],
+   "starts": {
+    "1": "2026-10-10T20:00:00Z",
+    "2": "2026-10-10T21:00:00Z",
+    "3": "2026-10-10T22:39:59Z"
+   },
+   "kept": [
+    1,
+    3
+   ],
+   "valid": false
+  }
+ ]
+}

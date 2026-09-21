@@ -340,7 +340,7 @@ func TestListCarriesWhenTheGameWasChosenAndWhatStateItIsIn(t *testing.T) {
 		if id != 2026020001 {
 			return reduce.State{}, false, nil
 		}
-		return reduce.State{GameID: id, GameState: "FINAL", Start: "2026-10-01T23:00:00Z", AsOf: 1000, SeenAt: 2000,
+		return reduce.State{GameID: id, GameState: "FINAL", Start: "2026-10-01T23:00:00Z", AsOf: 1000, SeenAt: 2000, FinalAt: 2500,
 			Away: reduce.Team{Abbrev: "MTL", Score: 1}, Home: reduce.Team{Abbrev: "TOR", Score: 4},
 			Period: reduce.Period{Number: 3, Label: "3"}}, true, nil
 	}
@@ -373,6 +373,9 @@ func TestListCarriesWhenTheGameWasChosenAndWhatStateItIsIn(t *testing.T) {
 	g := got[0].Game
 	if g == nil || g.State != "FINAL" || g.Start != "2026-10-01T23:00:00Z" || g.Away.Abbrev != "MTL" || g.Away.Score != 1 || g.Period.Label != "3" {
 		t.Fatalf("game = %+v", g)
+	}
+	if !strings.Contains(res.Body, `"finalAt":2500`) {
+		t.Errorf("the list does not say when the game ended: %s", res.Body)
 	}
 	if g.LastSeenAt != 2000 {
 		t.Errorf("lastSeenAt = %d, want the later of asOf and seenAt (2000)", g.LastSeenAt)
