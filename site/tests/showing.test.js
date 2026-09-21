@@ -118,3 +118,33 @@ test("a time twelve hours or more away says which day", () => {
   // Eight hours away, across midnight: a clock time is enough.
   assert.equal(line({ now: "2026-09-20T03:00:00Z", game: g("PRE") }), "Off · the countdown to MTL at TOR starts at 7:00 AM");
 });
+
+test("the API's finalAt is what a final is timed from", () => {
+  // Ended 9:34 PM, first seen by this API row at 11:15 PM, one-hour hold:
+  // the first night of v0.1.6. Off, not "until about 12:15 AM".
+  const device = { gameId: 2026010012, chosenAt: Date.parse("2026-09-21T03:15:00Z"),
+    game: { state: "FINAL", away: { abbrev: "UTA", score: 1 }, home: { abbrev: "COL", score: 4 },
+      finalAt: Date.parse("2026-09-21T01:34:00Z"), lastSeenAt: Date.parse("2026-09-21T03:15:00Z") } };
+  const display = { ...BUILT_IN, finalHoldMin: 60 };
+  const late = inputFor(device, today, Date.parse("2026-09-21T03:16:00Z"), display);
+  assert.equal(late.game.finalAt, "2026-09-21T01:34:00.000Z");
+  assert.equal(showingLine(late, TOR), "Off · the final score for UTA at COL has come down");
+  const inTime = inputFor(device, today, Date.parse("2026-09-21T02:00:00Z"), display);
+  assert.equal(showingLine(inTime, TOR), "Final: UTA 1, COL 4 · on screen until about 10:34 PM");
+});
+
+test("a finalAt that is not a time is no finalAt", () => {
+  for (const junk of ["soon", -1, 0, NaN, null, {}, true]) {
+    const input = inputFor({ gameId: 2026010012, game: { state: "FINAL", finalAt: junk, lastSeenAt: Date.parse("2026-09-21T02:00:00Z") } },
+      today, Date.parse("2026-09-21T03:00:00Z"));
+    assert.equal(input.game.finalAt, null, String(junk));
+    assert.equal(shouldShow(input), "final", "falls back to when it was first seen");
+  }
+});
+
+test("how far ahead an end may be is the panel's number", () => {
+  const py = readFileSync(new URL("../../device/scoreboard/main.py", import.meta.url), "utf8");
+  const js = readFileSync(new URL("../assets/showing.js", import.meta.url), "utf8");
+  assert.match(py, /^FINAL_AT_SKEW_S = 10 \* 60$/m);
+  assert.match(js, /FINAL_AT_SKEW_MS = 10 \* 60 \* 1000/);
+});

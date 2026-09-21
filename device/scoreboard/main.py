@@ -453,19 +453,43 @@ def chosen_rotation(device_json: int | None, setup_file, env: str | None) -> int
     return setup_file()
 
 
+# How far ahead of this panel's clock a game's end may claim to be and still
+# be believed. The reducer stamps finalAt from ITS clock; a few minutes covers
+# any honest disagreement. Beyond it the number is not a time this panel can
+# use, and an end a day in the future would otherwise hold a final for a day.
+FINAL_AT_SKEW_S = 10 * 60
+
+
+def final_ended_ago_s(state: GameState, now_utc: datetime | None) -> float | None:
+    """Seconds since the game ended, or None if that cannot be known.
+
+    None in three cases, and in each the caller falls back to when this panel
+    first SAW the final: the document carries no ``finalAt`` (a reducer from
+    before 2026-09-21, or a pregame built from today's list); this panel's
+    clock has not been set, so there is nothing to compare a wall-clock time
+    with; or the end claims to be further in the future than clocks honestly
+    differ. An end slightly in the future is "just now", never negative.
+    """
+    if state.final_at_ms is None or now_utc is None:
+        return None
+    ago = now_utc.timestamp() - state.final_at_ms / 1000
+    if ago < -FINAL_AT_SKEW_S:
+        return None
+    return max(0.0, ago)
+
+
 def final_seen_at(previous: float | None, state: GameState | None, now: float) -> float | None:
     """When this panel first saw the game it follows go final.
 
-    The state document carries no end timestamp -- only ``asOf`` (when the
-    reducer last wrote it) and ``start`` -- so there is nothing in the model
-    to measure "three hours since the game ended" from. ``asOf`` would have
-    to be compared against this panel's wall clock, and this panel has no
-    RTC: until NTP answers it may be hours out, which would make a final
-    either instantly stale or permanent. So the panel measures from its own
-    first sighting, on its own monotonic clock, and the honest reading of
-    ``final_hold_s`` is "three hours since this panel learned the game
-    ended" -- which also means a panel rebooted an hour after the final
-    holds the retained document for another full three hours.
+    The fallback, since 2026-09-21. The state document now says when the game
+    ended (``finalAt``) and ``presentation`` measures the hold from that
+    whenever it can -- see ``final_ended_ago_s`` for when it cannot: an older
+    document, an end that cannot be true, or this panel's clock not being set
+    yet. It has no RTC, and until NTP answers it may be hours out, which
+    compared against a wall-clock time would make a final either instantly
+    stale or permanent. Then the panel measures from its own first sighting,
+    on its own monotonic clock, and ``final_hold_s`` means "since this panel
+    learned the game ended".
 
     Called every pass rather than from the event handlers, so every route to
     a new state -- an MQTT update, the site choosing another game, a fixture,
@@ -643,8 +667,9 @@ def presentation(now: float, now_utc: datetime | None, screen: str,
     5. Then, and only then, the windows: a LIVE document that has stopped
        arriving for up to STALE_AFTER_S, a countdown from
        ``countdown_lead_s`` before puck drop until STALE_AFTER_S after it, a
-       final for ``final_hold_s`` after this panel first saw it, and an
-       unrecognized state for STALE_AFTER_S after it arrived.
+       final for ``final_hold_s`` after the game ended (or, when that cannot
+       be known, after this panel first saw it), and an unrecognized state
+       for STALE_AFTER_S after it arrived.
     """
     shift = shift_at(now)
     within_grace = now - last_change < GRACE_S
@@ -698,6 +723,16 @@ def presentation(now: float, now_utc: datetime | None, screen: str,
     if state is None:
         return Presentation(NO_GAME, shift) if within_grace else Presentation(OFF, (0, 0))
     if state.state in OVER:
+        ended_ago = final_ended_ago_s(state, now_utc)
+        if ended_ago is not None:
+            # The hold runs from the end of the GAME. A panel flashed two
+            # hours after a final, with a one-hour hold, has nothing to show
+            # -- and neither choosing the game again nor the grace period
+            # brings it back: a game whose time has passed is not shown.
+            return Presentation(FINAL, shift) if ended_ago < display.final_hold_s \
+                else Presentation(OFF, (0, 0))
+        # No end time to go on (see final_ended_ago_s): this panel's own
+        # first sighting, on its own monotonic clock, which a re-send re-arms.
         held = final_seen is None or now - final_seen < display.final_hold_s
         return Presentation(FINAL, shift) if held or within_grace else Presentation(OFF, (0, 0))
     if state.state in PREGAME:

@@ -24,6 +24,15 @@ class Team:
     color: tuple[int, int, int]
 
 
+def _instant_ms(value) -> int | None:
+    """A positive whole number of milliseconds, or None. ``True`` is an int
+    in Python and is not a time; neither is 1.5e12 written as a float by
+    something that is not the reducer."""
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
+
+
 @dataclass(frozen=True)
 class Penalty:
     team: str
@@ -52,6 +61,10 @@ class GameState:
     penalties: tuple[Penalty, ...]
     last_goal: tuple[str, int, int] | None
     start: str | None
+    # When the game ended, in ms since the epoch, from the reducer's finalAt;
+    # None from a document that has none, or one that is not a positive whole
+    # number. What a final's hold is measured from (main.presentation).
+    final_at_ms: int | None = None
 
     @classmethod
     def from_json(cls, data: bytes | str) -> "GameState":
@@ -84,6 +97,7 @@ class GameState:
             ),
             last_goal=(str(goal["team"]), int(goal.get("number", 0)), int(goal.get("asOf", 0))) if goal else None,
             start=d.get("start") or None,
+            final_at_ms=_instant_ms(d.get("finalAt")),
         )
 
     def _elapsed_s(self, now_ms: int) -> int:

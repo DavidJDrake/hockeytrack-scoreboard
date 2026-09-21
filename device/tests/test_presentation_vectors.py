@@ -30,7 +30,8 @@ def run(case):
     state = None
     if game is not None:
         state = GameState.pregame(TodayGame(1, "AAA", "BBB", game.get("start") or "", game["state"]))
-        state = state.__class__(**{**state.__dict__, "state": game["state"]})
+        ended = int(instant(game["finalAt"]).timestamp() * 1000) if game.get("finalAt") else None
+        state = state.__class__(**{**state.__dict__, "state": game["state"], "final_at_ms": ended})
     sleep = d.get("sleep")
     display = main.Display(
         countdown_lead_s=d["countdownLeadMin"] * 60,

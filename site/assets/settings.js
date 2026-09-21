@@ -23,7 +23,7 @@ export const BUILT_IN = Object.freeze({ countdownLeadMin: 720, finalHoldMin: 180
 // to. Found the honest way: the owner set a one-hour final hold and the
 // panel, on v0.1.5, kept the score up for three, while Home said it was off.
 export const SETTINGS_SINCE = "v0.1.6";
-export const OLDER_PANELS_NOTE = `Panels running an image older than ${SETTINGS_SINCE} ignore these settings and use the built-in ones (countdown 12 hours before, final score up for 3 hours, no sleep hours). This site cannot tell which image a panel runs, so on an older panel “Should be showing” on Home can be wrong about countdowns, finals and sleep hours. Reflashing the panel with the current image fixes both.`;
+export const OLDER_PANELS_NOTE = `Panels running an image older than ${SETTINGS_SINCE} ignore these settings and use the built-in ones (countdown 12 hours before, final score up for 3 hours, no sleep hours). This site cannot tell which image a panel runs, so on an older panel “Should be showing” on Home can be wrong about countdowns, finals and sleep hours. Reflashing the panel with the current image fixes both. One more difference: a ${SETTINGS_SINCE} panel times a final from when it first saw it, not from when the game ended, so a panel given a game that finished a while ago keeps the final up longer than Home says. The next image times it from the end of the game, as Home does.`;
 
 export class SettingsError extends Error {}
 

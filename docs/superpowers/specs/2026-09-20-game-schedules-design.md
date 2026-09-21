@@ -80,6 +80,9 @@ So the hold is measured from **when the game ended**, everywhere:
   compare wall-clock times it does not have). Choosing a game no longer
   re-arms an expired final, and the five-minute grace does not bring one
   back: a game whose time has passed is not shown. This ships in an image.
+  One guard the ruling did not need to say: an end more than ten minutes
+  ahead of the panel's clock is not believed, and the fallback decides, so a
+  bad number cannot hold a panel lit for a day.
 - **Site.** `showing.js` makes the same change and the shared cases change
   with it: "an old final the owner chose again" becomes *off*. Both suites
   move together or CI fails, which is what the file is for.
