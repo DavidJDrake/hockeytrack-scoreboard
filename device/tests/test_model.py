@@ -128,3 +128,36 @@ def test_parse_config_rejects_anything_malformed():
                 b'{"gameId":"2026020001"}', b'{"gameId":null}',
                 b'{"gameId":true}', b'{"other":1}']:
         assert parse_config(bad) is None, bad
+
+
+def _intermission(seconds=1080):
+    text = (FIX / "state_live.json").read_text().replace('"running":true,"intermission":false', '"running":false,"intermission":true')
+    s = GameState.from_json(text)
+    return s.__class__(**{**s.__dict__, "clock_seconds": seconds})
+
+
+def test_an_intermission_clock_counts_down_between_samples():
+    # Seen on the first live game on a real panel: the intermission countdown
+    # sat still and then dropped twenty seconds at a time, because the feed is
+    # cached for about twenty seconds and the panel only counted between
+    # samples while play was running. An intermission clock never stops.
+    s = _intermission(1080)
+    assert s.intermission and not s.clock_running
+    assert s.clock_at(s.as_of_ms) == 1080
+    assert s.clock_at(s.as_of_ms + 10_000) == 1070
+    assert s.clock_at(s.as_of_ms + 2_000_000) == 0          # never negative
+    assert s.clock_at(s.as_of_ms - 5_000) == 1080           # never ahead of the sample
+
+
+def test_penalties_do_not_run_down_during_an_intermission():
+    # The reason this was not simply done by calling an intermission "running":
+    # a penalty carried over the break is served in game time, and none passes.
+    s = _intermission()
+    assert s.penalties_at(s.as_of_ms)[0].seconds == 74
+    assert s.penalties_at(s.as_of_ms + 600_000)[0].seconds == 74
+
+
+def test_a_stoppage_in_play_still_holds_the_clock():
+    s = GameState.from_json((FIX / "state_live.json").read_text().replace('"running":true', '"running":false'))
+    assert not s.intermission
+    assert s.clock_at(s.as_of_ms + 60_000) == 872

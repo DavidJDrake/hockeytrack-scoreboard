@@ -518,3 +518,61 @@ func TestTheListOfSeenEventsIsBounded(t *testing.T) {
 		t.Error("the list should keep the most recent events and let the oldest go")
 	}
 }
+
+func intermissionClock(seconds, period int, at time.Time) Event {
+	body := fmt.Sprintf(`{"gameId":2025020001,"gameState":"LIVE","period":%d,"periodType":"REG",`+
+		`"secondsRemaining":%d,"running":false,"inIntermission":true,"situationCode":"1551",`+
+		`"homeTeam":"FLA","awayTeam":"CHI","score":{"CHI":0,"FLA":2},"shots":{"CHI":3,"FLA":4},`+
+		`"observedAt":%q}`, period, seconds, at.Format(time.RFC3339))
+	return Event{DetailType: "nhl.game.clock", Detail: json.RawMessage(body), Time: at}
+}
+
+// Measured on 2026-09-19 (VAN at SEA, second intermission): the feed's
+// intermission countdown read 108 for twenty seconds, then 71, then 58 -- it
+// is cached like everything else in that feed. An intermission clock always
+// runs, so a panel can count it down between samples, but only if a repeated
+// sample keeps the anchor of the reading it repeats. Otherwise it is the
+// five-seconds-and-jump-back fault over again.
+func TestARepeatedIntermissionSampleKeepsItsAnchor(t *testing.T) {
+	t0 := time.Date(2026, 9, 20, 2, 56, 40, 0, time.UTC)
+	s, _, _ := Reduce(State{}, intermissionClock(108, 2, t0))
+	for i := 1; i <= 3; i++ {
+		at := t0.Add(time.Duration(i) * 5 * time.Second)
+		var changed bool
+		s, changed, _ = Reduce(s, intermissionClock(108, 2, at))
+		if s.AsOf != t0.UnixMilli() {
+			t.Fatalf("repeat %d: asOf moved to %d", i, s.AsOf)
+		}
+		if !changed || s.SeenAt != at.UnixMilli() {
+			t.Fatalf("repeat %d: the document must still say it was just confirmed", i)
+		}
+	}
+	t1 := t0.Add(21 * time.Second)
+	s, _, _ = Reduce(s, intermissionClock(71, 2, t1))
+	if s.AsOf != t1.UnixMilli() {
+		t.Errorf("a new reading: asOf = %d, want %d", s.AsOf, t1.UnixMilli())
+	}
+}
+
+func TestPlayAndIntermissionAreNeverTheSameReading(t *testing.T) {
+	// The period ends at 0:00 and the intermission clock can start from a
+	// number play also passed through. Same seconds, different clocks.
+	t0 := time.Date(2026, 9, 20, 2, 40, 0, 0, time.UTC)
+	at := t0.Add(5 * time.Second)
+	s, _, _ := Reduce(State{}, runningClock(1080, 2, true, t0))
+	s, _, _ = Reduce(s, intermissionClock(1080, 2, at))
+	if s.AsOf != at.UnixMilli() {
+		t.Error("play into intermission kept play's anchor")
+	}
+	s, _, _ = Reduce(State{}, intermissionClock(1200, 2, t0))
+	s, _, _ = Reduce(s, runningClock(1200, 3, true, at))
+	if s.AsOf != at.UnixMilli() {
+		t.Error("intermission into play kept the intermission's anchor")
+	}
+	// A stoppage in play is still not a running clock.
+	s, _, _ = Reduce(State{}, runningClock(369, 2, false, t0))
+	s, _, _ = Reduce(s, runningClock(369, 2, false, at))
+	if s.AsOf != at.UnixMilli() {
+		t.Error("a stopped clock kept its anchor; only a counting clock should")
+	}
+}
