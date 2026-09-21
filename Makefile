@@ -149,11 +149,13 @@ site-local: site-config
 # plans (an apply plans first), with a pinned file mode, and that regenerated
 # zip is the one uploaded.
 build:
-	mkdir -p build/reducer build/today build/api build/enroll build/authgate build/imagecheck
+	mkdir -p build/reducer build/today build/summary build/api build/enroll build/authgate build/imagecheck
 	cd cloud && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -buildvcs=false -trimpath -ldflags="-s -w" -o ../build/reducer/bootstrap ./cmd/reducer
 	cd cloud && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -buildvcs=false -trimpath -ldflags="-s -w" -o ../build/today/bootstrap ./cmd/today
 	cd build/reducer && python3 -m zipfile -c ../reducer.zip bootstrap
 	cd build/today && python3 -m zipfile -c ../today.zip bootstrap
+	cd cloud && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -buildvcs=false -trimpath -ldflags="-s -w" -o ../build/summary/bootstrap ./cmd/summary
+	cd build/summary && python3 -m zipfile -c ../summary.zip bootstrap
 	cd cloud && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -buildvcs=false -trimpath -ldflags="-s -w" -o ../build/api/bootstrap ./cmd/api
 	cd build/api && python3 -m zipfile -c ../api.zip bootstrap
 	cd cloud && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -buildvcs=false -trimpath -ldflags="-s -w" -o ../build/enroll/bootstrap ./cmd/enroll

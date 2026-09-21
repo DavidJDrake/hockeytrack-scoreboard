@@ -41,9 +41,16 @@ type Penalty struct {
 }
 
 type Goal struct {
-	Team     string `json:"team" dynamodbav:"team"`
-	Number   int    `json:"number" dynamodbav:"number"`
-	AsOf     int64  `json:"asOf" dynamodbav:"asOf"`
+	Team   string `json:"team" dynamodbav:"team"`
+	Number int    `json:"number" dynamodbav:"number"`
+	AsOf   int64  `json:"asOf" dynamodbav:"asOf"`
+	// Period and Time say when in the game it was scored ("2", "OT";
+	// "12:34" elapsed), for a panel that shows the last goal after the flash
+	// has gone. AsOf cannot: it is when the event arrived. Either is left
+	// out when the play did not carry something that reads as one -- they
+	// are drawn on a panel, so they are checked here, not there.
+	Period   string `json:"period,omitempty" dynamodbav:"period,omitempty"`
+	Time     string `json:"time,omitempty" dynamodbav:"time,omitempty"`
 	PlayerID int64  `json:"-" dynamodbav:"playerId"` // bookkeeping: lets the roster fold backfill Number if it arrives late
 }
 
@@ -151,6 +158,25 @@ func PeriodLabel(number int, periodType string) string {
 	default:
 		return fmt.Sprintf("%d", number)
 	}
+}
+
+// PeriodTime is a time in a period as the feed writes it, "MM:SS", or "" if
+// “s“ is anything else. The string goes on to a panel that draws it, so
+// what passes is spelled out: digits, one colon, seconds under sixty,
+// minutes that a period (or a playoff overtime) could hold.
+func PeriodTime(s string) string {
+	if len(s) != 5 || s[2] != ':' {
+		return ""
+	}
+	for _, i := range []int{0, 1, 3, 4} {
+		if s[i] < '0' || s[i] > '9' {
+			return ""
+		}
+	}
+	if s[3] > '5' || s[0] > '2' || (s[0] == '2' && (s[1] != '0' || s[3:] != "00")) {
+		return ""
+	}
+	return s
 }
 
 // OTLength is the overtime period length implied by the game id: the two

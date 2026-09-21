@@ -274,9 +274,10 @@ resource "aws_cloudwatch_metric_alarm" "iot_publish_out_auth_error" {
 resource "aws_cloudwatch_metric_alarm" "iot_publish_retained_auth_error" {
   alarm_name        = "scoreboard-iot-publish-retained-auth-error"
   alarm_description = <<-EOT
-    scoreboard-reducer, scoreboard-today, or scoreboard-api was denied a
-    retained publish -- the iot:RetainPublish/iot:Publish grant in iam.tf
-    or admin.tf is missing or wrong, or the Lambda's topic changed without
+    scoreboard-reducer, scoreboard-today, scoreboard-summary, or
+    scoreboard-api was denied a retained publish -- the
+    iot:RetainPublish/iot:Publish grant in iam.tf, summary.tf or admin.tf
+    is missing or wrong, or the Lambda's topic changed without
     a matching policy update. Devices reconnecting will not get current
     game state (reducer/today) or a fresh config (api) until this is
     fixed. This metric has been observed tagged Protocol=MQTT even for the
@@ -285,7 +286,8 @@ resource "aws_cloudwatch_metric_alarm" "iot_publish_retained_auth_error" {
     alarm already aggregates across all of them. The failing role/topic
     are in the AWSIotLogsV2 CloudWatch log group (ERROR level); the
     Lambda's own error is in /aws/lambda/scoreboard-reducer,
-    /aws/lambda/scoreboard-today, or /aws/lambda/scoreboard-api.
+    /aws/lambda/scoreboard-today, /aws/lambda/scoreboard-summary, or
+    /aws/lambda/scoreboard-api.
   EOT
 
   comparison_operator = "GreaterThanThreshold"
