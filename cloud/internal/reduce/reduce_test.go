@@ -642,3 +642,61 @@ func TestAGameThatWasAlreadyFinalIsTimedFromItsLastHeartbeat(t *testing.T) {
 		t.Errorf("finalAt = %d, want asOf %d", s.FinalAt, ended)
 	}
 }
+
+func goalEvent(t *testing.T, eventID int64, period int, periodType, timeInPeriod string) Event {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{
+		"gameId": 2025020001, "eventId": eventID, "seq": eventID, "playType": "goal",
+		"homeTeam": "FLA", "awayTeam": "CHI", "scoringTeam": "FLA", "period": period, "timeInPeriod": timeInPeriod,
+		"score": map[string]int{"CHI": 0, "FLA": 1},
+		"raw": map[string]any{"periodDescriptor": map[string]any{"number": period, "periodType": periodType},
+			"details": map[string]any{"scoringPlayerId": 8473419}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return Event{DetailType: "nhl.game.play", Detail: body, Time: time.Date(2026, 9, 21, 0, 0, 0, 0, time.UTC)}
+}
+
+func TestAGoalSaysWhenInTheGameItWasScored(t *testing.T) {
+	for _, tc := range []struct {
+		period               int
+		typ, in, label, when string
+	}{
+		{2, "REG", "12:34", "2", "12:34"},
+		{4, "OT", "03:10", "OT", "03:10"},
+		{5, "OT", "19:59", "2OT", "19:59"},
+		{5, "SO", "00:00", "SO", "00:00"},
+	} {
+		s, changed, err := Reduce(State{}, goalEvent(t, 50, tc.period, tc.typ, tc.in))
+		if err != nil || !changed || s.LastGoal == nil {
+			t.Fatalf("goal did not fold: %v %v %+v", err, changed, s.LastGoal)
+		}
+		if s.LastGoal.Period != tc.label || s.LastGoal.Time != tc.when {
+			t.Errorf("period %d %s at %s: got %q %q, want %q %q", tc.period, tc.typ, tc.in,
+				s.LastGoal.Period, s.LastGoal.Time, tc.label, tc.when)
+		}
+	}
+}
+
+func TestAGoalWithATimeThatIsNotATimeStillCountsAndSaysNothingAboutWhen(t *testing.T) {
+	// The goal is real whatever the feed wrote beside it. What does not read
+	// as a time is left out of the document rather than passed to a panel.
+	s, changed, err := Reduce(State{}, goalEvent(t, 51, 2, "REG", "<script>"))
+	if err != nil || !changed || s.LastGoal == nil || s.Home.Score != 1 {
+		t.Fatalf("goal did not fold: %v %v %+v", err, changed, s)
+	}
+	out, _ := s.JSON()
+	var doc struct {
+		LastGoal map[string]any `json:"lastGoal"`
+	}
+	if err := json.Unmarshal(out, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if _, there := doc.LastGoal["time"]; there {
+		t.Errorf("an unreadable time reached the document: %s", out)
+	}
+	if doc.LastGoal["period"] != "2" {
+		t.Errorf("the period should survive a bad time: %s", out)
+	}
+}

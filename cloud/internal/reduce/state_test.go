@@ -89,3 +89,17 @@ func TestStateJSONHidesInternals(t *testing.T) {
 		t.Error("nil lastGoal must be omitted")
 	}
 }
+
+func TestPeriodTimeAcceptsOnlyATimeInAPeriod(t *testing.T) {
+	for _, ok := range []string{"00:00", "07:00", "12:34", "19:59", "20:00"} {
+		if got := PeriodTime(ok); got != ok {
+			t.Errorf("PeriodTime(%q) = %q, want it kept", ok, got)
+		}
+	}
+	for _, bad := range []string{"", "7:00", "07:60", "20:01", "21:00", "99:99", "12:3", "12-34", "12:34 ", " 12:34",
+		"१२:३४", "12:34\x00", "<b>:00", "0x:00", "123:45", "-1:00"} {
+		if got := PeriodTime(bad); got != "" {
+			t.Errorf("PeriodTime(%q) = %q, want it refused", bad, got)
+		}
+	}
+}

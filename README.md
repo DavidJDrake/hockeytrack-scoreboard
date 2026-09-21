@@ -222,7 +222,7 @@ with no history to replay:
   "penalties": [
     {"team": "NYR", "number": 23, "seconds": 74, "type": "MIN", "endsOnGoal": true}
   ],
-  "lastGoal": {"team": "TBL", "number": 86, "asOf": 1791135690000},
+  "lastGoal": {"team": "TBL", "number": 86, "asOf": 1791135690000, "period": "2", "time": "05:12"},
   "start": "2026-10-01T23:30:00Z"
 }
 ```
@@ -230,6 +230,27 @@ with no history to replay:
 `asOf` is the reducer's publish time; the device counts the clock and
 penalty `seconds` down locally between messages, so the display ticks every
 second even though HockeyTrack samples the feed every five.
+
+A second, much smaller retained document, `hockeytrack/games/summary`, says
+what every current game stands at. It is for the one line about another game
+in the panel's information strip; a panel could subscribe to every game's
+state instead, but that is a dozen heartbeats every five seconds to draw a
+dozen characters. A separate function with its own role (read the table,
+write this one topic) publishes it once a minute, and stays quiet when
+nothing has changed:
+
+```json
+{"v": 1, "asOf": 1791135723123, "games": [
+  {"gameId": 2026020001, "away": "TBL", "home": "NYR", "awayScore": 2, "homeScore": 1,
+   "state": "LIVE", "period": "2", "start": "2026-10-01T23:30:00Z", "seenAt": 1791135720000}
+]}
+```
+
+Both documents are drawn on a screen in somebody's house and begin as text in
+a feed this project does not control. What goes into them is what passed a
+check (`summary.Build`, `reduce.PeriodTime`), not what arrived: a team
+abbreviation is two to four capital letters or the game is left out, and the
+list has a ceiling.
 
 The entire integration with HockeyTrack is one EventBridge rule
 (`terraform/rule.tf`):

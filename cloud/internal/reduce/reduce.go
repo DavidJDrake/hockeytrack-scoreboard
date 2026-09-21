@@ -406,7 +406,12 @@ func (s State) applyPlay(e Event) (State, bool, error) {
 	case "goal":
 		team := d.ScoringTeam
 		pid := d.Raw.Details.ScoringPlayerID
-		s.LastGoal = &Goal{Team: team, Number: s.Roster[pid], PlayerID: pid, AsOf: e.Time.UTC().UnixMilli()}
+		n, typ := d.Raw.PeriodDescriptor.Number, d.Raw.PeriodDescriptor.PeriodType
+		if n == 0 {
+			n = d.Period
+		}
+		s.LastGoal = &Goal{Team: team, Number: s.Roster[pid], PlayerID: pid, AsOf: e.Time.UTC().UnixMilli(),
+			Period: PeriodLabel(n, typ), Time: PeriodTime(d.TimeInPeriod)}
 		s.endMinorOnPowerPlayGoal(team)
 		return s, true, nil
 	case "penalty":
