@@ -80,8 +80,11 @@ test("the zone list always has UTC and survives a browser with no list", () => {
 
 test("the settings a panel runs on reach the should-be-showing rule", () => {
   const device = { display: { resolved: { v: 1, countdownLeadMin: 120, finalHoldMin: 30, sleep: { start: "23:00", end: "07:00", zone: "America/Toronto" } } } };
-  assert.deepEqual(displayFor(device), { countdownLeadMin: 120, finalHoldMin: 30, sleep: { start: "23:00", end: "07:00", zone: "America/Toronto" } });
-  assert.deepEqual(displayFor({ display: { resolved: { v: 1, countdownLeadMin: 0, finalHoldMin: 0 } } }), { countdownLeadMin: 0, finalHoldMin: 0, sleep: null });
+  assert.deepEqual(displayFor(device), { countdownLeadMin: 120, finalHoldMin: 30, sleep: { start: "23:00", end: "07:00", zone: "America/Toronto" }, wake: null });
+  assert.deepEqual(displayFor({ display: { resolved: { v: 1, countdownLeadMin: 0, finalHoldMin: 0 } } }), { countdownLeadMin: 0, finalHoldMin: 0, sleep: null, wake: null });
+  // The owner's switch rides along, as it does in the panel's document.
+  assert.deepEqual(displayFor({ ...device, wake: { mode: "asleep", until: 1789977600000, extra: "x" } }).wake, { mode: "asleep", until: 1789977600000 });
+  assert.equal(displayFor({ ...device, wake: "asleep" }).wake, null);
   // The API leaves `display` out when it could not read the account's
   // defaults. The rule then runs on the built-in values, which is a guess,
   // but the panel list has already said less.

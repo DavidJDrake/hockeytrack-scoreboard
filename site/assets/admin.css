@@ -57,3 +57,11 @@ h2.section { font-family: var(--display); font-weight: 700; font-size: 24px; mar
 #panel-detail .card { margin: 0; }
 .settings .notice { border-left: 3px solid var(--rule); padding-left: 12px; }
 
+
+/* The sleep switch: three positions, one pressed. */
+.switch { display: inline-flex; flex-wrap: wrap; border: 2px solid var(--blue); margin: 0 0 12px; }
+.switch button { font: inherit; font-family: var(--display); font-weight: 600; font-size: 17px; letter-spacing: 0.04em; text-transform: uppercase; padding: 8px 14px; border: 0; background: var(--ice); color: var(--blue); cursor: pointer; }
+.switch button + button { border-left: 2px solid var(--blue); }
+.switch button[aria-pressed="true"] { background: var(--blue); color: #fff; }
+.switch button:focus-visible { outline: 2px solid var(--red); outline-offset: 2px; }
+.card .fine { color: var(--muted); font-size: 13px; margin: 0; }

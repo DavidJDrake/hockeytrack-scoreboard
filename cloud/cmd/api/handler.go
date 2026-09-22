@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -65,6 +66,10 @@ type deviceView struct {
 	// came from. Absent when the account's defaults could not be read: the
 	// list then says less rather than something untrue.
 	Display *settings.View `json:"display,omitempty"`
+	// Wake is the owner's hand on the sleep switch while it is in force:
+	// {"mode":"awake"|"asleep","until":ms}. Absent when the panel follows its
+	// sleep hours.
+	Wake *settings.Wake `json:"wake,omitempty"`
 	// Schedule is what the owner asked this panel to show, and what the
 	// rules make of it today.
 	Schedule scheduleView `json:"schedule"`
@@ -170,7 +175,9 @@ func (h *Handler) defaults(ctx context.Context, sub string) (settings.Settings, 
 // only the settings would wipe the game.
 func (h *Handler) send(ctx context.Context, d devices.Device, account settings.Settings) error {
 	resolved, _ := settings.Resolve(account, d.Display)
-	payload, err := panelconfig.Compose(d.GameID, d.ChosenAt, resolved)
+	// A switch that has ended is not sent: the panel would ignore it, and the
+	// document should say what is true.
+	payload, err := panelconfig.Compose(d.GameID, d.ChosenAt, resolved, d.Wake.Live(h.now()))
 	if err != nil {
 		return err
 	}
@@ -211,6 +218,7 @@ func (h *Handler) seasonOrNilFor(ctx context.Context, d devices.Device) *season.
 
 func (h *Handler) view(ctx context.Context, d devices.Device, account *settings.Settings, sn *season.Season) deviceView {
 	v := deviceView{ThingName: d.ThingName, Name: d.Name, GameID: d.GameID, ChosenAt: d.ChosenAt,
+		Wake:     d.Wake.Live(h.now()),
 		Schedule: scheduleViewOf(d.Schedule, sn, h.now())}
 	if account != nil {
 		view := settings.ViewOf(*account, d.Display)
@@ -395,6 +403,51 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 			return fail(500, "save failed")
 		}
 		slog.Info("panel settings saved", "sub", sub, "thing", d.ThingName)
+		return respond(200, h.view(ctx, d, &account, h.seasonOrNilFor(ctx, d)))
+
+	case "PUT /api/devices/{thing}/wake":
+		// The owner's hand on the sleep switch: awake, asleep, or auto (follow
+		// sleep hours). The body names a mode and nothing else. When it ends
+		// is worked out here, from the panel's own sleep hours, and is never
+		// taken from a client: a request cannot pin a panel lit or dark.
+		if len(rawBody) > maxSettingsBody {
+			return fail(400, "invalid mode")
+		}
+		var body struct {
+			Mode string `json:"mode"`
+		}
+		dec := json.NewDecoder(bytes.NewReader(rawBody))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&body); err != nil || dec.More() {
+			return fail(400, "invalid mode")
+		}
+		d, ok, err := h.owned(ctx, thing, sub)
+		if err != nil {
+			return fail(500, "lookup failed")
+		}
+		if !ok {
+			return fail(404, "no such device")
+		}
+		account, err := h.defaults(ctx, sub)
+		if err != nil {
+			return fail(500, "lookup failed")
+		}
+		resolved, _ := settings.Resolve(account, d.Display)
+		wake, err := settings.NewWake(body.Mode, h.now(), resolved.Sleep)
+		if err != nil {
+			return fail(400, "invalid mode")
+		}
+		// chosenAt is left alone: this is not a choice of game, and a panel
+		// reads a new stamp as one.
+		d.Wake = wake
+		// Publish before persisting, for the reason the game route gives.
+		if err := h.send(ctx, d, account); err != nil {
+			return fail(502, "publish failed")
+		}
+		if err := h.Store.Update(ctx, d); err != nil {
+			return fail(500, "save failed")
+		}
+		slog.Info("panel wake switch set", "sub", sub, "thing", d.ThingName, "mode", body.Mode)
 		return respond(200, h.view(ctx, d, &account, h.seasonOrNilFor(ctx, d)))
 
 	case "PUT /api/devices/{thing}/game":

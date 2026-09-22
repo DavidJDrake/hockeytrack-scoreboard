@@ -30,8 +30,11 @@ type document struct {
 	Display  settings.Wire `json:"display"`
 }
 
-func Compose(gameID, chosenAt int64, r settings.Resolved) ([]byte, error) {
+// wake is the owner's switch if one is in force, or nil. The caller decides
+// "in force" (settings.Wake.Live): a switch that has ended is never sent.
+func Compose(gameID, chosenAt int64, r settings.Resolved, wake *settings.Wake) ([]byte, error) {
 	doc := document{ChosenAt: chosenAt, Display: r.Wire()}
+	doc.Display.Wake = wake
 	if gameID != 0 {
 		doc.GameID = &gameID
 	}

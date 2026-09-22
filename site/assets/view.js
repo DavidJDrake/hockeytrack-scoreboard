@@ -91,6 +91,7 @@ const MESSAGES = {
     "not-found": "That panel is no longer on your account.",
     "bad-request": "Those settings were not accepted. Check the times and the time zone.",
   },
+  wake: { "not-found": "That panel is no longer on your account." },
   saveSchedule: {
     "not-found": "That panel is no longer on your account.",
     "bad-request": "Those games were not accepted. Reload the page and choose again: the season may have changed.",

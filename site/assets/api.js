@@ -69,6 +69,9 @@ export function createApi({ base, getToken, onUnauthorized, fetchImpl = globalTh
     setDisplay: (thing, layer) => call("PUT", `${device(thing)}/display`, layer),
     // The season is public; which games are ticked is not, and is sent only
     // here. The server re-checks every id and every answer to an overlap.
+    // The sleep switch: a mode and nothing else. When it ends is the server's
+    // to work out, from the panel's own sleep hours.
+    setWake: (thing, mode) => call("PUT", `${device(thing)}/wake`, { mode }),
     getSchedule: () => call("GET", "/api/schedule"),
     setSchedule: (thing, body) => call("PUT", `${device(thing)}/schedule`, body),
   };

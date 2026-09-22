@@ -173,6 +173,9 @@ type Wire struct {
 	CountdownLeadMin int        `json:"countdownLeadMin"`
 	FinalHoldMin     int        `json:"finalHoldMin"`
 	Sleep            *wireSleep `json:"sleep,omitempty"`
+	// Wake is the owner's hand on the switch, while it lasts. Not part of
+	// Resolved: it is not a setting, and panelconfig adds it.
+	Wake *Wake `json:"wake,omitempty"`
 }
 
 func (r Resolved) Wire() Wire {

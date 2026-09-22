@@ -27,7 +27,8 @@
      "23:00",
      "07:00",
      "America/Toronto"
-    ]
+    ],
+    "wake": null
    }
   },
   {
@@ -44,7 +45,8 @@
     "chosenAt": 5,
     "countdownLeadS": 43200,
     "finalHoldS": 10800,
-    "sleep": null
+    "sleep": null,
+    "wake": null
    }
   },
   {
@@ -63,7 +65,8 @@
     "chosenAt": null,
     "countdownLeadS": 43200,
     "finalHoldS": 0,
-    "sleep": null
+    "sleep": null,
+    "wake": null
    }
   },
   {
@@ -91,7 +94,44 @@
     "chosenAt": 8,
     "countdownLeadS": 43200,
     "finalHoldS": 10800,
-    "sleep": null
+    "sleep": null,
+    "wake": null
+   }
+  },
+  {
+   "name": "the owner's switch set to asleep",
+   "compose": {
+    "gameId": 2026020001,
+    "chosenAt": 1789871240471,
+    "account": {},
+    "panel": {
+     "sleep": {
+      "enabled": true,
+      "start": "00:00",
+      "end": "07:00",
+      "zone": "America/New_York"
+     }
+    },
+    "wake": {
+     "mode": "asleep",
+     "until": 1789988400000
+    }
+   },
+   "document": "{\"gameId\":2026020001,\"chosenAt\":1789871240471,\"display\":{\"v\":1,\"countdownLeadMin\":720,\"finalHoldMin\":180,\"sleep\":{\"start\":\"00:00\",\"end\":\"07:00\",\"zone\":\"America/New_York\"},\"wake\":{\"mode\":\"asleep\",\"until\":1789988400000}}}",
+   "panelReads": {
+    "gameId": 2026020001,
+    "chosenAt": 1789871240471,
+    "countdownLeadS": 43200,
+    "finalHoldS": 10800,
+    "sleep": [
+     "00:00",
+     "07:00",
+     "America/New_York"
+    ],
+    "wake": [
+     "asleep",
+     1789988400000
+    ]
    }
   }
  ]

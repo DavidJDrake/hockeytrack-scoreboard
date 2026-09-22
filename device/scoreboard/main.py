@@ -178,6 +178,15 @@ class Sleep:
 
 
 @dataclass(frozen=True)
+class Wake:
+    """The owner's hand on the sleep switch, from the site: ``"awake"`` keeps
+    the panel lit through its sleep hours, ``"asleep"`` makes it dark now.
+    ``until_ms`` is when it ends, on the server's clock. See ``wake_now``."""
+    mode: str
+    until_ms: int
+
+
+@dataclass(frozen=True)
 class Display:
     """The three timings the owner can set, with the defaults a panel that
     has never been told anything runs on.
@@ -196,12 +205,49 @@ class Display:
     # without the panel still showing last night's result over breakfast.
     final_hold_s: int = 3 * 60 * 60
     sleep: Sleep | None = None
+    wake: Wake | None = None
 
 
 # The bounds the site is held to, held again here (see parse_display).
 COUNTDOWN_LEAD_MAX_MIN = 48 * 60
 FINAL_HOLD_MAX_MIN = 24 * 60
 DISPLAY_FORMAT = 1
+AWAKE, ASLEEP = "awake", "asleep"
+# No switch lasts longer than this (settings.WakeMax in the cloud). An end
+# further off than a day was not made by this project's API, and believing it
+# is how one bad number pins a panel dark for a season. Same reasoning as
+# FINAL_AT_SKEW_S.
+WAKE_MAX_S = 24 * 60 * 60
+
+
+def _wake_from(value) -> Wake | None:
+    if not isinstance(value, dict):
+        return None
+    mode, until = value.get("mode"), value.get("until")
+    if mode not in (AWAKE, ASLEEP):
+        return None
+    if isinstance(until, bool) or not isinstance(until, int) or until <= 0:
+        return None
+    return Wake(mode, until)
+
+
+def wake_now(display: "Display", now_utc: datetime | None) -> str | None:
+    """``AWAKE``, ``ASLEEP`` or None: the switch in force at this moment.
+
+    None -- follow sleep hours -- when there is no switch, when it has ended,
+    when it claims to end more than WAKE_MAX_S from now, and when this
+    panel's clock has not been set: ``until`` is a wall-clock time, and a
+    panel with no RTC that compared it with a clock hours out would either
+    drop a switch just pressed or keep one for ever. Sleep hours are not
+    judged without a clock either, so nothing is lost by it.
+    """
+    wake = display.wake
+    if wake is None or now_utc is None:
+        return None
+    left = wake.until_ms / 1000 - now_utc.timestamp()
+    if left <= 0 or left > WAKE_MAX_S:
+        return None
+    return wake.mode
 
 
 def _whole_minutes(value, ceiling: int) -> int | None:
@@ -276,10 +322,16 @@ def parse_display(payload) -> Display:
         sleep = _sleep_from(block["sleep"])
         if sleep is None:
             _complain_once("display:sleep", "sleep hours are not HH:MM to HH:MM in a zone this panel knows; no sleep hours")
+    wake = None
+    if block.get("wake") is not None:
+        wake = _wake_from(block["wake"])
+        if wake is None:
+            _complain_once("display:wake", "the sleep switch is not awake or asleep until a moment; following sleep hours")
     return Display(
         countdown_lead_s=default.countdown_lead_s if lead is None else lead * 60,
         final_hold_s=default.final_hold_s if hold is None else hold * 60,
         sleep=sleep,
+        wake=wake,
     )
 
 
@@ -660,10 +712,12 @@ def presentation(now: float, now_utc: datetime | None, screen: str,
     2. A live game -- LIVE *and* a document less than STALE_FRAME_S old --
        beats everything, including sleep hours: the late game on the west
        coast is exactly what somebody bought a wall panel for.
-    3. Anything the owner just did, or needs to see, gets GRACE_S on screen
-       whatever the hour -- an owner choosing a game at one in the morning is
-       plainly awake, and needs to see that the panel heard them.
-    4. Sleep hours.
+    0. The owner's switch set to asleep is dark, live game or not; set to
+       awake it stands in for "not in sleep hours" below. It ends by itself.
+    3. Sleep hours. Choosing a game does not light a sleeping panel.
+    4. Anything the owner just did, or needs to see, gets GRACE_S on screen
+       outside sleep hours -- past the countdown lead, say -- so that they
+       can see the panel heard them.
     5. Then, and only then, the windows: a LIVE document that has stopped
        arriving for up to STALE_AFTER_S, a countdown from
        ``countdown_lead_s`` before puck drop until STALE_AFTER_S after it, a
@@ -673,6 +727,12 @@ def presentation(now: float, now_utc: datetime | None, screen: str,
     """
     shift = shift_at(now)
     within_grace = now - last_change < GRACE_S
+    switch = wake_now(display, now_utc)
+    # Sleep hours, or the owner's switch in their place. The grace period is
+    # NOT an exception any more (the owner's ruling, 2026-09-21: a game chosen
+    # at one in the morning lit the panel at one in the morning). Somebody who
+    # wants the panel on during its sleep hours says so, with the switch.
+    sleeping = switch == ASLEEP or (switch != AWAKE and asleep(now_utc, display.sleep))
     if screen != screens.SCOREBOARD:
         # The screens that ask for help are never off -- except this one.
         # "Cannot reach the service" is not a request for somebody to come
@@ -683,13 +743,21 @@ def presentation(now: float, now_utc: datetime | None, screen: str,
         # nights as the outage lasts. It obeys sleep hours like the game
         # does, and comes back by itself when the window ends if it is still
         # down.
-        if screen == screens.NO_SERVICE and not within_grace \
-                and asleep(now_utc, display.sleep):
+        #
+        # The switch set to asleep does not hide the others. A panel that
+        # cannot say "I have no network" is just broken, and one that has no
+        # link cannot be told to wake up again.
+        if screen == screens.NO_SERVICE and sleeping:
             return Presentation(OFF, (0, 0))
         return Presentation(MESSAGE, shift)
+    if switch == ASLEEP:
+        # Dark because somebody said so, and that includes a live game: it
+        # is the one way to turn a game off from across the room. It ends by
+        # itself (wake_now), so the next night's game is not lost to it.
+        return Presentation(OFF, (0, 0))
     if live_and_fresh(state, state_age):
         return Presentation(GAME, shift)
-    if not within_grace and asleep(now_utc, display.sleep):
+    if sleeping:
         return Presentation(OFF, (0, 0))
     if state is not None and state.state in IN_PLAY:
         # A LIVE document that has stopped arriving. It degrades in two

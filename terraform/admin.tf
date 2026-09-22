@@ -430,6 +430,7 @@ locals {
     "PUT /api/devices/{thing}/game",
     "PUT /api/devices/{thing}/display",
     "PUT /api/devices/{thing}/schedule",
+    "PUT /api/devices/{thing}/wake",
     "GET /api/schedule",
     "GET /api/settings",
     "PUT /api/settings",

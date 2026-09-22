@@ -197,3 +197,31 @@ test("a panel with no name of its own is not labelled with its id twice", () => 
   const named = every(claimedRow(makeEl(fakeDoc()), following)).filter((n) => n.text === "scoreboard-abc");
   assert.equal(named.length, 1, "a named panel still shows its id");
 });
+
+test("the sleep switch: one position pressed, the pressed one does nothing, the others ask", async () => {
+  const { wakeCard } = await import("../assets/panel.js");
+  const { every, fakeDoc: doc } = await import("./fakedoc.js");
+  const el = makeEl(doc());
+  const now = Date.parse("2026-09-21T05:00:00Z");
+  const asked = [];
+  const build = (wake, busy = false) => every(wakeCard(el, { thingName: "scoreboard-7qf2", name: "Den", wake }, { busy: () => busy, setWake: (m) => asked.push(m) }, now, { timeZone: "America/Toronto", locale: "en-US" }));
+  const pressed = (nodes) => nodes.filter((n) => n.tagName === "button").map((b) => [b.text, b.attrs["aria-pressed"]]);
+
+  let nodes = build(undefined);
+  assert.deepEqual(pressed(nodes), [["Follow sleep hours", "true"], ["Awake", "false"], ["Asleep", "false"]]);
+  nodes.find((n) => n.text === "Follow sleep hours").fire("click");
+  assert.deepEqual(asked, [], "already there");
+  nodes.find((n) => n.text === "Asleep").fire("click");
+  assert.deepEqual(asked, ["asleep"]);
+
+  nodes = build({ mode: "asleep", until: Date.parse("2026-09-21T11:00:00Z") });
+  assert.deepEqual(pressed(nodes), [["Follow sleep hours", "false"], ["Awake", "false"], ["Asleep", "true"]]);
+  assert.ok(nodes.some((n) => /Dark until Mon 7:00 AM/.test(n.text)), "says when it ends");
+
+  // A switch that has ended, or that nobody could have made, is not shown as on.
+  for (const dead of [{ mode: "asleep", until: now - 1 }, { mode: "asleep", until: now + 30 * 86400e3 }, { mode: "forever", until: now + 1000 }, "asleep"]) {
+    assert.deepEqual(pressed(build(dead))[0], ["Follow sleep hours", "true"], JSON.stringify(dead));
+  }
+  build(undefined, true).find((n) => n.text === "Awake").fire("click");
+  assert.deepEqual(asked, ["asleep"], "nothing is sent while another action is running");
+});
