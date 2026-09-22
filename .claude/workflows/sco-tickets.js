@@ -128,8 +128,8 @@ You are building Jira ticket ${t.key}: ${t.summary}
 BRIEF (from triage; the ticket is the authority, read it with getJiraIssue if the brief is unclear):
 ${t.brief}
 
-You are in a fresh git worktree of the repository at HEAD of main. Steps:
-1. git checkout -b sco-${t.key.split('-')[1]}
+Work in a worktree of the repository, never in its main checkout. Steps:
+1. cd ${REPO} && git worktree add .claude/worktrees/sco-${t.key.split('-')[1]} -b sco-${t.key.split('-')[1]} main  (if the branch already exists, add the worktree without -b and continue on it). Then cd into that worktree and stay there. Ignore any other worktree the harness may have put you in: it may be a different repository.
 2. Read only the files the brief names and their immediate imports. Find the existing tests for those files and read them: match their style.
 3. Implement. Every behavior change gets a test. Where a rule exists in two languages (testdata/*.json shared cases: presentation-vectors, overlap-vectors, config-documents), change the shared cases and BOTH readers together.
 4. Run the suites the change touches (Go, Python, site, terraform validate). Fix failures. Do not mark tests skipped or delete tests to pass.
@@ -148,7 +148,7 @@ verdict: approve = merge-ready; fix = findings the builder must address (list th
 const fixPrompt = (t, b, r) => `${RULES}
 Ticket ${t.key}. A reviewer returned findings on branch ${b.branch}. Address every blocking and should finding; nits are optional.
 ${JSON.stringify(r.findings, null, 1)}
-In ${REPO}: git worktree add /tmp/claude-1000/wt-${t.key} ${b.branch} (if the path exists, use it). Work there. Amend or add one commit with the same message style and the Co-Authored-By trailer. Run the affected suites. Do not push. Return the structured result with the final commit.`
+In ${REPO}: the branch is checked out at .claude/worktrees/sco-${t.key.split('-')[1]}; work there. Amend or add one commit with the same message style and the Co-Authored-By trailer. Run the affected suites. Do not push. Return the structured result with the final commit.`
 
 const recordPrompt = (t, b, r) => `${RULES}
 Load addCommentToJiraIssue and transitionJiraIssue. On ${t.key}:
@@ -161,13 +161,13 @@ Return the comment id as text.`
 const [reconciled, built] = await parallel([
   () => parallel(by('reconcile').map((t) => () => agent(`${RULES}
 Ticket ${t.key} (${t.summary}) has PR #${t.pr}. Read-only: cd ${REPO} && gh pr view ${t.pr} --json state,mergedAt,title,body. Then load Jira tools.
-- If merged: add a comment "Done: PR #${t.pr} merged <mergedAt>. <one line of what it delivered>" and transition to Done (31). outcome=done. If the PR body says a terraform apply or make site is still owed, do NOT close; comment "PR #${t.pr} merged; awaiting deploy" and outcome=merged-needs-deploy.
+- If merged: read the ticket's comments (getJiraIssue with fields ["comment"]). If the PR body says a terraform apply or make site is owed AND no ticket comment newer than the merge says it was applied or published, do NOT close: comment "PR #${t.pr} merged; awaiting deploy" (only if no such comment exists already) and outcome=merged-needs-deploy. Otherwise add a comment "Done: PR #${t.pr} merged <mergedAt>. <one line of what it delivered>" and transition to Done (31); outcome=done.
 - If open: no change; outcome=open.
 - If closed without merging: comment that the PR was closed unmerged; leave it; outcome=closed-unmerged.`, { schema: RECONCILED, phase: 'Reconcile', effort: 'low', label: `reconcile:${t.key}` }))),
 
   () => pipeline(
     toBuild,
-    (t) => agent(buildPrompt(t), { schema: BUILT, phase: 'Build', isolation: 'worktree', effort: t.effort ?? 'medium', label: `build:${t.key}` }),
+    (t) => agent(buildPrompt(t), { schema: BUILT, phase: 'Build', effort: t.effort ?? 'medium', label: `build:${t.key}` }),
     async (b, t) => {
       if (!b || !b.committed) return { t, b, r: null }
       const r = await agent(reviewPrompt(t, b), { schema: REVIEW, phase: 'Review', effort: t.securityReview ? 'high' : 'medium', label: `review:${t.key}` })

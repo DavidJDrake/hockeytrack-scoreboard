@@ -32,8 +32,10 @@ way from the HockeyTrack checkout).
 2. **Reconcile** (one cheap agent per ticket, in parallel with building). A
    ticket whose PR merged goes to Done with a comment. One whose PR body still
    owes a deploy is commented but left open.
-3. **Build** (one agent per ticket, each in its own git worktree, so they run
-   in parallel without touching each other). Implements with tests, runs the
+3. **Build** (one agent per ticket, each in its own git worktree under
+   `.claude/worktrees/sco-<n>`, made by the agent itself so that it is a
+   worktree of this repository whatever directory the session started in;
+   they run in parallel without touching each other). Implements with tests, runs the
    affected suites, makes one commit on `sco-<n>`. Effort is set by triage:
    low for docs, medium for code, high for security-review tickets.
 4. **Review** (a second agent per branch). Ordinary tickets get a correctness
@@ -52,7 +54,9 @@ Agents never push, tag, open or merge PRs, apply Terraform, publish the site,
 build an image, or change anything in AWS or GitHub. Those are the main
 session's and the owner's. A run ends with **branches to push**; the main
 session pushes them and opens the PRs, the owner merges and deploys, and the
-next run closes the tickets. Tickets that need the owner are listed, not
+next run closes the tickets. The main session comments "applied" or
+"published" on a ticket after a deploy, which is how reconcile knows a
+merged PR that owed one is finished. Tickets that need the owner are listed, not
 guessed at.
 
 ## Why it is shaped this way
