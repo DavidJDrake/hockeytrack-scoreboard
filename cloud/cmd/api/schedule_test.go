@@ -68,6 +68,8 @@ func TestTheSeasonIsServedAsCheckedRows(t *testing.T) {
 
 func TestSavingGamesStoresThemAndPublishesNothing(t *testing.T) {
 	h, st, pub := scheduleHandler(t)
+	var asked []string
+	h.Direct = func(_ context.Context, thing string) error { asked = append(asked, thing); return nil }
 	status, body := put(h, "sub-a", "scoreboard-7qf2", `{"games":[2026020004,2026020001]}`)
 	if status != 200 {
 		t.Fatalf("%d %s", status, body)
@@ -76,15 +78,36 @@ func TestSavingGamesStoresThemAndPublishesNothing(t *testing.T) {
 	if fmt.Sprint(d.Schedule.Games) != "[2026020001 2026020004]" {
 		t.Errorf("stored %+v", d.Schedule)
 	}
-	// Until the director exists a panel follows gameId. Saving a schedule
-	// must not reach a panel by any route.
+	// A panel follows gameId, and the director is what sets it. Saving a
+	// schedule must not reach a panel by any route through this process;
+	// it asks the director, once, for this panel.
 	if len(pub.Messages) != 0 || d.GameID != 0 {
 		t.Errorf("published %d messages, gameId %d", len(pub.Messages), d.GameID)
+	}
+	if fmt.Sprint(asked) != "[scoreboard-7qf2]" {
+		t.Errorf("director asked for %v", asked)
 	}
 	var view scheduleView
 	_ = json.Unmarshal([]byte(body), &view)
 	if !view.Known || len(view.Next) != 2 || view.Next[0].Away != "MTL" {
 		t.Errorf("view %s", body)
+	}
+}
+
+func TestADirectorThatCannotBeReachedDoesNotFailTheSave(t *testing.T) {
+	h, st, _ := scheduleHandler(t)
+	h.Direct = func(context.Context, string) error { return errors.New("throttled") }
+	if status, body := put(h, "sub-a", "scoreboard-7qf2", `{"games":[2026020001]}`); status != 200 {
+		t.Fatalf("%d %s", status, body)
+	}
+	if d, _, _ := st.Get(context.Background(), "scoreboard-7qf2"); len(d.Schedule.Games) != 1 {
+		t.Errorf("stored %+v", d.Schedule)
+	}
+	// And a refused save asks for nothing: there is no change to act on.
+	asked := 0
+	h.Direct = func(context.Context, string) error { asked++; return nil }
+	if status, _ := put(h, "sub-b", "scoreboard-7qf2", `{"games":[2026020001]}`); status != 404 || asked != 0 {
+		t.Errorf("status %d, director asked %d times", status, asked)
 	}
 }
 

@@ -16,9 +16,12 @@ import (
 	_ "time/tzdata"
 
 	"github.com/aws/aws-lambda-go/lambda"
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/iotdataplane"
+	lambdasvc "github.com/aws/aws-sdk-go-v2/service/lambda"
+	lambdatypes "github.com/aws/aws-sdk-go-v2/service/lambda/types"
 
 	"hockeytrack-scoreboard/internal/accounts"
 	"hockeytrack-scoreboard/internal/devices"
@@ -122,6 +125,26 @@ func main() {
 	}
 	if gamesTable := os.Getenv("GAMES_TABLE"); gamesTable != "" {
 		h.Game = gamestore.NewDynamo(db, gamesTable).Get
+	}
+	// Optional too: without it a saved schedule is acted on within the
+	// minute. Asynchronous, so a slow director never holds a save; this role
+	// may invoke that one function and nothing else (admin.tf).
+	if fn := os.Getenv("DIRECTOR_FUNCTION"); fn != "" {
+		client := lambdasvc.NewFromConfig(cfg)
+		h.Direct = func(ctx context.Context, thing string) error {
+			payload, err := json.Marshal(struct {
+				Thing string `json:"thing"`
+			}{thing})
+			if err != nil {
+				return err
+			}
+			_, err = client.Invoke(ctx, &lambdasvc.InvokeInput{
+				FunctionName:   aws.String(fn),
+				InvocationType: lambdatypes.InvocationTypeEvent,
+				Payload:        payload,
+			})
+			return err
+		}
 	}
 	lambda.Start(h.Handle)
 }

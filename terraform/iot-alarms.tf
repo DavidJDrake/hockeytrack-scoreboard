@@ -255,39 +255,56 @@ resource "aws_cloudwatch_metric_alarm" "iot_publish_out_auth_error" {
 
 # --- Operational, not security: one of this stack's own Lambdas is broken -
 #
-# PublishRetained.AuthError means scoreboard-reducer, scoreboard-today, or
-# scoreboard-api (the only three identities in this account with any
-# iot:Publish grant -- iam.tf, admin.tf) had a retained publish denied.
-# That's this stack's own Lambda losing a permission it's supposed to have,
-# exactly as happened 2026-09-06/07 before iot:RetainPublish was granted,
-# not a third party probing the device policy. It goes to the ops alerts
-# topic (dlq.tf), not hockeytrack-security-alerts, and does get ok_actions:
-# unlike a probe against the device policy, "the Lambda started working
-# again" is useful information on its own, not just a redundant page.
+# PublishRetained.AuthError means scoreboard-reducer, scoreboard-today,
+# scoreboard-summary, scoreboard-api or scoreboard-director (the only five
+# identities in this account with any iot:Publish grant -- iam.tf,
+# summary.tf, admin.tf, director.tf) had a retained publish denied. That's
+# this stack's own Lambda losing a permission it's supposed to have, exactly
+# as happened 2026-09-06/07 before iot:RetainPublish was granted, not a third
+# party probing the device policy. It goes to the ops alerts topic (dlq.tf),
+# not hockeytrack-security-alerts, and does get ok_actions: unlike a probe
+# against the device policy, "the Lambda started working again" is useful
+# information on its own, not just a redundant page.
 #
-# A fourth identity now touches IoT: scoreboard-enroll (enroll.tf) holds
+# scoreboard-enroll (enroll.tf) also touches IoT: it holds
 # CreateCertificateFromCsr, thing registration, and AttachPolicy/DetachPolicy
 # pinned to the device policy, so it can mint and register a device identity.
 # It holds no iot:Publish or iot:RetainPublish grant anywhere and never
-# publishes, so it cannot produce this metric and is not a fourth suspect
-# below.
+# publishes, so it cannot produce this metric and is not a suspect below.
+#
+# The config topics, scoreboard/<thing>/config, in particular (SCO-42): the
+# API role and the director role are the only two grants to that shape, and
+# a device's own policy (iot.tf) grants no publish at all. So any other
+# principal that tries -- a device, a stolen certificate, a role in this
+# account without the grant -- is denied at the broker and lands on the
+# PublishIn.AuthError alarm above (MQTT) or this one (retained, over HTTPS),
+# both of which already fire on a single datapoint. That is the detection
+# for "a principal other than the API or the director published a config",
+# extended by naming the director here rather than by a new alarm. What it
+# does not cover, plainly: a principal that already holds a broad iot:Publish
+# grant -- an administrator's own keys, or a role changed to carry one --
+# publishes successfully, and a successful data-plane publish is neither
+# logged at ERROR (iot-logging.tf) nor recorded by CloudTrail, which does not
+# log IoT data-plane calls. Turning IoT logging up to INFO would record it at
+# the cost the comment in iot-logging.tf describes; that widening is a
+# separate decision. Until then the control on that path is the IAM change
+# detection HockeyTrack's security rules provide, not this file.
 resource "aws_cloudwatch_metric_alarm" "iot_publish_retained_auth_error" {
   alarm_name        = "scoreboard-iot-publish-retained-auth-error"
   alarm_description = <<-EOT
-    scoreboard-reducer, scoreboard-today, scoreboard-summary, or
-    scoreboard-api was denied a retained publish -- the
-    iot:RetainPublish/iot:Publish grant in iam.tf, summary.tf or admin.tf
-    is missing or wrong, or the Lambda's topic changed without
-    a matching policy update. Devices reconnecting will not get current
-    game state (reducer/today) or a fresh config (api) until this is
-    fixed. This metric has been observed tagged Protocol=MQTT even for the
-    reducer's HTTPS data-plane calls (see the top of this file) -- don't
-    assume Protocol=HTTP and look under the wrong dimension by hand; this
-    alarm already aggregates across all of them. The failing role/topic
-    are in the AWSIotLogsV2 CloudWatch log group (ERROR level); the
-    Lambda's own error is in /aws/lambda/scoreboard-reducer,
-    /aws/lambda/scoreboard-today, /aws/lambda/scoreboard-summary, or
-    /aws/lambda/scoreboard-api.
+    scoreboard-reducer, -today, -summary, -api or -director was denied a
+    retained publish: the iot:RetainPublish/iot:Publish grant in iam.tf,
+    summary.tf, admin.tf or director.tf is missing or wrong, or the topic
+    changed without a policy update. Reconnecting devices will not get
+    current game state (reducer/today) or a fresh config (api/director)
+    until fixed. If the denied topic is scoreboard/<thing>/config and the
+    principal is NOT scoreboard-api or scoreboard-director, this is not
+    operational: something else tried to configure a panel, and only those
+    two roles may; treat it as this file's security alarms are treated.
+    The metric has been seen tagged Protocol=MQTT even for HTTPS data-plane
+    calls (top of this file); this alarm aggregates across all dimensions.
+    The failing role/topic are in the AWSIotLogsV2 log group (ERROR); the
+    Lambda's own error is in /aws/lambda/scoreboard-<function>.
   EOT
 
   comparison_operator = "GreaterThanThreshold"

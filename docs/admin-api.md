@@ -248,10 +248,14 @@ minutes. It no longer does (owner's ruling, 2026-09-21); this is how to say
 
 ### Game schedules
 
-What an owner has asked a panel to show. **Nothing here reaches a panel yet:**
-until the director exists (SCO-42) a panel follows the one `gameId` set with
-`PUT /api/devices/{thing}/game`, and these routes only record and check the
-owner's wishes. Saving a schedule publishes nothing, and a test holds that.
+What an owner has asked a panel to show. **Nothing here reaches a panel
+through the API:** these routes record and check the owner's wishes, and
+saving a schedule publishes nothing from this process (a test holds that).
+The director (SCO-42, `cloud/cmd/director`, its own function and role) turns
+the schedule into the one `gameId` a panel follows, once a minute and, since
+a save asks it to run for that panel, at once. `PUT /api/devices/{thing}/game`
+still works and wins: a game the owner puts on a panel by hand stays until it
+is over, and then the schedule resumes.
 
 #### `GET /api/schedule`
 

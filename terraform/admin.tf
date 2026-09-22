@@ -291,12 +291,24 @@ data "aws_iam_policy_document" "api" {
     actions   = ["dynamodb:Query"]
     resources = ["${aws_dynamodb_table.devices.arn}/index/*"]
   }
-  # The one identity in this account allowed to publish a device's config, and
-  # only to that topic shape. It cannot touch hockeytrack/games/*, which the
-  # reducer owns.
+  # One of exactly two identities in this account allowed to publish a
+  # device's config, and only to that topic shape. The other is
+  # scoreboard-director (director.tf, SCO-42), which sends a scheduled
+  # panel its current game; before it, this role was the only one. Neither
+  # can touch hockeytrack/games/*, which the reducer owns. iot-alarms.tf
+  # names both as the only sources of a retained publish to that shape.
   statement {
     actions   = ["iot:Publish", "iot:RetainPublish"]
     resources = ["arn:aws:iot:${var.region}:${data.aws_caller_identity.current.account_id}:topic/scoreboard/*/config"]
+  }
+  # After a schedule is saved, ask the director to run for that panel now
+  # rather than within the minute. This one function, asynchronously; the
+  # API works out and publishes no scheduled game itself, so the director's
+  # narrower policy is the one that governs what a schedule can put on a
+  # panel.
+  statement {
+    actions   = ["lambda:InvokeFunction"]
+    resources = [aws_lambda_function.director.arn]
   }
 }
 
@@ -324,6 +336,9 @@ resource "aws_lambda_function" "api" {
       SCHEDULE_URL   = var.schedule_url
       USER_POOL_ID   = aws_cognito_user_pool.admin.id
       APP_CLIENT_ID  = aws_cognito_user_pool_client.site.id
+      # The function, not its ARN: the invoke is same-account and the name
+      # is what the SDK takes.
+      DIRECTOR_FUNCTION = aws_lambda_function.director.function_name
     }
   }
   depends_on = [aws_cloudwatch_log_group.api]

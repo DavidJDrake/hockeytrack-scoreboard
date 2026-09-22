@@ -56,12 +56,18 @@ type Device struct {
 	// leaves unset shows the account's default through.
 	Display settings.Settings
 	// Schedule is the games the owner has asked this panel to show, and the
-	// conflicts among them the owner has answered. Nothing acts on it until
-	// the director exists; GameID is still what the panel follows.
+	// conflicts among them the owner has answered. The director
+	// (internal/director) turns it into GameID once a minute; GameID is still
+	// what the panel follows.
 	Schedule schedule.Panel
 	// Wake is the owner's hand on the sleep switch, with its own end. nil
 	// means the panel follows its sleep hours.
 	Wake *settings.Wake
+	// Sent is the director's marker: the game it last sent this panel, 0 for
+	// never. Only MarkSent writes it. When GameID is not Sent, the owner
+	// chose the game by hand since, and the director stands aside until it
+	// is over.
+	Sent int64
 }
 
 // Store persists Devices. Claim is the only operation that may bind an owner,
@@ -87,6 +93,18 @@ type Store interface {
 	// Unbind removes the owner from a device, leaving it claimable again.
 	// Returns ErrNotOwner if the caller is not the current owner.
 	Unbind(ctx context.Context, thingName, owner string) error
+	// ListScheduled returns every claimed device with a schedule: the
+	// director's work list. Unclaimed devices and panels with nothing asked
+	// for are left out.
+	ListScheduled(ctx context.Context) ([]Device, error)
+	// MarkSent is the director's one write: the game it just sent, the stamp
+	// it sent with it, and its own marker, on a panel the given owner still
+	// holds. Nothing else on the row changes. Returns ErrNotOwner if the
+	// panel changed hands since it was read, so a game is never put back on
+	// the row of a panel its owner has let go of. The row only: the director
+	// publishes before it records, so the panel may still receive that one
+	// document (internal/director/run.go says so where it happens).
+	MarkSent(ctx context.Context, thingName, owner string, gameID, chosenAt int64) error
 }
 
 // Fake is an in-memory Store for tests.
@@ -155,9 +173,37 @@ func (f *Fake) Update(_ context.Context, in Device) error {
 	if d.Owner != in.Owner {
 		return ErrNotOwner
 	}
-	// Only these are mutable; ThingName and Owner are not.
+	// Only these are mutable; ThingName and Owner are not, and Sent is the
+	// director's alone.
 	d.Name, d.GameID, d.ChosenAt, d.Display, d.Schedule, d.Wake = in.Name, in.GameID, in.ChosenAt, in.Display, in.Schedule, in.Wake
 	f.items[in.ThingName] = d
+	return nil
+}
+
+func (f *Fake) ListScheduled(_ context.Context) ([]Device, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []Device
+	for _, d := range f.items {
+		if d.Owner != "" && !d.Schedule.IsZero() {
+			out = append(out, d)
+		}
+	}
+	return out, nil
+}
+
+func (f *Fake) MarkSent(_ context.Context, thingName, owner string, gameID, chosenAt int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	d, ok := f.items[thingName]
+	if !ok {
+		return ErrNotFound
+	}
+	if d.Owner != owner {
+		return ErrNotOwner
+	}
+	d.GameID, d.ChosenAt, d.Sent = gameID, chosenAt, gameID
+	f.items[thingName] = d
 	return nil
 }
 
@@ -173,7 +219,7 @@ func (f *Fake) Unbind(_ context.Context, thingName, owner string) error {
 	}
 	// The next owner inherits nothing: not the name, the game, the stamp,
 	// the settings, or which games the last owner liked to watch.
-	d.Owner, d.Name, d.GameID, d.ChosenAt, d.Display, d.Schedule, d.Wake = "", "", 0, 0, settings.Settings{}, schedule.Panel{}, nil
+	d.Owner, d.Name, d.GameID, d.ChosenAt, d.Display, d.Schedule, d.Wake, d.Sent = "", "", 0, 0, settings.Settings{}, schedule.Panel{}, nil, 0
 	f.items[thingName] = d
 	return nil
 }
