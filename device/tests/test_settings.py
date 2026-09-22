@@ -1,8 +1,8 @@
 import pytest
 
 from scoreboard.netcfg import Network, WifiSettings
-from scoreboard.settings import (Settings, LIST, PASSWORD, WORKING, RESULT,
-                                 CONFIRM_RESET)
+from scoreboard.settings import (Settings, LIST, PASSWORD, SCANNING, WORKING,
+                                 RESULT, CONFIRM_RESET)
 
 NETWORKS = [Network("HomeNet", 88, True), Network("CoffeeShop", 40, False)]
 
@@ -138,3 +138,62 @@ def test_rescan_requests_a_scan():
     s = fresh()
     s.key("f5")
     assert s.pending == ("scan", None)
+
+
+# --------------------------------------------------------------------------
+# Requests are made on one thread and answered from another (SCO-25)
+# --------------------------------------------------------------------------
+
+
+def test_a_request_changes_the_mode_at_once():
+    # The frame drawn between the keypress and the caller taking the request
+    # must already say what the screen is waiting for.
+    s = fresh()
+    s.key("f5")
+    assert s.mode == SCANNING and s.pending == ("scan", None)
+    t = Settings()
+    t.request("scan")
+    assert t.mode == SCANNING
+
+
+def test_taking_a_request_clears_it_and_keeps_the_mode():
+    s = fresh()
+    s.key("f5")
+    assert s.take() == ("scan", None)
+    assert s.pending is None and s.mode == SCANNING
+
+
+def test_a_result_for_an_earlier_request_does_not_lose_a_waiting_one():
+    # A reset asked for by the button hold while a scan was in flight: the
+    # scan's result puts the screen back on the list, and the reset must
+    # still be there to take, with the mode set right again when it is.
+    s = fresh()
+    s.key("f5")
+    s.take()
+    s.request("reset")
+    s.replace(list(NETWORKS))          # the scan came back
+    assert s.mode == LIST
+    assert s.pending == ("reset", None)
+    assert s.take() == ("reset", None)
+    assert s.mode == WORKING
+
+
+@pytest.mark.parametrize("name,char", [("escape", ""), ("character", "s"),
+                                       ("f5", ""), ("return", "\r"), ("down", "")])
+def test_nothing_is_accepted_while_scanning(name, char):
+    # A second S while scanning is the case SCO-25 names: it must not open a
+    # second screen or start a second scan, and it does not close this one
+    # either, because the result on its way has nowhere else to go.
+    s = fresh()
+    s.key("f5")
+    s.take()
+    s.key(name, char)
+    assert s.mode == SCANNING and not s.closed and s.pending is None
+
+
+def test_the_scan_result_puts_the_screen_on_the_list():
+    s = Settings()
+    s.request("scan")
+    s.take()
+    s.replace(list(NETWORKS))
+    assert s.mode == LIST and s.selected == NETWORKS[0]

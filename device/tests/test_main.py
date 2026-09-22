@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -22,8 +23,8 @@ from scoreboard.main import (COUNTDOWN, FINAL, GAME, GRACE_S, IGNORE,
                              needs_link_help, presentation, shift_at)
 from scoreboard.model import GameState
 from scoreboard.render import H, STALE_FRAME_S, W
-from scoreboard.netcfg import NetworkError, WifiSettings
-from scoreboard.settings import RESULT, Settings
+from scoreboard.netcfg import Network, NetworkError, WifiSettings
+from scoreboard.settings import LIST, RESULT, SCANNING, Settings
 
 FIX = Path(__file__).parent / "fixtures"
 DEVICE = Path(__file__).resolve().parent.parent
@@ -1010,8 +1011,23 @@ def test_the_screens_that_sit_there_longest_are_shifted_too():
 # --------------------------------------------------------------------------
 
 
+def radio_idle(timeout: float = 5.0) -> None:
+    """Wait for the radio worker's thread, if one is running, to finish.
+
+    The worker puts its result on the loop's queue before it exits, so once
+    this returns the result is there to be drained. Tests that drive the
+    loop call it at the top of each pass, which makes "the poll answered"
+    happen on the pass after it was asked, every time, rather than on
+    whichever pass the scheduler happened to allow.
+    """
+    for t in threading.enumerate():
+        if t.name == "radio":
+            t.join(timeout=timeout)
+            assert not t.is_alive(), "the radio worker did not finish"
+
+
 def a_loop_that_receives(monkeypatch, tmp_path, script, game_id=2026020001, passes=5,
-                         connect=True):
+                         connect=True, nm=None, join_radio=None):
     """Run the real render loop, delivering MQTT messages to it.
 
     The two lines that rearm an aged-out final live in the loop, not in a
@@ -1022,12 +1038,23 @@ def a_loop_that_receives(monkeypatch, tmp_path, script, game_id=2026020001, pass
     scripted for pass n is drained by pass n, and the returned row n is what
     presentation() saw once it had been acted on. Returns one row per pass.
 
-    One entry is not a callback: ``("jump", (seconds,))`` moves the panel's
+    Two entries are not callbacks. ``("jump", (seconds,))`` moves the panel's
     monotonic clock forward before that pass, which is how a test says "and
     then eleven minutes went by" without waiting for them. It has to be the
     real clock rather than a value passed in, because the loop reads
     time.monotonic() in six places and the point of these tests is what the
-    loop does with it.
+    loop does with it. ``("key", (pygame.K_s, "s"))`` is a keypress delivered
+    on that pass, the way the settings screen is opened and driven.
+
+    ``nm`` replaces the stand-in NetworkManager, for tests of what the loop
+    does while the radio is slow or failing. Its calls run on the radio
+    worker's thread, and by default each pass waits for that thread before
+    it starts (see radio_idle); ``join_radio`` is a predicate on the pass
+    number for tests that need a pass to run while the worker is blocked.
+
+    Each row also carries ``settings``: what draw_settings was handed on
+    that pass, as (panel, mode, networks), or None if the screen was not
+    drawn.
     """
     (tmp_path / "device.json").write_text(json.dumps(
         {"endpoint": "localhost", "thingName": "scoreboard-test"}))
@@ -1064,7 +1091,7 @@ def a_loop_that_receives(monkeypatch, tmp_path, script, game_id=2026020001, pass
             raise NetworkError("no nmcli in a test")
 
     monkeypatch.setattr(main_module, "Link", FakeLink)
-    monkeypatch.setattr(main_module, "NetworkManager", FakeNM)
+    monkeypatch.setattr(main_module, "NetworkManager", nm or FakeNM)
 
     seen = []
     real = main_module.presentation
@@ -1076,22 +1103,42 @@ def a_loop_that_receives(monkeypatch, tmp_path, script, game_id=2026020001, pass
     real_monotonic = time.monotonic
     monkeypatch.setattr(time, "monotonic", lambda: real_monotonic() + ahead["s"])
 
+    drawn = {}
+    real_draw_settings = screens.draw_settings
+
+    def spy_draw_settings(layout, assets, panel, status, build):
+        drawn[passed["n"] - 1] = (panel, panel.mode, list(panel.networks))
+        real_draw_settings(layout, assets, panel, status, build)
+
+    monkeypatch.setattr(screens, "draw_settings", spy_draw_settings)
+
     def fake_get(*a, **k):
         n = passed["n"]
         passed["n"] += 1
+        keys = []
         for name, args in script.get(n, []):
             if name == "jump":
                 ahead["s"] += args[0]
                 continue
+            if name == "key":
+                keys.append(pygame.event.Event(pygame.KEYDOWN, key=args[0], unicode=args[1]))
+                continue
+            if name == "do":
+                args[0]()       # anything else a test needs to happen at the top of this pass
+                continue
             hooks[name](*args)
-        return [] if n < passes else [pygame.event.Event(pygame.QUIT)]
+        if join_radio is None or join_radio(n):
+            radio_idle()
+        return keys if n < passes else [pygame.event.Event(pygame.QUIT)]
 
     monkeypatch.setattr(pygame.event, "get", fake_get)
     main_module.main()
+    radio_idle()
     # (now, now_utc, screen, state, state_age, final_seen, last_change, display)
     return [dict(zip(("now", "now_utc", "screen", "state", "state_age",
-                      "final_seen", "last_change", "display"), args))
-            for args in seen]
+                      "final_seen", "last_change", "display"), args),
+                 settings=drawn.get(n))
+            for n, args in enumerate(seen)]
 
 
 def test_re_choosing_the_same_game_restarts_the_hold_in_the_real_loop(tmp_path, monkeypatch):
@@ -1828,6 +1875,246 @@ def test_an_unrecognised_pending_action_gets_a_generic_message_not_a_crash(monke
     assert panel.mode == RESULT
 
 
+# --------------------------------------------------------------------------
+# The radio is talked to off the render thread
+#
+# nm.status() is three nmcli calls and nm.scan() one more, each bounded at
+# ten seconds or longer. Run on the render thread they held the whole
+# display for as long as they took, and a panel with a wedged nmcli was
+# indistinguishable from a crashed one: nothing moved, nothing said why.
+# --------------------------------------------------------------------------
+
+
+NETWORKS = [Network("HomeNet", 88, True), Network("CoffeeShop", 40, False)]
+
+
+class SlowRadio:
+    """A NetworkManager whose scan waits until the test lets it go.
+
+    Class-level state, because the loop constructs the class itself; every
+    test that uses it calls reset() first.
+    """
+    go = threading.Event()
+    calls: list = []
+    on_threads: list = []
+    scan_raises: Exception | None = None
+
+    @classmethod
+    def reset(cls, raises=None):
+        cls.go = threading.Event()
+        cls.calls = []
+        cls.on_threads = []
+        cls.scan_raises = raises
+
+    def status(self):
+        SlowRadio.calls.append("status")
+        SlowRadio.on_threads.append(threading.current_thread().name)
+
+        class Online:
+            online, ssid, ip = True, "HomeNet", "10.0.0.5"
+        return Online()
+
+    def scan(self):
+        SlowRadio.calls.append("scan")
+        SlowRadio.on_threads.append(threading.current_thread().name)
+        assert SlowRadio.go.wait(timeout=10), "the test never released the scan"
+        if SlowRadio.scan_raises is not None:
+            raise SlowRadio.scan_raises
+        return list(NETWORKS)
+
+    def apply(self, settings):
+        SlowRadio.calls.append("apply")
+        SlowRadio.on_threads.append(threading.current_thread().name)
+
+
+def test_the_panel_keeps_drawing_while_the_radio_scans(tmp_path, monkeypatch):
+    # SCO-25, the failure itself: S used to call nm.scan() and nm.status()
+    # inline, and the clock stopped for as long as they took. Here the scan
+    # is held for three passes; the loop must go on drawing frames, take a
+    # state document that arrives meanwhile, and show "Scanning..." rather
+    # than nothing -- then fill the list in when the result comes.
+    SlowRadio.reset()
+    live = (FIX / "state_live.json").read_bytes()
+    passes = a_loop_that_receives(monkeypatch, tmp_path, {
+        0: [("key", (pygame.K_s, "s"))],
+        2: [("on_state", (2026020001, live))],
+        4: [("do", (SlowRadio.go.set,))],
+    }, passes=6, nm=SlowRadio, join_radio=lambda n: n >= 4)
+
+    # Passes 1 through 3 ran with the scan still blocked.
+    for n in (1, 2, 3):
+        assert passes[n]["screen"] == screens.SETTINGS
+        assert passes[n]["settings"][1] == SCANNING, passes[n]["settings"]
+        assert passes[n]["settings"][2] == [], "the list was filled before the scan returned"
+    assert passes[2]["state"] is not None and passes[2]["state"].state == "LIVE", \
+        "a state document delivered during the scan was not taken"
+    # Pass 4 released the scan and waited for the worker, so it is the pass
+    # that drains the result.
+    assert passes[4]["settings"][1] == LIST
+    assert [n.ssid for n in passes[4]["settings"][2]] == ["HomeNet", "CoffeeShop"]
+    assert passes[4]["settings"][0] is passes[1]["settings"][0], "a second screen was opened"
+
+
+def test_a_scan_that_fails_on_the_worker_says_so_on_the_screen(tmp_path, monkeypatch):
+    # The error paths carry_out had, now crossing a thread: something other
+    # than NetworkError becomes the fixed SAFE_ERRORS text, never its own
+    # words, and the screen is left in RESULT rather than saying
+    # "Scanning..." for ever.
+    SlowRadio.reset(raises=RuntimeError("nmcli exploded with argv in it"))
+    passes = a_loop_that_receives(monkeypatch, tmp_path, {
+        0: [("key", (pygame.K_s, "s"))],
+        2: [("do", (SlowRadio.go.set,))],
+    }, passes=4, nm=SlowRadio, join_radio=lambda n: n >= 2)
+
+    assert passes[1]["settings"][1] == SCANNING
+    panel, mode, networks = passes[2]["settings"]
+    assert mode == RESULT
+    assert panel.message == "Could not scan for networks"
+    assert "argv" not in panel.message
+
+
+def test_a_second_s_press_while_scanning_starts_no_second_scan(tmp_path, monkeypatch):
+    # One radio action at a time is the rule; the way S is wired makes it so
+    # by construction, and this pins it: the second press reaches the open
+    # screen, which ignores it while scanning.
+    SlowRadio.reset()
+    passes = a_loop_that_receives(monkeypatch, tmp_path, {
+        0: [("key", (pygame.K_s, "s"))],
+        1: [("key", (pygame.K_s, "s"))],
+        2: [("key", (pygame.K_s, "s"))],
+        3: [("do", (SlowRadio.go.set,))],
+    }, passes=5, nm=SlowRadio, join_radio=lambda n: n >= 3)
+
+    assert SlowRadio.calls.count("scan") == 1, SlowRadio.calls
+    screens_seen = {id(passes[n]["settings"][0]) for n in range(1, 5)}
+    assert len(screens_seen) == 1, "a second settings screen was opened"
+    assert passes[3]["settings"][1] == LIST
+
+
+def test_no_nmcli_call_runs_on_the_render_thread(tmp_path, monkeypatch):
+    # The acceptance test for SCO-25 stated directly: every call the loop
+    # makes on the NetworkManager -- opening the screen, a rescan, a connect
+    # and the network poll -- is made on the worker's thread. The loop's own
+    # thread is the one pygame draws on.
+    SlowRadio.reset()
+    SlowRadio.go.set()
+    a_loop_that_receives(monkeypatch, tmp_path, {
+        0: [("key", (pygame.K_s, "s"))],
+        2: [("key", (pygame.K_F5, ""))],                   # rescan
+        4: [("key", (pygame.K_DOWN, "")), ("key", (pygame.K_RETURN, "\r"))],  # connect to the open one
+    }, passes=7, nm=SlowRadio, connect=False)             # connect=False: the poll runs too
+
+    assert {"scan", "status", "apply"} <= set(SlowRadio.calls), SlowRadio.calls
+    assert SlowRadio.on_threads, "no radio call was made at all"
+    assert all(name == "radio" for name in SlowRadio.on_threads), \
+        f"a radio call ran on the wrong thread: {SlowRadio.on_threads}"
+
+
+def test_the_network_poll_result_arrives_through_the_queue(tmp_path, monkeypatch):
+    # With the link down the poll decides OFFLINE against NO_SERVICE. Its
+    # answer now comes back as an event: the pass after the one that asked
+    # has it, and a poll that fails reads as "not online" rather than as
+    # whatever the last answer was.
+    monkeypatch.setattr(main_module, "LINK_HELP_AFTER_S", 0.0)
+    answers = []
+
+    class Flaky:
+        def status(self):
+            answer = answers.pop(0)
+            if isinstance(answer, Exception):
+                raise answer
+
+            class Reported:
+                online, ssid, ip = answer, "HomeNet", None
+            return Reported()
+
+        def scan(self):
+            raise AssertionError("not called")
+
+    answers[:] = [True, NetworkError("radio is off")]
+    passes = a_loop_that_receives(monkeypatch, tmp_path, {
+        2: [("jump", (main_module.NET_POLL_S + 1,))],   # the next poll is due
+    }, passes=4, nm=Flaky, connect=False)
+
+    assert passes[0]["screen"] == screens.OFFLINE, "the first frame waited on the radio"
+    assert passes[1]["screen"] == screens.NO_SERVICE, "the first poll's answer did not arrive"
+    assert passes[3]["screen"] == screens.OFFLINE, "a failed poll was not read as offline"
+    assert answers == [], "a poll was skipped"
+
+
+def test_the_worker_survives_a_status_that_fails_during_a_poll():
+    # perform() returns rather than raises for every action, and a poll that
+    # cannot ask nmcli is answered with no status, which the loop reads as
+    # "not online". A poll that raised would have ended the worker's thread
+    # with ``busy`` still set.
+    class Broken:
+        def status(self):
+            raise RuntimeError("nmcli is not installed")
+
+    outcome = main_module.perform("poll", None, Broken(), cfg=None)
+    assert outcome == main_module.Outcome()
+
+
+def test_a_request_kind_the_worker_does_not_know_is_still_answered():
+    outcome = main_module.perform("frobnicate", None, object(), cfg=None)
+    assert outcome.message == "Something went wrong"
+
+
+def test_the_worker_runs_one_action_at_a_time():
+    import queue
+    events: queue.Queue = queue.Queue()
+
+    class Instant:
+        def status(self):
+            raise NetworkError("no")
+
+    radio = main_module.RadioWorker(events, Instant(), cfg=None)
+    assert radio.submit("poll", None, None)
+    assert not radio.submit("poll", None, None), "a second action started while the first was in flight"
+    kind, what, panel, outcome = events.get(timeout=5)
+    assert (kind, what, panel) == ("radio", "poll", None)
+    # busy is the loop's to clear, once it has the result in hand.
+    assert radio.busy
+    radio.finished()
+    assert radio.submit("poll", None, None)
+    radio_idle()
+
+
+def test_a_button_hold_reset_goes_through_the_worker(tmp_path, monkeypatch):
+    # The button-hold reset used to call factory_reset -- nm.forget_all(),
+    # one more nmcli call -- inline. Now it is a request like any other.
+    # (enroll_stop is set at the hold itself, before the request is even
+    # taken, and again in perform()'s reset branch; the thread-stopping
+    # side of I-1 is pinned by test_a_factory_reset_stops_the_enrollment_thread.)
+    monkeypatch.setattr(main_module, "enrollment_thread", lambda *a, **k: None)
+    seen = []
+
+    class Radio:
+        def status(self):
+            raise NetworkError("no")
+
+        def scan(self):
+            raise AssertionError("not called")
+
+        def forget_all(self):
+            seen.append(threading.current_thread().name)
+
+    held = {"n": 0}
+
+    class Holds:
+        def update(self, a, b, now):
+            held["n"] += 1
+            return held["n"] == 1     # fires once, on the first pass
+
+    monkeypatch.setattr(main_module.buttons, "HoldWatcher", Holds)
+    monkeypatch.setattr(main_module, "factory_reset", lambda config_dir, nm: nm.forget_all())
+    passes = a_loop_that_receives(monkeypatch, tmp_path, {}, passes=3, nm=Radio)
+
+    assert seen == ["radio"], seen
+    panel, mode, _ = passes[1]["settings"]
+    assert mode == RESULT and panel.message == "Panel erased. Reboot to start again."
+
+
 def test_an_unregistered_panel_reaches_the_display_instead_of_exiting(tmp_path):
     # Before this change main exited 1 on a missing device.json, never reaching
     # the display. Now it must get past config and fail on the bogus driver
@@ -2044,6 +2331,10 @@ def test_the_first_frame_is_painted_before_the_first_network_poll(tmp_path, monk
     one_pass_then_quit(monkeypatch)
 
     main_module.main()
+    # The poll runs on the radio worker, which main() does not wait for.
+    # Waiting here keeps the assertion about ORDER honest: the worker is
+    # only ever started after the flip, so "status" can only follow it.
+    radio_idle()
 
     assert "flip" in order, "the render loop never painted a frame"
     assert "status" in order, "the network poll never ran, so the order proves nothing"

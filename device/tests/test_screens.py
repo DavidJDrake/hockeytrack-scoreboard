@@ -110,6 +110,22 @@ def test_draw_settings_draws_the_selected_network():
     assert len(rows) == screens.NETWORK_WINDOW, rows
 
 
+def test_a_scanning_settings_screen_says_so_and_not_the_list():
+    # SCO-25: the scan runs off the render thread, and this frame is what
+    # the loop draws in the meantime. It has to say "Scanning...", because
+    # the list it would otherwise draw is the OLD list (or nothing), and a
+    # screen that ignores keys over an unchanging list looks hung.
+    pygame.init()
+    panel = Settings(networks=[Network(ssid="HomeNet", signal=70, secured=True)])
+    panel.request("scan")
+    assets = RecordingAssets()
+
+    screens.draw_settings(pygame.Surface((W, H)), assets, panel, None, "development build")
+
+    assert "Scanning..." in assets.drawn, assets.drawn
+    assert not any("HomeNet" in text for text in assets.drawn), assets.drawn
+
+
 def test_a_panel_with_a_code_shows_the_code_screen():
     from scoreboard import enroll
     state = enroll.Waiting("7K4M-9QX2", 1757800000, "friend@example.com")
@@ -294,6 +310,13 @@ def _screens():
     yield "settings", lambda s: screens.draw_settings(
         s, assets, Settings(networks=[Network(ssid="HomeNet", signal=70, secured=True)]),
         None, "development build")
+
+    def scanning():
+        panel = Settings()
+        panel.request("scan")
+        return panel
+    yield "settings, scanning", lambda s: screens.draw_settings(
+        s, assets, scanning(), None, "development build")
 
 
 SCREENS = list(_screens())
