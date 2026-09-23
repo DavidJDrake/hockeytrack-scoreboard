@@ -42,6 +42,12 @@ type Handler struct {
 	// Now is the clock stamped onto a config message as chosenAt. Injected
 	// so a test can move it; nil means time.Now.
 	Now func() time.Time
+	// Direct asks the director (cmd/director) to run for one panel, after
+	// its schedule is saved, so the change is felt now rather than within
+	// the minute. The API never works out or publishes a scheduled game
+	// itself: that stays one principal's job. Nil means the minute sweep is
+	// the only trigger.
+	Direct func(ctx context.Context, thing string) error
 }
 
 func (h *Handler) now() time.Time {
@@ -518,8 +524,9 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 
 	case "PUT /api/devices/{thing}/schedule":
 		// Size, then shape, then ownership, then the rules. Nothing is
-		// published: until the director exists a panel follows gameId, and
-		// this only records what the owner asked for.
+		// published from here: this records what the owner asked for and
+		// asks the director to act on it. A panel still follows gameId, and
+		// the director is what sets it.
 		if len(rawBody) > maxScheduleBody {
 			return fail(400, "invalid schedule")
 		}
@@ -573,6 +580,13 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 		}
 		slog.Info("panel schedule saved", "sub", sub, "thing", d.ThingName,
 			"games", len(d.Schedule.Games), "resolutions", len(d.Schedule.Resolutions))
+		if h.Direct != nil {
+			// The save is done; a director that cannot be reached is a
+			// change felt within the minute, not a failed save.
+			if err := h.Direct(ctx, d.ThingName); err != nil {
+				slog.Warn("director not asked; the next minute will act", "thing", d.ThingName, "err", err)
+			}
+		}
 		return respond(200, scheduleViewOf(d.Schedule, &sn, h.now()))
 
 	case "PATCH /api/devices/{thing}":

@@ -250,3 +250,74 @@ func TestReleasingAPanelClearsItsSchedule(t *testing.T) {
 		t.Errorf("the next owner inherits %+v", d.Schedule)
 	}
 }
+
+func TestTheDirectorsMarkerRoundTripsAndOldRowsReadAsNeverSent(t *testing.T) {
+	item, err := marshalDevice(Device{ThingName: "scoreboard-7qf2", Owner: "sub-a", GameID: 5, Sent: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if back, err := unmarshalDevice(item); err != nil || back.Sent != 5 {
+		t.Fatalf("%+v %v", back, err)
+	}
+	delete(item, "sent") // a row from before the director existed
+	if old, err := unmarshalDevice(item); err != nil || old.Sent != 0 {
+		t.Fatalf("%+v %v", old, err)
+	}
+}
+
+func TestListScheduledIsTheClaimedPanelsWithSomethingAskedFor(t *testing.T) {
+	f, ctx := NewFake(), context.Background()
+	for _, tc := range []struct {
+		thing, owner string
+		games        []int64
+	}{
+		{"scoreboard-01", "sub-a", []int64{2026020001}}, // listed
+		{"scoreboard-02", "sub-b", nil},                 // claimed, nothing asked for
+		{"scoreboard-03", "", []int64{2026020001}},      // never claimed
+	} {
+		_ = f.Register(ctx, tc.thing)
+		if tc.owner != "" {
+			_ = f.Claim(ctx, tc.thing, tc.owner)
+			_ = f.Update(ctx, Device{ThingName: tc.thing, Owner: tc.owner, Schedule: schedule.Panel{Games: tc.games}})
+		} else {
+			f.items[tc.thing] = Device{ThingName: tc.thing, Schedule: schedule.Panel{Games: tc.games}}
+		}
+	}
+	got, err := f.ListScheduled(ctx)
+	if err != nil || len(got) != 1 || got[0].ThingName != "scoreboard-01" {
+		t.Fatalf("%+v %v", got, err)
+	}
+}
+
+func TestMarkSentChangesTheGameTheStampAndTheMarkerAndNothingElse(t *testing.T) {
+	f, ctx := NewFake(), context.Background()
+	_ = f.Register(ctx, "scoreboard-7qf2")
+	_ = f.Claim(ctx, "scoreboard-7qf2", "sub-a")
+	lead := 30
+	before := Device{ThingName: "scoreboard-7qf2", Owner: "sub-a", Name: "Den", GameID: 1, ChosenAt: 10,
+		Display: settings.Settings{CountdownLeadMin: &lead}, Schedule: schedule.Panel{Games: []int64{2026020001}}}
+	_ = f.Update(ctx, before)
+	if err := f.MarkSent(ctx, "scoreboard-7qf2", "sub-b", 2026020001, 20); !errors.Is(err, ErrNotOwner) {
+		t.Fatalf("another owner: err = %v, want ErrNotOwner", err)
+	}
+	if err := f.MarkSent(ctx, "scoreboard-7qf2", "sub-a", 2026020001, 20); err != nil {
+		t.Fatal(err)
+	}
+	after, _, _ := f.Get(ctx, "scoreboard-7qf2")
+	want := before
+	want.GameID, want.ChosenAt, want.Sent = 2026020001, 20, 2026020001
+	if !reflect.DeepEqual(after, want) {
+		t.Errorf("got %+v\nwant %+v", after, want)
+	}
+	// The owner's own save leaves the marker alone: it is the director's
+	// record, not a setting.
+	_ = f.Update(ctx, Device{ThingName: "scoreboard-7qf2", Owner: "sub-a", GameID: 7})
+	if d, _, _ := f.Get(ctx, "scoreboard-7qf2"); d.Sent != 2026020001 || d.GameID != 7 {
+		t.Errorf("after the owner's update: %+v", d)
+	}
+	// Releasing the panel clears it with everything else.
+	_ = f.Unbind(ctx, "scoreboard-7qf2", "sub-a")
+	if d, _, _ := f.Get(ctx, "scoreboard-7qf2"); d.Sent != 0 {
+		t.Errorf("the next owner inherits sent=%d", d.Sent)
+	}
+}

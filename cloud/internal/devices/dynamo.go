@@ -41,6 +41,7 @@ func marshalDevice(d Device) (map[string]types.AttributeValue, error) {
 		"display":   &types.AttributeValueMemberS{Value: settings.Stored(d.Display)},
 		"schedule":  &types.AttributeValueMemberS{Value: schedule.Stored(d.Schedule)},
 		"wake":      &types.AttributeValueMemberS{Value: settings.StoredWake(d.Wake)},
+		"sent":      &types.AttributeValueMemberN{Value: strconv.FormatInt(d.Sent, 10)},
 	}
 	if d.Owner != "" {
 		item["owner"] = &types.AttributeValueMemberS{Value: d.Owner}
@@ -92,6 +93,12 @@ func unmarshalDevice(item map[string]types.AttributeValue) (Device, error) {
 	}
 	if attr, ok := item["wake"].(*types.AttributeValueMemberS); ok {
 		d.Wake = settings.LoadWake(attr.Value)
+	}
+	// Absent on every row the director has not written yet: never sent.
+	if _, ok := item["sent"]; ok {
+		if d.Sent, err = attrN(item, "sent"); err != nil {
+			return Device{}, err
+		}
 	}
 	return d, nil
 }
@@ -239,6 +246,68 @@ func (x *Dynamo) Update(ctx context.Context, d Device) error {
 	return err
 }
 
+// ListScheduled scans the table: there is no index on "has a schedule", and
+// the fleet is a handful of rows. The filter keeps unclaimed devices off the
+// wire; whether a claimed one has anything asked for is decided in Go, from
+// the parsed schedule, so a damaged attribute is "nothing asked for" here as
+// everywhere else. The director's role (terraform/director.tf) is the only
+// one granted Scan on this table.
+func (x *Dynamo) ListScheduled(ctx context.Context) ([]Device, error) {
+	var out []Device
+	var start map[string]types.AttributeValue
+	for {
+		res, err := x.client.Scan(ctx, &dynamodb.ScanInput{
+			TableName:                aws.String(x.table),
+			FilterExpression:         aws.String("attribute_exists(#o)"),
+			ExpressionAttributeNames: map[string]string{"#o": "owner"},
+			ExclusiveStartKey:        start,
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, item := range res.Items {
+			d, err := unmarshalDevice(item)
+			if err != nil {
+				return nil, err
+			}
+			if !d.Schedule.IsZero() {
+				out = append(out, d)
+			}
+		}
+		if start = res.LastEvaluatedKey; len(start) == 0 {
+			return out, nil
+		}
+	}
+}
+
+// MarkSent names exactly three attributes and reads none back. That is what
+// lets the director's IAM policy (terraform/director.tf) list the attributes
+// this write may touch: a request that named anything else -- the schedule,
+// the settings, the owner -- would be refused by IAM before it reached the
+// table, whatever this code did. No ReturnValuesOnConditionCheckFailure
+// either, since a refused write must not hand the whole row back through a
+// path the policy does not describe; the one thing the director needs to
+// know is that the panel is no longer this owner's.
+func (x *Dynamo) MarkSent(ctx context.Context, thingName, owner string, gameID, chosenAt int64) error {
+	_, err := x.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName:                aws.String(x.table),
+		Key:                      map[string]types.AttributeValue{"thingName": &types.AttributeValueMemberS{Value: thingName}},
+		UpdateExpression:         aws.String("SET gameId = :g, chosenAt = :c, sent = :g"),
+		ConditionExpression:      aws.String("#o = :o"),
+		ExpressionAttributeNames: map[string]string{"#o": "owner"},
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":g": &types.AttributeValueMemberN{Value: strconv.FormatInt(gameID, 10)},
+			":c": &types.AttributeValueMemberN{Value: strconv.FormatInt(chosenAt, 10)},
+			":o": &types.AttributeValueMemberS{Value: owner},
+		},
+	})
+	var cond *types.ConditionalCheckFailedException
+	if errors.As(err, &cond) {
+		return ErrNotOwner
+	}
+	return err
+}
+
 func (x *Dynamo) Unbind(ctx context.Context, thingName, owner string) error {
 	// REMOVE only owner, matching marshalDevice: owner is the one attribute a
 	// device may lack (that absence is what makes Claim's condition and
@@ -247,7 +316,7 @@ func (x *Dynamo) Unbind(ctx context.Context, thingName, owner string) error {
 	_, err := x.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName:                aws.String(x.table),
 		Key:                      map[string]types.AttributeValue{"thingName": &types.AttributeValueMemberS{Value: thingName}},
-		UpdateExpression:         aws.String("REMOVE #o SET #n = :empty, gameId = :zero, chosenAt = :zero, display = :nothing, schedule = :unasked, wake = :empty"),
+		UpdateExpression:         aws.String("REMOVE #o SET #n = :empty, gameId = :zero, chosenAt = :zero, display = :nothing, schedule = :unasked, wake = :empty, sent = :zero"),
 		ConditionExpression:      aws.String("#o = :o"),
 		ExpressionAttributeNames: map[string]string{"#o": "owner", "#n": "name"},
 		ExpressionAttributeValues: map[string]types.AttributeValue{
