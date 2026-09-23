@@ -24,7 +24,7 @@ from .config import Config, NotProvisioned, default_config_dir, parse_rotate
 from .display import Canvas, display_failure, frame_size, parse_size, placement, present
 from .link import Link
 from .model import GameState, parse_chosen_at, parse_today, parse_config
-from .netcfg import NetworkError, NetworkManager, Status, owner_hint, rotate_hint
+from .netcfg import Network, NetworkError, NetworkManager, Status, owner_hint, rotate_hint
 from .render import BG, H, STALE_FRAME_S, W, draw, shift_frame
 from .reset import factory_reset
 from .settings import Settings
@@ -396,25 +396,60 @@ SAFE_ERRORS = {
 }
 
 
-def carry_out(panel: Settings, nm, cfg, enroll_stop: threading.Event | None = None) -> Status | None:
-    """Do whatever the settings screen's ``pending`` request asked for.
+class Outcome(NamedTuple):
+    """What one radio action produced, carried from the worker thread to the
+    render thread as a value rather than as calls on the settings screen.
+
+    The worker never touches the Settings object: its fields are read by the
+    renderer at 10 Hz, and a mode written before its message would be drawn
+    that way. So the worker returns this, and settle() applies it on the
+    thread that draws.
+    """
+    networks: list[Network] | None = None   # a scan's result, when it succeeded
+    message: str | None = None              # what the panel should say, when anything
+    status: Status | None = None            # a fresh Status, when one could be read
+
+
+def _status_quietly(nm, after: str) -> Status | None:
+    # nm.status() is three more nmcli calls, and they can fail on their own.
+    # That failure must not become the outcome of the action it follows: a
+    # "Connected to ..." that the connect earned is not retracted because
+    # the status query after it timed out. The panel must not lie about the
+    # one thing it exists to report.
+    try:
+        return nm.status()
+    except Exception as e:
+        log.warning("%s, but could not refresh status: %s", after, e)
+        return None
+
+
+def perform(what: str, payload, nm, cfg, enroll_stop: threading.Event | None = None) -> Outcome:
+    """Run one radio action to completion and describe what happened.
+
+    This is the half that blocks -- every nmcli call the settings screen and
+    the network poll can make goes through here -- so it runs on the radio
+    worker, never on the render thread. It returns rather than raises: an
+    exception escaping here would end the worker with the panel still
+    saying "Scanning...", and the loop would wait for a result that never
+    comes.
 
     Only NetworkError's text is safe to put on the screen: netcfg builds it
     from nmcli's own stderr, never from an argv that might hold a secret.
     Anything else becomes a fixed message from SAFE_ERRORS instead of its
-    own text. Returns a fresh Status after a successful connect, so the
-    caller can update what the list screen's header shows; None otherwise.
+    own text.
     """
-    what, payload = panel.pending
-    connected = False
     try:
         if what == "scan":
-            panel.replace(nm.scan())
-        elif what == "apply":
+            # The status rides along with every scan, not only the one that
+            # opens the screen: the list's header names the network the
+            # panel is on, and a rescan is the moment that may have changed.
+            networks = nm.scan()
+            return Outcome(networks=networks, status=_status_quietly(nm, "scanned"))
+        if what == "apply":
             nm.apply(payload)
-            panel.done(f"Connected to {payload.ssid}")
-            connected = True
-        elif what == "reset":
+            return Outcome(message=f"Connected to {payload.ssid}",
+                           status=_status_quietly(nm, "connected"))
+        if what == "reset":
             # Before anything else: a still-running Enroller holds this
             # panel's collection token in memory, and a reset deletes the
             # private key it was going to install a certificate for
@@ -425,23 +460,113 @@ def carry_out(panel: Settings, nm, cfg, enroll_stop: threading.Event | None = No
             if enroll_stop is not None:
                 enroll_stop.set()
             factory_reset(cfg.state_file.parent if cfg else default_config_dir(), nm)
-            panel.done("Panel erased. Reboot to start again.")
+            return Outcome(message="Panel erased. Reboot to start again.")
+        if what == "poll":
+            # The loop's own "is there a network" question, with no screen
+            # to report to. A failure is a debug line, not a warning: on a
+            # desktop there is no nmcli at all, and this runs every 10 s.
+            try:
+                return Outcome(status=nm.status())
+            except Exception as e:
+                log.debug("network status unavailable: %s", e)
+                return Outcome()
+        # A request kind the state machine does not make today. Answered
+        # with the generic message rather than nothing, so that a panel
+        # waiting on it is never left saying "Working..." for good.
+        log.error("unknown settings action %r", what)
+        return Outcome(message=SAFE_ERRORS.get(what, "Something went wrong"))
     except NetworkError as e:
-        panel.done(str(e))
+        return Outcome(message=str(e))
     except Exception:
         log.exception("settings action (%s) failed", what)
-        panel.done(SAFE_ERRORS.get(what, "Something went wrong"))
-        return None
-    if connected:
-        # A separate try: nm.status() making three more nmcli calls can fail
-        # on its own, and that failure must not retract the "Connected to
-        # ..." message already on the panel -- the connect succeeded, and
-        # the panel must not lie about the one thing it exists to report.
-        try:
-            return nm.status()
-        except Exception as e:
-            log.warning("connected, but could not refresh status: %s", e)
-    return None
+        return Outcome(message=SAFE_ERRORS.get(what, "Something went wrong"))
+
+
+def settle(panel: Settings, outcome: Outcome) -> Status | None:
+    """Apply a finished action to the settings screen, on the render thread.
+
+    Returns the fresh Status the action read, if it read one, so the caller
+    can update what the list screen's header shows; None otherwise.
+    """
+    if outcome.networks is not None:
+        panel.replace(outcome.networks)
+    elif outcome.message is not None:
+        panel.done(outcome.message)
+    return outcome.status
+
+
+def carry_out(panel: Settings, nm, cfg, enroll_stop: threading.Event | None = None) -> Status | None:
+    """Do whatever the settings screen's ``pending`` request asked for, here
+    and now: perform() and settle() back to back on one thread.
+
+    The render loop does not call this -- it hands perform() to the radio
+    worker and settle()s the Outcome when it comes back -- but the two halves
+    are one action, and this is that action stated whole, for the tests that
+    check what the screen ends up saying.
+    """
+    what, payload = panel.take()
+    return settle(panel, perform(what, payload, nm, cfg, enroll_stop))
+
+
+class RadioWorker:
+    """Runs perform() off the render thread, one action at a time.
+
+    Why a thread at all: nm.status() is three nmcli calls and nm.scan() is
+    one more, each bounded by netcfg's timeouts but bounded at ten seconds
+    or more. Run on the render thread, a wedged nmcli held the whole
+    display -- clock, score, everything -- for as long as it took, and
+    that freeze was indistinguishable from a crashed panel: no frame moved,
+    nothing said why, and the journal (the one diagnostic a failed panel
+    has, H7) showed a service that was alive. Here the loop keeps drawing,
+    the settings screen says "Scanning...", and a slow radio looks like a
+    slow radio.
+
+    Why one at a time: nmcli serializes against NetworkManager anyway, and
+    two scans in flight would be two results racing to fill one screen.
+    ``busy`` is written only on the render thread -- set by submit(), cleared
+    by the loop once it has taken the result off the queue -- so there is no
+    window in which the worker has finished but the loop still thinks it
+    has not, or the reverse.
+
+    Results travel by the same queue the MQTT link and the enrollment thread
+    use, so the loop has exactly one place where the outside world arrives.
+    """
+
+    def __init__(self, events: queue.Queue, nm, cfg, enroll_stop: threading.Event | None = None) -> None:
+        self._events = events
+        self._nm, self._cfg, self._enroll_stop = nm, cfg, enroll_stop
+        self.busy = False
+
+    def submit(self, what: str, payload, panel: Settings | None) -> bool:
+        """Start ``what`` for ``panel``; False, and nothing started, if busy.
+
+        The event that comes back is ("radio", what, panel, Outcome), where
+        ``panel`` is the screen the request came from (None for a poll), so
+        the loop can tell a result for the screen it is showing from one for
+        a screen that has since been closed.
+        """
+        if self.busy:
+            return False
+        self.busy = True
+
+        def run() -> None:
+            try:
+                outcome = perform(what, payload, self._nm, self._cfg, self._enroll_stop)
+            except BaseException:
+                # perform() catches Exception itself; this is for anything
+                # else, because a thread that dies without reporting leaves
+                # ``busy`` set for ever and the panel unable to open its
+                # settings screen again without a restart.
+                log.exception("radio worker failed (%s)", what)
+                outcome = Outcome(message=SAFE_ERRORS.get(what, "Something went wrong"))
+            self._events.put(("radio", what, panel, outcome))
+
+        threading.Thread(target=run, name="radio", daemon=True).start()
+        return True
+
+    def finished(self) -> None:
+        """The loop has taken the result off the queue; the next may start."""
+        self.busy = False
 
 
 def enrollment_thread(config_dir, owner, events: queue.Queue,
@@ -925,6 +1050,11 @@ def config_action(game_id: int | None, following: int | None, retain: bool = Fal
 # duration here.
 LINK_HELP_AFTER_S = 2 * 60
 
+# How often a panel whose MQTT link is down asks the radio whether there is
+# a network at all. Module-level so a test can say "the next poll is due"
+# by moving the clock past it.
+NET_POLL_S = 10
+
 
 def needs_link_help(down_since: float | None, now: float,
                     after_s: float = LINK_HELP_AFTER_S) -> bool:
@@ -1007,6 +1137,9 @@ def main() -> None:
     assets = Assets()
     build = screens.build_identity()
     nm = NetworkManager()
+    # Every nmcli call the loop can cause goes through this, so none of them
+    # runs on the thread that draws. See RadioWorker for why.
+    radio = RadioWorker(events, nm, cfg, enroll_stop)
     net_ok = False
     # None means "poll on the first pass", which is what we want -- but the
     # poll is at the BOTTOM of the loop, after the frame has been flipped, so
@@ -1017,7 +1150,6 @@ def main() -> None:
     # Linux that is uptime, and a service started five seconds after boot
     # would otherwise wait out the interval before its first poll.)
     last_net_check: float | None = None
-    NET_POLL_S = 10
 
     current: GameState | None = None
     # When this panel first saw the game it follows go final; see
@@ -1135,10 +1267,13 @@ def main() -> None:
                 if ev.type == pygame.KEYDOWN and ev.key == pygame.K_ESCAPE:
                     return
                 if ev.type == pygame.KEYDOWN and ev.key == pygame.K_s:
-                    try:
-                        panel, status = Settings(nm.scan()), nm.status()
-                    except Exception as e:
-                        log.warning("cannot open settings: %s", e)
+                    # The screen opens on this frame, empty and saying
+                    # "Scanning..."; the scan itself is a request the radio
+                    # worker fills in when it can. A second S while it is
+                    # scanning reaches panel.key() above, which SCANNING
+                    # ignores -- so one press is one scan, never two.
+                    panel = Settings()
+                    panel.request("scan")
                 if ev.type == pygame.KEYDOWN and ev.key == pygame.K_a:
                     on_a()
                 if ev.type == pygame.KEYDOWN and ev.key == pygame.K_b:
@@ -1150,15 +1285,17 @@ def main() -> None:
                 log.warning("both buttons held: factory reset")
                 if panel is None:
                     panel = Settings()
-                enroll_stop.set()  # see carry_out's reset branch: same hazard, same fix
-                try:
-                    factory_reset(cfg.state_file.parent if cfg else default_config_dir(), nm)
-                    panel.done("Panel erased. Reboot to start again.")
-                except NetworkError as e:
-                    panel.done(str(e))
-                except Exception:
-                    log.exception("factory reset (button hold) failed")
-                    panel.done(SAFE_ERRORS.get("reset", "Something went wrong"))
+                # Stopped here as well as in perform()'s reset branch: the
+                # hazard (I-1) is the same, and the request may wait a few
+                # frames for the worker, during which the Enroller must not
+                # be polling.
+                enroll_stop.set()
+                # The erase itself is nm.forget_all(), one more nmcli call,
+                # so it goes the way every other radio action goes: off the
+                # render thread, with the screen saying "Working..." until
+                # it reports. A reset asked for while a scan is in flight
+                # waits its turn in ``pending`` rather than being lost.
+                panel.request("reset")
             while True:
                 try:
                     item = events.get_nowait()
@@ -1265,6 +1402,27 @@ def main() -> None:
                         enroll_stop.set()
                         pygame.quit()
                         sys.exit(0)
+                elif kind == "radio":
+                    # The worker has reported, so the next request may start
+                    # -- cleared before anything below can raise, or a bad
+                    # result would leave the radio marked busy for good.
+                    radio.finished()
+                    _, what, for_panel, outcome = item
+                    if what == "poll":
+                        # net_ok is read in one place, screens.screen_for,
+                        # and this is its one writer.
+                        net_ok = outcome.status is not None and outcome.status.online
+                    elif for_panel is panel and panel is not None:
+                        new_status = settle(panel, outcome)
+                        if new_status is not None:
+                            status = new_status
+                    else:
+                        # The screen this was for is not the one on display.
+                        # No path today leads here -- SCANNING and WORKING
+                        # swallow the keys that close the screen -- but the
+                        # identity check is what keeps a future path from
+                        # writing an old scan's list into a new screen.
+                        log.debug("dropping the result of %s: its settings screen is gone", what)
             # Three clocks, for three different jobs. now_ms is wall time
             # because it is compared against the state document's own asOf,
             # which the reducer stamped in wall time. mono is monotonic
@@ -1289,10 +1447,13 @@ def main() -> None:
                 # banner is thrown across the frame being inspected. It is
                 # the one case where "nothing is arriving" is not news.
                 last_change = state_received_at = mono
-            if panel is not None and panel.pending is not None:
-                new_status = carry_out(panel, nm, cfg, enroll_stop)
-                if new_status is not None:
-                    status = new_status
+            # A request the settings screen has made is handed to the radio
+            # worker here and answered by the "radio" event above; between
+            # the two this loop goes on drawing. If the worker is busy (a
+            # poll, say) the request waits in ``pending`` and is picked up
+            # on the pass after the result arrives; it is not dropped.
+            if panel is not None and panel.pending is not None and not radio.busy:
+                radio.submit(*panel.take(), panel)
             # How old the document on screen is, and the one value three
             # different decisions are made from: whether the renderer freezes
             # its clocks and draws the banner, whether this still counts as a
@@ -1390,35 +1551,37 @@ def main() -> None:
                 frame.blit(dim, (0, 0))
             present(screen, frame, place)
             pygame.display.flip()
-            # The network poll goes AFTER the frame, and that ordering is the
-            # whole point of it being here rather than above.
+            # The network poll is asked for AFTER the frame, and answered by
+            # the "radio" event at the top of a later pass.
             #
-            # nm.status() is three nmcli calls. They are bounded now (10 s
-            # each; see netcfg.status), but 30 s of bounded waiting in front
-            # of the first flip is still half a minute of black panel, on the
-            # one boot where a new owner is watching and has been told the
-            # panel may look dead. Polling after the flip means the FIRST
-            # frame -- and every frame -- is painted before any nmcli call is
-            # made, so a slow or wedged nmcli can only ever delay the next
-            # frame, never the first.
+            # nm.status() is three nmcli calls, bounded (10 s each; see
+            # netcfg.status) but not short: 30 s of waiting in front of the
+            # first flip was half a minute of black panel, on the one boot
+            # where a new owner is watching and has been told the panel may
+            # look dead. Asking after the flip means the FIRST frame is
+            # painted before any nmcli call is made; asking the worker rather
+            # than nmcli directly means a slow or wedged nmcli no longer
+            # delays the NEXT frame either. The clock keeps moving over a
+            # radio that has stopped answering, which is the difference
+            # between a panel somebody can report and one that looks dead.
             #
-            # What it costs: net_ok is one frame stale, 100 ms at 10 Hz,
-            # against a poll interval of 10 s. net_ok is read in exactly one
-            # place (screens.screen_for, below) and nowhere else, which is
-            # what makes the move safe rather than merely appealing.
+            # What it costs: net_ok is a frame or two stale, against a poll
+            # interval of 10 s. net_ok is read in exactly one place
+            # (screens.screen_for, above) and written in exactly one (the
+            # "radio" event), which is what makes this safe rather than
+            # merely appealing.
             #
             # While MQTT is connected there is demonstrably a network, so the
             # scoreboard path costs no nmcli calls at all. Only a panel that
-            # isn't working asks the radio, and then only every 10 seconds.
+            # isn't working asks the radio, and then only every 10 seconds --
+            # and not while the settings screen has the radio, because the
+            # answer it is waiting for matters more than a poll that will
+            # come round again in a moment.
             if link_ok:
                 net_ok, last_net_check = True, mono
-            elif last_net_check is None or mono - last_net_check >= NET_POLL_S:
+            elif not radio.busy and (last_net_check is None or mono - last_net_check >= NET_POLL_S):
                 last_net_check = mono
-                try:
-                    net_ok = nm.status().online
-                except Exception as e:  # nmcli absent on a desktop, or failing
-                    log.debug("network status unavailable: %s", e)
-                    net_ok = False
+                radio.submit("poll", None, None)
             clock.tick(10)
     finally:
         enroll_stop.set()

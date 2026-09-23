@@ -277,12 +277,16 @@ data "aws_iam_policy_document" "api" {
     actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
     resources = [aws_dynamodb_table.accounts.arn]
   }
-  # Read one game, and nothing else, from the table the reducer keeps: the
+  # Read from the table the reducer keeps, and nothing else. GetItem: the
   # panel list says what each panel should be showing, which needs the game's
-  # state. GetItem only -- this role cannot write a score, scan the table or
-  # delete from it. The reducer remains the only writer.
+  # state. Scan: the games list needs to know which of yesterday's games are
+  # still going, or it drops a late game at midnight that the panel itself
+  # keeps (SCO-20); gamestore.ListActive is a filtered Scan, the same call
+  # cmd/today makes. This widens the role by one read on one table, whose
+  # rows are public scores. It still cannot write a score, delete a row or
+  # read any other table. The reducer remains the only writer.
   statement {
-    actions   = ["dynamodb:GetItem"]
+    actions   = ["dynamodb:GetItem", "dynamodb:Scan"]
     resources = [aws_dynamodb_table.games.arn]
   }
   # Every Query in dynamo.go (ByCode, ListByOwner) names an index, never the

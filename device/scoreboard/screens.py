@@ -224,7 +224,7 @@ def draw_enroll_problem(surface: pygame.Surface, assets: Assets, detail: str,
 
 def draw_settings(surface, assets: Assets, settings, status, build: str) -> None:
     """The settings screen. ``status`` is a netcfg.Status, or None."""
-    from .settings import LIST, PASSWORD, WORKING, RESULT, CONFIRM_RESET, CONFIRM_WORD
+    from .settings import LIST, PASSWORD, SCANNING, WORKING, RESULT, CONFIRM_RESET, CONFIRM_WORD
 
     if settings.mode == PASSWORD:
         network = settings.selected
@@ -232,6 +232,13 @@ def draw_settings(surface, assets: Assets, settings, status, build: str) -> None
             settings.masked or "(type the Wi-Fi password)",
             "Enter to connect, Tab to show it, Esc to go back",
         ])
+        return
+    if settings.mode == SCANNING:
+        # Drawn at frame rate for as long as the scan takes. This frame is
+        # what tells "the panel is looking" from "the panel has hung"; the
+        # two used to be indistinguishable, because the scan ran on the
+        # render thread and nothing at all was drawn until it returned.
+        draw_message(surface, assets, "Scanning...", ["Looking for Wi-Fi networks."])
         return
     if settings.mode == WORKING:
         draw_message(surface, assets, "Working...", ["Talking to the network."])

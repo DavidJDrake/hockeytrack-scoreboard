@@ -340,15 +340,16 @@ serves no CORS headers). This is the one route with no ownership check —
 anyone with a valid session can call it, because the schedule isn't owned by
 anyone — but it still requires the same JWT as every other route.
 
-This is *not* built the same way the device's own `hockeytrack/games/today`
-document is, despite calling the same `today.Build`. `cmd/api/main.go` passes
-it an empty states map, where `cmd/today/main.go` passes the real per-game
-states from `gamestore.ListActive`. `today.Build`'s carry-over rule only keeps
-a game from yesterday if it's `tracked` in that map, and an empty map never
-satisfies that — so a game that started yesterday and is still in progress
-after midnight ET shows up on the panel's own list but not in this endpoint's.
-This is a known gap in what the endpoint lists, not a bug in how it's built;
-fixing it is a separate ticket.
+This is built the same way the device's own `hockeytrack/games/today`
+document is: `today.Build` with the per-game states from
+`gamestore.ListActive`, so a game that started yesterday and is still in
+progress after midnight ET stays on this list until noon ET, as it does on
+the panel's. The two lists are built by the same rule from the same inputs,
+not by one reading the other: the API has no way to read a retained MQTT
+message, so the rule runs in two places (`cmd/api` and `cmd/today`). Reading
+the games table needs a `dynamodb:Scan` grant on that one table, which is the
+only read the API role has beyond `GetItem`. If the table cannot be read the
+route still answers with today's games and no carry-over, rather than a 502.
 
 - **200**:
   ```json
