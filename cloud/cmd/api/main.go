@@ -31,9 +31,8 @@ import (
 
 // games fetches the public schedule and returns the day's games as JSON. The
 // browser cannot read the schedule itself: it is served from another origin
-// with no CORS headers (spec §3.5). States are empty because this endpoint
-// only lists what is on today, not who is winning.
-func games(ctx context.Context, scheduleURL string) ([]byte, error) {
+// with no CORS headers (spec §3.5).
+func games(ctx context.Context, scheduleURL string, store gamestore.Store) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, scheduleURL, nil)
 	if err != nil {
 		return nil, err
@@ -51,7 +50,30 @@ func games(ctx context.Context, scheduleURL string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	doc, err := today.Build(body, map[int64]string{}, time.Now())
+	return gamesDoc(ctx, body, store, time.Now())
+}
+
+// gamesDoc builds the list the same way cmd/today builds the panel's own
+// hockeytrack/games/today document: with the reducer's view of which games
+// are still going. today.Build carries a game from yesterday past midnight
+// only when that map says it is not FINAL, so an empty map, which this
+// endpoint used to pass, dropped a late game at 00:00 ET while the panel
+// still listed it (SCO-20). The two lists are built by the same rule from
+// the same inputs, not by one reading the other: the API has no way to read
+// a retained MQTT message, so the rule is still applied in two places.
+func gamesDoc(ctx context.Context, schedule []byte, store gamestore.Store, now time.Time) ([]byte, error) {
+	states := map[int64]string{}
+	// The list is the page. If the games table is down, the site should say
+	// less (today's games, no carry-over) rather than nothing, the same
+	// choice the panel list makes when it cannot read a game.
+	if active, err := store.ListActive(ctx); err != nil {
+		slog.Warn("games table unreadable; listing today's games without carry-over", "err", err)
+	} else {
+		for _, s := range active {
+			states[s.GameID] = s.GameState
+		}
+	}
+	doc, err := today.Build(schedule, states, now)
 	if err != nil {
 		return nil, err
 	}
@@ -91,6 +113,14 @@ func main() {
 		slog.Error("DEVICES_TABLE, IOT_ENDPOINT and SCHEDULE_URL are required")
 		os.Exit(1)
 	}
+	// Required, not optional as it once was: the games list is built from
+	// this table, and a deployment without it would quietly go back to
+	// dropping a late game at midnight.
+	gamesTable := os.Getenv("GAMES_TABLE")
+	if gamesTable == "" {
+		slog.Error("GAMES_TABLE is required")
+		os.Exit(1)
+	}
 	pool, client := os.Getenv("USER_POOL_ID"), os.Getenv("APP_CLIENT_ID")
 	if pool == "" || client == "" {
 		slog.Error("USER_POOL_ID and APP_CLIENT_ID are required")
@@ -98,10 +128,14 @@ func main() {
 	}
 	iot := iotdataplane.NewFromConfig(cfg, func(o *iotdataplane.Options) { o.BaseEndpoint = &endpoint })
 	db := dynamodb.NewFromConfig(cfg)
+	// This role may only GetItem and Scan on the games table: it reads what
+	// the reducer wrote and can change none of it.
+	gamesStore := gamestore.NewDynamo(db, gamesTable)
 	h := &Handler{
 		Store:  devices.NewDynamo(db, table),
 		Pub:    iotpub.NewIoT(iot),
-		Games:  func(ctx context.Context) ([]byte, error) { return games(ctx, scheduleURL) },
+		Games:  func(ctx context.Context) ([]byte, error) { return games(ctx, scheduleURL, gamesStore) },
+		Game:   gamesStore.Get,
 		Tokens: idtoken.New(cfg.Region, pool, client),
 	}
 	seasons := &season.Cache{
@@ -112,16 +146,10 @@ func main() {
 		Dropped:  func(n int) { slog.Warn("schedule rows failed a check and were left out", "rows", n) },
 	}
 	h.Season = seasons.Get
-	// Optional, so a deployment without it still lists panels. This role may
-	// only GetItem on the games table: it reads what the reducer wrote and
-	// can change none of it.
-	// Optional in the same way: without it nobody has account defaults and
-	// the route that would save them says so.
+	// Optional: without it nobody has account defaults and the route that
+	// would save them says so.
 	if accountsTable := os.Getenv("ACCOUNTS_TABLE"); accountsTable != "" {
 		h.Accounts = accounts.NewDynamo(db, accountsTable)
-	}
-	if gamesTable := os.Getenv("GAMES_TABLE"); gamesTable != "" {
-		h.Game = gamestore.NewDynamo(db, gamesTable).Get
 	}
 	lambda.Start(h.Handle)
 }
