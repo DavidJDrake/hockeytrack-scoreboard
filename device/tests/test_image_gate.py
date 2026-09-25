@@ -30,9 +30,22 @@ def clean_image(tmp_path: Path) -> tuple[Path, Path]:
     units = root / "etc" / "systemd" / "system"
     wants = units / "multi-user.target.wants"
     wants.mkdir(parents=True)
-    for unit in ("scoreboard.service", "scoreboard-netcfg.service"):
+    for unit in ("scoreboard.service", "scoreboard-netcfg.service", "scoreboard-health.service"):
         (units / unit).write_text("[Unit]\n")
         (wants / unit).symlink_to(f"/etc/systemd/system/{unit}")
+    # The updater (design 7.1): the timer is enabled, the planner is started
+    # by it alone, and the write template's two instances carry their
+    # devices in drop-ins. The health unit above is enabled like the others.
+    timers = units / "timers.target.wants"
+    timers.mkdir()
+    (units / "scoreboard-update.timer").write_text("[Timer]\nOnBootSec=20min\n")
+    (timers / "scoreboard-update.timer").symlink_to("/etc/systemd/system/scoreboard-update.timer")
+    (units / "scoreboard-update.service").write_text("[Service]\nReadWritePaths=/var/lib/scoreboard-update\n")
+    (units / "scoreboard-update@.service").write_text("[Service]\nReadWritePaths=/var/lib/scoreboard-update\n")
+    for slot, devs in (("a", "2 rw\nDeviceAllow=/dev/mmcblk0p4"), ("b", "3 rw\nDeviceAllow=/dev/mmcblk0p5")):
+        (units / f"scoreboard-update@{slot}.service.d").mkdir()
+        (units / f"scoreboard-update@{slot}.service.d" / "slot.conf").write_text(
+            f"[Service]\nDeviceAllow=/dev/mmcblk0p{devs} rw\n")
     # Raspberry Pi OS (raspberrypi-sys-mods) ships this enabled on every
     # image, and raspberrypi-sys-mods stays -- so the enablement symlink is
     # still there on the hardened image. The scoreboard stage masks the unit
@@ -258,7 +271,54 @@ def _symlink_scoreboard_state_dir(r: Path, b: Path) -> None:
     (r / "var/lib/scoreboard").symlink_to("scoreboard-real")
 
 
+PUBLIC_KEY = (
+    "-----BEGIN PUBLIC KEY-----\n"
+    "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEb0J0VfyH9QeDc0z8fF3s1c8cP2Uc\n"
+    "4rH6d2e3pUqk3q1u2R1WcYtY3xYgqpXbyT0jr3ayyc3G2m1x1y2QhF4Z7A==\n"
+    "-----END PUBLIC KEY-----\n"
+)
+
+
+def _enable(r: Path, wants: str, name: str) -> None:
+    (r / "etc/systemd/system" / wants / name).symlink_to(f"/etc/systemd/system/{name}")
+
+
 BREAKS = {
+    "a release public key in the image that the repository does not name": (
+        lambda r, b: _write(r / "opt/scoreboard/certs/release-signing/release-2099-1.pem", PUBLIC_KEY),
+        "not in the repository"),
+    "a private key where the release public keys live": (
+        lambda r, b: _write(r / "opt/scoreboard/certs/release-signing/release-2026-1.pem",
+                            "-----BEGIN EC PRIVATE KEY-----\nMHcCAQEE\n-----END EC PRIVATE KEY-----\n"),
+        "private key"),
+    "a certificate where the release public keys live": (
+        lambda r, b: _write(r / "opt/scoreboard/certs/release-signing/release-2026-1.pem",
+                            "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"),
+        "release-signing/release-2026-1.pem"),
+    "a file that is not a key in the release-signing directory": (
+        lambda r, b: _write(r / "opt/scoreboard/certs/release-signing/notes.txt", "x\n"),
+        "not a .pem public key"),
+    "the release-signing directory as a symlink": (
+        lambda r, b: (r / "opt/scoreboard/certs/release-signing").symlink_to("/tmp"),
+        "release-signing is a symlink"),
+    "the health unit not enabled": (
+        lambda r, b: (r / "etc/systemd/system/multi-user.target.wants/scoreboard-health.service").unlink(),
+        "scoreboard-health.service is not enabled"),
+    "the health unit enabled but missing": (
+        lambda r, b: (r / "etc/systemd/system/scoreboard-health.service").unlink(),
+        "unit file is missing"),
+    "the update timer not enabled": (
+        lambda r, b: (r / "etc/systemd/system/timers.target.wants/scoreboard-update.timer").unlink(),
+        "scoreboard-update.timer is not enabled"),
+    "a write unit drop-in missing": (
+        lambda r, b: (r / "etc/systemd/system/scoreboard-update@b.service.d/slot.conf").unlink(),
+        "scoreboard-update@b.service.d/slot.conf is missing"),
+    "a unit that may write /boot/firmware": (
+        lambda r, b: _write(r / "etc/systemd/system/helper.service",
+                            "[Service]\nReadWritePaths=/var/lib/x /boot/firmware\n"), "/boot/firmware"),
+    "a drop-in that may write /boot/firmware": (
+        lambda r, b: _write(r / "etc/systemd/system/scoreboard-update@a.service.d/50-more.conf",
+                            "[Service]\nReadWritePaths=-/boot/firmware/\n"), "/boot/firmware"),
     "an identity file under /var/lib/scoreboard": (
         lambda r, b: _write(r / "var/lib/scoreboard/device.json", "{}"), "device.json"),
     "a leftover enrollment": (
@@ -993,3 +1053,75 @@ def test_an_unreadable_directory_fails_closed(tmp_path):
         assert "image-gate: FAIL:" in result.stderr
     finally:
         target.chmod(0o700)
+
+
+def test_a_release_public_key_the_repository_names_passes_byte_for_byte(tmp_path):
+    # With a repository that carries release-2026-1.pem, the image must carry
+    # the same bytes under /opt/scoreboard/certs/release-signing/ -- and only
+    # then. The gate is pointed at a copy of the repository for this, because
+    # the real one carries no key until the owner exports it from KMS.
+    root, boot = clean_image(tmp_path)
+    repo = tmp_path / "repo"
+    for sub in ("certs", "polkit"):
+        shutil.copytree(REPO / "device" / sub, repo / "device" / sub)
+    (repo / "device" / "certs" / "release-signing").mkdir(exist_ok=True)
+    (repo / "device" / "certs" / "release-signing" / "release-2026-1.pem").write_text(PUBLIC_KEY)
+
+    def run():
+        return subprocess.run(["bash", str(GATE), str(root), str(boot), str(repo)],
+                              capture_output=True, text=True, timeout=60)
+
+    r = run()
+    assert r.returncode == 1 and "in the repository but not in the image" in r.stderr, r.stderr
+    _write(root / "opt/scoreboard/certs/release-signing/release-2026-1.pem", PUBLIC_KEY)
+    r = run()
+    assert r.returncode == 0, r.stderr
+    _write(root / "opt/scoreboard/certs/release-signing/release-2026-1.pem", PUBLIC_KEY.replace("Qh", "Qi"))
+    r = run()
+    assert r.returncode == 1 and "differs from the repository" in r.stderr, r.stderr
+
+
+def test_read_write_paths_naming_something_under_boot_firmware_is_caught(tmp_path):
+    root, boot = clean_image(tmp_path)
+    _write(root / "etc/systemd/system/helper.service", "[Service]\nReadWritePaths=+/boot/firmware/overlays\n")
+    assert "/boot/firmware" in gate(root, boot).stderr
+
+
+def test_read_write_paths_naming_boot_setup_is_not_boot_firmware(tmp_path):
+    root, boot = clean_image(tmp_path)
+    _write(root / "etc/systemd/system/scoreboard-health.service",
+           "[Service]\nReadWritePaths=/boot/setup /var/lib/scoreboard-update\n")
+    assert gate(root, boot).returncode == 0
+
+
+@pytest.mark.parametrize("line", [
+    "ReadWritePaths=/boot/firmware",
+    "ReadWritePaths=/boot",
+    "ReadWritePaths=/var/lib/x /boot/",
+    "BindPaths=/boot/firmware",
+    "BindPaths=/var/lib/scratch:/boot/firmware",
+    "BindPaths=/var/lib/scratch:/boot:rbind",
+    "  BindPaths=-/boot/firmware/overlays",
+])
+def test_a_parent_of_boot_firmware_or_a_bind_onto_it_is_caught(tmp_path, line):
+    # /boot is the mount point above /boot/firmware, so a unit that may
+    # write /boot may write /boot/firmware; and BindPaths= mounts a
+    # writable path onto its destination, which ReadWritePaths= never
+    # mentions. The first case is the plain one, which the scan's first
+    # version missed: it wanted a separator between the = and the path.
+    root, boot = clean_image(tmp_path)
+    _write(root / "etc/systemd/system/helper.service", f"[Service]\n{line}\n")
+    r = gate(root, boot)
+    assert r.returncode == 1 and "/boot/firmware" in r.stderr, r.stderr
+
+
+@pytest.mark.parametrize("line", [
+    "ReadWritePaths=/bootstrap",
+    "BindPaths=/boot/setup",
+    "BindReadOnlyPaths=/boot/firmware",
+    "ReadWritePaths=/var/lib/boot",
+])
+def test_paths_that_only_look_like_boot_firmware_pass(tmp_path, line):
+    root, boot = clean_image(tmp_path)
+    _write(root / "etc/systemd/system/helper.service", f"[Service]\n{line}\n")
+    assert gate(root, boot).returncode == 0

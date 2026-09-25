@@ -33,6 +33,11 @@ Environment=SDL_AUDIODRIVER=dummy
 Environment=SDL_FRAMEBUFFER_ACCELERATION=opengles2
 Environment=SDL_RENDER_DRIVER=opengles2
 Environment=PYTHONUNBUFFERED=1
+# Same as the appliance unit: where the program leaves its status file and
+# health marker for the updater's units. A checkout has no updater, but the
+# program writes them regardless and the directory must exist for it to.
+RuntimeDirectory=scoreboard
+RuntimeDirectoryMode=0755
 ExecStart=@DEVICE_DIR@/.venv/bin/python -m scoreboard.main
 Restart=always
 RestartSec=3

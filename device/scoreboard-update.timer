@@ -1,0 +1,16 @@
+# Runs the update planner once a day (design 7.2). Not Persistent=: its stamp
+# would live on the tmpfs /var/lib/systemd, and a panel that was unplugged
+# simply checks twenty minutes after it comes back. The mirror sees at most
+# one latest.json fetch per panel per day plus one per boot.
+
+[Unit]
+Description=Daily check for a scoreboard release
+
+[Timer]
+OnBootSec=20min
+OnUnitActiveSec=24h
+RandomizedDelaySec=1h
+AccuracySec=5min
+
+[Install]
+WantedBy=timers.target

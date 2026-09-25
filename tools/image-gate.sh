@@ -940,8 +940,16 @@ while IFS= read -r entry; do
     && grep_or_fail -qaE -- '-----BEGIN (TRUSTED )?CERTIFICATE-----|-----BEGIN PKCS7-----' "$path"; then
     suspect=1
   fi
-  [ "$suspect" -eq 0 ] || [ "$rel" = "certs/AmazonRootCA1.pem" ] \
-    || fail "unexpected certificate or key file under /opt/scoreboard: $rel"
+  if [ "$suspect" -eq 1 ]; then
+    case "$rel" in
+      certs/AmazonRootCA1.pem) ;;
+      # The release public keys (design 6.3): checked below against the
+      # repository's copies, byte for byte. Anything else with a key name
+      # under that directory is a finding.
+      certs/release-signing/*.pem) ;;
+      *) fail "unexpected certificate or key file under /opt/scoreboard: $rel" ;;
+    esac
+  fi
 done <<<"$(printf '%s\n' "$FOUND" | sort)"
 # The one certificate this image may ship must be the repository's own file,
 # and a regular file -- not a symlink standing in for something else that a
@@ -951,5 +959,74 @@ ca="$ROOT/opt/scoreboard/certs/AmazonRootCA1.pem"
 cmp -s "$ca" "$REPO/device/certs/AmazonRootCA1.pem" \
   || fail "/opt/scoreboard/certs/AmazonRootCA1.pem differs from the repository's copy"
 ok "the only certificate shipped is Amazon's root CA"
+
+# The release public keys are the trust root every update is verified
+# against (design 6.3): the panel accepts a manifest that any key in
+# /opt/scoreboard/certs/release-signing/ verifies. So the directory must hold
+# exactly the files the repository names, each byte for byte the
+# repository's, each a public key and nothing else -- a key added to the
+# image that is not in the repository would let whoever holds its private
+# half sign a release for every panel, and a key missing from the image
+# strands the panel at the next rotation. The private halves live in AWS KMS
+# and never in either place; the "no private keys" scan above already covers
+# the directory.
+keydir="$ROOT/opt/scoreboard/certs/release-signing"
+repokeys="$REPO/device/certs/release-signing"
+reject_symlink "$keydir" "/opt/scoreboard/certs/release-signing"
+if [ -d "$keydir" ]; then
+  run_find "$keydir" -mindepth 1 -print
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    name="${entry#"$keydir/"}"
+    [ -f "$entry" ] && [ ! -L "$entry" ] || fail "release-signing/$name is not a regular file"
+    case "$name" in
+      *.pem) ;;
+      *) fail "release-signing/$name is not a .pem public key" ;;
+    esac
+    grep_or_fail -qa -- '-----BEGIN PUBLIC KEY-----' "$entry" \
+      || fail "release-signing/$name is not a SubjectPublicKeyInfo public key"
+    [ -f "$repokeys/$name" ] || fail "release-signing/$name is in the image but not in the repository"
+    cmp -s "$entry" "$repokeys/$name" || fail "release-signing/$name differs from the repository's copy"
+  done <<<"$(printf '%s\n' "$FOUND" | sort)"
+fi
+if [ -d "$repokeys" ]; then
+  for f in "$repokeys"/*.pem; do
+    [ -e "$f" ] || continue
+    [ -f "$keydir/$(basename "$f")" ] \
+      || fail "release-signing/$(basename "$f") is in the repository but not in the image; the panel could not verify a release signed by it"
+  done
+fi
+ok "the release public keys are exactly the repository's"
+
+# The updater's health unit is what turns a trial boot into a commit or a
+# rollback (design 5.2). A root without it enabled would run a trial slot
+# uncommitted with nothing to reboot it, and the planner would then refuse to
+# plan forever; the gate refuses to build it instead (design 7.3 step 1).
+# The timer is what makes the panel look at all.
+for pair in "multi-user.target.wants/scoreboard-health.service" "timers.target.wants/scoreboard-update.timer"; do
+  link="$ROOT/etc/systemd/system/$pair"
+  [ -L "$link" ] || fail "${pair#*/} is not enabled (/etc/systemd/system/$pair is not a symlink)"
+  [ -f "$ROOT/etc/systemd/system/${pair#*/}" ] || fail "${pair#*/} is enabled but the unit file is missing"
+done
+for unit in scoreboard-update.service 'scoreboard-update@.service' \
+            'scoreboard-update@a.service.d/slot.conf' 'scoreboard-update@b.service.d/slot.conf'; do
+  [ -f "$ROOT/etc/systemd/system/$unit" ] || fail "the updater's $unit is missing"
+done
+ok "the updater's health unit and timer are enabled"
+
+# Nothing of ours may write /boot/firmware (design 4.3): the running slot's
+# boot partition is mounted read-write for rpi-eeprom-update alone, and a
+# unit that could write it could make the running slot unbootable. Every
+# unit and drop-in under /etc/systemd/system is checked, whatever its name.
+# Two directives can open the path: ReadWritePaths= and BindPaths=, whose
+# destination follows a colon. /boot itself (a parent that makes the same
+# directory writable) counts as /boot/firmware; /boot/setup, the health
+# unit's own write path on another partition, does not.
+reject_symlink "$ROOT/etc/systemd/system" "/etc/systemd/system"
+out="$(grep -rlaE -- '^[[:space:]]*(ReadWritePaths|BindPaths)=(.*[[:space:]=+:-])?/boot(/firmware([[:space:]/:]|$)|/?([[:space:]:]|$))' \
+  "$ROOT/etc/systemd/system" 2>&1)" && status=0 || status=$?
+[ "$status" -le 1 ] || fail "could not scan /etc/systemd/system for ReadWritePaths: $(sanitize_for_log "$out")"
+[ -z "$out" ] || fail "a unit may write /boot/firmware (ReadWritePaths= or BindPaths= naming /boot or /boot/firmware): $(sanitize_for_log "${out#"$ROOT"}")"
+ok "no unit of ours may write /boot/firmware"
 
 echo "image-gate: all checks passed"

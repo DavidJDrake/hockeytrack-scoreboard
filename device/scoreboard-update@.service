@@ -1,0 +1,62 @@
+# The write unit, one instance per slot: scoreboard-update@a.service writes
+# slot A (partitions 2 and 4), @b writes slot B (3 and 5). The drop-in under
+# scoreboard-update@<slot>.service.d/slot.conf carries the DeviceAllow
+# lines, and they are the whole point of the template (design 7.1): the unit
+# that has network access can only open the two partitions of the slot
+# nobody is running. It cannot write the running root, the running boot
+# partition, SETUP or STATE's device even if its code is wrong or its input
+# is hostile. The code refuses the running slot again on its own.
+#
+# What it does is chosen by request.json on STATE (design 7.3): stage
+# (download, verify, write, hold the boot head back), arm (re-hash, write the
+# head, record the trial, reboot with the tryboot flag) or invalidate (zero
+# the head). The health unit may request invalidate only.
+#
+# DeviceAllow=/dev/mmcblk0pN depends on the kernel's device naming, which
+# PARTUUID was chosen to avoid everywhere else. If the name ever changes the
+# unit gets no device at all and fails closed, which is the right way round.
+
+[Unit]
+Description=Write scoreboard slot %i
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/scoreboard
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/scoreboard/.venv/bin/python -m scoreboard.update run %i
+# A download and write take 10 to 15 minutes on Wi-Fi to an SD card, and the
+# arm re-hash two to three more; the code's own deadline is 30 minutes.
+TimeoutStartSec=45min
+
+# --- Hardening (design 7.1) ---
+# PROVISIONAL until hardware check H16. See scoreboard-update.service for
+# why InaccessiblePaths is here. No capability: the reboot is systemctl,
+# which asks PID 1, and CAP_SYS_BOOT would serve only a direct reboot(2)
+# that skips the orderly shutdown and the FAT and ext4 syncs the head write
+# depends on. Root is used because writing a partition is what root is for;
+# the sandbox is what narrows root to two devices.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/scoreboard-update
+InaccessiblePaths=/state /var/lib/scoreboard
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+DevicePolicy=closed
+UMask=077
+# Outbound only, and it never listens: there is no bind in the code. AF_UNIX
+# is not optional: the reboot is systemctl, which talks to PID 1 over D-Bus
+# on a unix socket, and the journal is a unix socket too.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX

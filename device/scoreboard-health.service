@@ -1,0 +1,60 @@
+# The health unit (design 5.2). On a trial boot it waits up to 240 s for
+# scoreboard.service to connect to the broker and finish its first render
+# pass, then commits by swapping autoboot.txt on SETUP, or reboots into the
+# old slot. On the boot after a trial it has the trial slot's boot head
+# zeroed and attributes the trial: the version's fault, or a pulled plug.
+# On every other boot it exits at once. Its one other write is a torn
+# autoboot.txt found while running the trial slot without the flag: it is
+# rewritten to name the old slot before the reboot, because a reboot with
+# the file torn walks straight back onto the trial slot, and that rollback
+# is asked for once per record and never looped.
+#
+# Started early and independent of scoreboard.service: no After= on it,
+# because the thing it judges may not start, and a trial boot the unit
+# cannot decide is a rollback, never an exit.
+
+[Unit]
+Description=Decide a scoreboard trial boot
+# The records and autoboot.txt are on STATE and SETUP, both fstab mounts
+# with nofail (design 4.3); local-fs.target is reached once they are mounted
+# or their ten-second device timeout has passed, and a missing one is then a
+# rollback here rather than a hang.
+After=local-fs.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/scoreboard
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/scoreboard/.venv/bin/python -m scoreboard.update health
+# Above the 240 s health bound with room for the commit and its read-back.
+TimeoutStartSec=300
+
+# --- Hardening (design 5.2, 7.1) ---
+# PROVISIONAL until hardware check H16. Those two paths are all it needs: it
+# reads and writes the records and autoboot.txt and never the identity. No
+# network at all; path-based unix sockets such as D-Bus cross the network
+# namespace, so systemctl still works.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+ReadWritePaths=/boot/setup /var/lib/scoreboard-update
+InaccessiblePaths=/state /var/lib/scoreboard
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+DevicePolicy=closed
+UMask=077
+RestrictAddressFamilies=AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

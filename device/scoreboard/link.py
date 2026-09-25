@@ -64,6 +64,23 @@ def _refused(reason_code) -> bool:
         return False
 
 
+def _suback_failed(code) -> bool:
+    """Did one entry of a SUBACK say no? paho's VERSION2 on_subscribe hands
+    a list of ReasonCode, one per topic filter, built from MQTT 3's granted
+    QoS bytes, where 0x80 is the failure and is_failure already reads it
+    that way. A plain int is read by the same rule (a granted QoS of 0 to 2
+    is a yes), and a shape neither fits is not a refusal, as in _refused
+    and for the same reason: the cost of a wrong yes here is a status topic
+    asked for again on the next connect, and nothing more."""
+    failure = getattr(code, "is_failure", None)
+    if failure is not None:
+        return bool(failure)
+    try:
+        return int(code) >= 0x80
+    except (TypeError, ValueError):
+        return False
+
+
 def config_topic(thing_name: str) -> str:
     """The device's own config topic. Scoped to one thing, and the IoT policy
     pins it to that thing via iot:Connection.Thing.ThingName, so a device
@@ -73,16 +90,33 @@ def config_topic(thing_name: str) -> str:
 
 class Link:
     def __init__(self, endpoint: str, client_id: str, cert: Path, key: Path, ca: Path,
-                 on_state, on_today, on_link, on_config=None) -> None:
+                 on_state, on_today, on_link, on_config=None, status_topics=()) -> None:
         self.on_state, self.on_today, self.on_link = on_state, on_today, on_link
         self.on_config = on_config
         self._config_topic = config_topic(client_id)
+        # scoreboard/<thing>/status/running/<version> and its two siblings
+        # (design 8.1): subscribed to, never published to, never received
+        # from. AWS IoT's own subscription lifecycle event carries the topic
+        # names to a rule, which is how the site learns a panel's version
+        # without this policy ever gaining a Publish. Each names this thing
+        # only, and the policy's topicfilter resource pins it there; the
+        # topics themselves are computed by scoreboard.update from the build
+        # file and the records, not by this module.
+        self._status_topics = tuple(status_topics)
+        # Status subscriptions awaiting their SUBACK, by message id, and
+        # the ones the broker answered with a failure code. A refused
+        # status topic is logged once and not asked for again while this
+        # process lives: the policy is what has to change, and asking on
+        # every reconnect would only put the same line in the journal.
+        self._status_pending: dict[int, str] = {}
+        self._status_refused: set[str] = set()
         self._game: int | None = None
         self._client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id, protocol=mqtt.MQTTv311)
         self._client.tls_set(ca_certs=str(ca), certfile=str(cert), keyfile=str(key), tls_version=ssl.PROTOCOL_TLS_CLIENT)
         self._client.reconnect_delay_set(min_delay=1, max_delay=60)
         self._client.on_connect = self._on_connect
         self._client.on_disconnect = self._on_disconnect
+        self._client.on_subscribe = self._on_subscribe
         self._client.on_message = self._on_message
         self._endpoint = endpoint
 
@@ -132,10 +166,43 @@ class Link:
         client.subscribe(self._config_topic, qos=1)
         if self._game is not None:
             client.subscribe(self._state_topic(self._game), qos=1)
+        # QoS 0 and after the topics that matter: nothing will ever arrive on
+        # these, and a broker that answers one of them with a SUBACK failure
+        # (a policy without the status/* filter) must not cost the panel its
+        # state or config. That ordering is all this code can do, and it is
+        # not the whole story: subscribe() is asynchronous, on_link(True)
+        # below fires before any SUBACK, and a broker that chose to drop the
+        # connection over an unauthorized SUBSCRIBE instead of answering it
+        # would fire _on_disconnect after the panel had called itself
+        # healthy, and the link would flap once a minute. The IoT policy's
+        # status/* filter (SCO-69) therefore has to be applied before a
+        # panel runs this code; README says so under Updates.
+        for topic in self._status_topics:
+            if topic in self._status_refused:
+                continue
+            _, mid = client.subscribe(topic, qos=0)
+            if mid is not None:
+                self._status_pending[mid] = topic
         self.on_link(True)
+
+    def _on_subscribe(self, client, userdata, mid, reason_codes, properties=None):
+        # Only the status topics are judged here. The SUBACKs for today,
+        # state and config carry the same codes, but a refusal of those is
+        # a policy that has stopped the panel working, and the link report
+        # is the wrong place to hide it: nothing arrives, main shows the
+        # outage, the journal has the SUBACK line from paho.
+        topic = self._status_pending.pop(mid, None)
+        if topic is None:
+            return
+        if any(_suback_failed(code) for code in reason_codes):
+            self._status_refused.add(topic)
+            log.warning("the broker refused the status subscription %s (%s); not asking again until restart. "
+                        "The IoT policy needs the status/* topic filter (SCO-69).",
+                        topic, ", ".join(str(code) for code in reason_codes))
 
     def _on_disconnect(self, client, userdata, flags, reason_code, properties=None):
         log.warning("disconnected: %s", reason_code)
+        self._status_pending.clear()
         self.on_link(False)
 
     def _on_message(self, client, userdata, msg):

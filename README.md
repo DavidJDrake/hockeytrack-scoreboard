@@ -275,6 +275,45 @@ bench-tested the rest of the time, by reconstructing any of HockeyTrack's
 archived games and republishing it to the real bus at any speed, including
 real time.
 
+### Updates
+
+A panel on the six-partition layout (`docs/superpowers/specs/2026-09-25-ota-update-design.md`)
+updates itself: once a day, in a quiet window (showing nothing, outside
+sleep hours, no game within 45 minutes), `scoreboard.update` fetches
+`latest.json` from the image mirror, fetches the release's signed manifest,
+verifies the signature over the manifest's exact bytes against every public
+key in `/opt/scoreboard/certs/release-signing/` before parsing it, refuses a
+downgrade, a version that already failed here, an expired or cross-channel
+manifest, and only then streams the two payloads into the slot it is not
+running from, hashing each as it goes. The slot's boot partition is kept
+unbootable until the whole slot has been re-hashed from the card, then the
+panel try-boots it once; a health unit commits only after the new version
+has connected to the broker and drawn a frame within 240 s, and anything
+else, including a hang, boots the old slot. The panel never publishes: the
+site learns its version from a subscription nothing publishes to.
+
+That subscription is a deployment-order dependency, stated here because
+the code cannot enforce it. The panel subscribes to
+`scoreboard/<thing>/status/*` last and at QoS 0, so a broker that answers
+an unauthorized SUBSCRIBE with a SUBACK failure costs it nothing but that
+topic (logged once, not asked for again until restart). AWS IoT may instead
+drop the connection over an unauthorized MQTT 3 operation, and since
+`subscribe()` is asynchronous the panel has already reported the link up by
+then, so the link would flap once a minute. The IoT policy's
+`topicfilter/scoreboard/<thing>/status/*` resource (SCO-69) is therefore
+applied before any panel runs a build that carries this code.
+
+The order of trust is TLS, then the signature (the only thing the panel
+trusts), then the manifest's hashes over the payloads (data, never parsed),
+then the health check. The signing key is an AWS KMS key whose private half
+never leaves KMS; its public half is committed as
+`device/certs/release-signing/<key id>.pem` and the image gate refuses any
+key that is not the repository's, byte for byte. Nothing in this repository
+can make a signature; the tests sign with a throwaway key generated in the
+test process. The rollback proof on real hardware (H13) is a pending check
+in `docs/hardware-checks.md`, and no panel is reflashed to the layout until
+it has passed.
+
 ## Development
 
 ```

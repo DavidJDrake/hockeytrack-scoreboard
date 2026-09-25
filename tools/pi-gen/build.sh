@@ -43,7 +43,11 @@ files="$WORK/stage-scoreboard/01-install/files"
 mkdir -p "$files/device"
 cp -a "$REPO/device/scoreboard" "$REPO/device/requirements.txt" "$REPO/device/certs" \
   "$REPO/device/polkit" "$REPO/device/scoreboard-appliance.service" \
-  "$REPO/device/scoreboard-netcfg.service" "$files/device/"
+  "$REPO/device/scoreboard-netcfg.service" \
+  "$REPO/device/scoreboard-update.timer" "$REPO/device/scoreboard-update.service" \
+  "$REPO/device/scoreboard-update@.service" "$REPO/device/scoreboard-update@a.service.d" \
+  "$REPO/device/scoreboard-update@b.service.d" "$REPO/device/scoreboard-health.service" \
+  "$files/device/"
 find "$files/device" -name '__pycache__' -type d -prune -exec rm -rf {} +
 cp "$REPO/tools/pi-setup.sh" "$files/pi-setup.sh"
 printf '%s · %s · %s\n' "$VERSION" "$(date -u +%Y-%m-%d)" "$(git -C "$REPO" rev-parse --short HEAD)" \

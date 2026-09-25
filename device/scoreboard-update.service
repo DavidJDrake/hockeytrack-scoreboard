@@ -1,0 +1,61 @@
+# The update planner (design 7.1, 7.3). It reads which slot is running, the
+# records on STATE, the panel's status file and latest.json, applies every
+# refusal it can before a download, and if there is something to do writes
+# request.json and starts scoreboard-update@<inactive slot>.service. It has
+# no block device and no capability: the code that decides can never be the
+# code that writes a partition.
+#
+# It does have outbound sockets, which the design's 7.1 table did not give
+# it. Its 7.3 steps 2 and 4 have the planner fetch latest.json and the
+# manifest, and the two cannot both hold. Three small GETs (64 KB, 15 s each)
+# happen here; the 700 MB payload download stays in the write unit. What the
+# table was protecting still holds: the unit that can open a partition never
+# chooses what to write to it, and the unit that chooses cannot open one.
+
+[Unit]
+Description=Plan a scoreboard update
+# Only started by the timer. No After=scoreboard.service: whether the panel
+# is quiet is read from its status file, and a service that is failed or
+# inactive counts as quiet (design 7.2), so this must not wait for it.
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/scoreboard
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/scoreboard/.venv/bin/python -m scoreboard.update plan
+TimeoutStartSec=120
+
+# --- Hardening (design 7.1) ---
+# PROVISIONAL until hardware check H16: any directive that stops the unit
+# planning is removed, and the removal recorded in docs/hardware-checks.md
+# with the symptom. InaccessiblePaths is the identity boundary: the panel's
+# private key lives on /state, and ProtectSystem=strict makes the root
+# read-only but hides nothing, so without it the one process that talks to
+# the mirror could read the key. /var/lib/scoreboard-update is its own bind
+# mount, separate from /state, so ReadWritePaths on it still works. The
+# planner also reads /boot/setup/autoboot.txt, to refuse before a download
+# a file the health unit's commit would refuse after one; that needs no
+# ReadWritePaths, because reading is what strict leaves.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/scoreboard-update
+InaccessiblePaths=/state /var/lib/scoreboard
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+DevicePolicy=closed
+UMask=077
+# Outbound only; AF_UNIX is D-Bus (systemctl start) and the journal.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX

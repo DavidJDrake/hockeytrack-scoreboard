@@ -167,13 +167,32 @@ install_appliance() {
   cp "$DEVICE/scoreboard-netcfg.service" /etc/systemd/system/scoreboard-netcfg.service
   install -D -m 644 "$DEVICE/polkit/10-scoreboard-network.rules" \
     /etc/polkit-1/rules.d/10-scoreboard-network.rules
+  # The updater: a timer, the planner it starts, the write unit template
+  # with its two per-slot device drop-ins, and the health unit that decides
+  # a trial boot (design 7.1). The planner service is not enabled: only the
+  # timer starts it. The write instances are started only by the planner and
+  # the health unit, through request.json.
+  cp "$DEVICE/scoreboard-update.timer" "$DEVICE/scoreboard-update.service" \
+     "$DEVICE/scoreboard-update@.service" "$DEVICE/scoreboard-health.service" /etc/systemd/system/
+  for s in a b; do
+    install -D -m 644 "$DEVICE/scoreboard-update@$s.service.d/slot.conf" \
+      "/etc/systemd/system/scoreboard-update@$s.service.d/slot.conf"
+  done
   # Enabled by symlink rather than `systemctl enable`: this also runs inside a
   # pi-gen chroot, where there is no running systemd to talk to.
-  mkdir -p /etc/systemd/system/multi-user.target.wants
+  mkdir -p /etc/systemd/system/multi-user.target.wants /etc/systemd/system/timers.target.wants
   ln -sf /etc/systemd/system/scoreboard.service \
     /etc/systemd/system/multi-user.target.wants/scoreboard.service
   ln -sf /etc/systemd/system/scoreboard-netcfg.service \
     /etc/systemd/system/multi-user.target.wants/scoreboard-netcfg.service
+  ln -sf /etc/systemd/system/scoreboard-health.service \
+    /etc/systemd/system/multi-user.target.wants/scoreboard-health.service
+  ln -sf /etc/systemd/system/scoreboard-update.timer \
+    /etc/systemd/system/timers.target.wants/scoreboard-update.timer
+  # The updater's records live here, a bind of STATE's update/ directory on
+  # the six-partition layout (design 4.3, SCO-67); on a checkout or an older
+  # layout it is a plain directory on the root, and the units still render.
+  install -d -m 755 /var/lib/scoreboard-update
   echo "Appliance installed. It starts on the next boot."
 }
 
