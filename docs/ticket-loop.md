@@ -71,3 +71,20 @@ guessed at.
   up leaves a committed branch, never a dirty tree.
 - **The board is the queue.** State lives in Jira and in git, not in the
   workflow, so a run can be repeated, resumed, or abandoned without loss.
+
+## The epic loop
+
+`.claude/workflows/sco-epic.js` is the second shape: an epic whose build
+tickets depend on a design ticket. The design is written and adversarially
+reviewed first (with a revision pass), then every build ticket runs in
+parallel against the design's decisions, each reviewed again; tickets that
+need hardware get a written procedure instead of pretended work.
+
+```
+Workflow({ name: "sco-epic", args: { epic: "SCO-65", design: "SCO-66", builds: ["SCO-67", "SCO-68"], hardware: ["SCO-69"], today: "2026-09-25" } })
+```
+
+It differs from `sco-tickets` in one rule, at the owner's instruction for
+SCO-65: a ticket is moved to In Progress when an agent starts it and to
+Done when its work is built and reviewed, before the PR is merged. The
+ticket comment says what is still owed (the merge, the image, the board).
