@@ -95,6 +95,29 @@ def test_nothing_from_the_site_is_written_as_auto(tmp_path):
     assert Config.load(tmp_path).rotate is None
 
 
+def test_the_new_identity_is_on_the_card_before_it_is_renamed_over(tmp_path, monkeypatch):
+    # A rename is atomic for the name only. Without an fsync first, an SD
+    # card pulled a moment after a site turn can hold an empty device.json
+    # under the right name, and that panel does not start.
+    import os
+    order = []
+    real_fsync, real_replace = os.fsync, os.replace
+    monkeypatch.setattr(os, "fsync", lambda fd: (order.append("fsync"), real_fsync(fd)))
+    monkeypatch.setattr(os, "replace", lambda a, b: (order.append("replace"), real_replace(a, b)))
+    cfg = Config.load(config_dir(tmp_path))
+    assert cfg.save_rotate(90) is True
+    assert order == ["fsync", "replace"]
+
+
+def test_an_identity_damaged_into_a_list_is_a_value_error(tmp_path):
+    # main() catches ValueError around save_rotate; anything else would take
+    # the loop down instead of costing the next boot's first frame.
+    cfg = Config.load(config_dir(tmp_path))
+    (tmp_path / "device.json").write_text("[]")
+    with pytest.raises(ValueError):
+        cfg.save_rotate(90)
+
+
 def test_a_reset_panel_forgets_its_orientation(tmp_path):
     from scoreboard.reset import factory_reset
 

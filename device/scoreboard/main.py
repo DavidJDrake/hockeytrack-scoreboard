@@ -1386,7 +1386,13 @@ def main() -> None:
                     # decides nothing, and the boot's own choice (which the
                     # boot Display() knows nothing of) stays as it is. No
                     # restart and no black frame: the next pass draws on the
-                    # new frame.
+                    # new frame. chosen_rotation reads the card again for
+                    # every document (a retained replay, a settings save)
+                    # when the document says nothing and the environment is
+                    # unset: one small file open on the boot partition, and
+                    # rotate_hint swallows a failure. The consequence is
+                    # deliberate -- an owner who edits rotate= on a running
+                    # panel sees it on the next document, not the next boot.
                     if readable_document(item[1]):
                         if cfg:
                             # A card that cannot be written, or an identity
