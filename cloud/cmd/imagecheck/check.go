@@ -17,9 +17,10 @@ import (
 	"log/slog"
 	"regexp"
 	"strings"
+	"time"
 )
 
-const alertSubject = "SCOREBOARD SECURITY: image mirror disagrees with its release"
+const alertSubject = "SCOREBOARD SECURITY: image mirror disagrees with its release, or the update panels will install"
 
 const maxManifest = 64 << 10
 
@@ -155,13 +156,44 @@ func Check(ctx context.Context, objs Objects, rel Releases) ([]string, error) {
 	return problems, nil
 }
 
+// latestVersion is the version latest.json names when it has a release's
+// shape, or "" when Check has already reported it unusable.
+func latestVersion(ctx context.Context, objs Objects) string {
+	raw, err := getAll(ctx, objs, "latest.json", maxManifest)
+	if err != nil {
+		return ""
+	}
+	var m Manifest
+	if json.Unmarshal(raw, &m) != nil || !versionRE.MatchString(m.Version) {
+		return ""
+	}
+	return m.Version
+}
+
+// Signing is what the signed-manifest check needs (signed.go). It is nil
+// only in tests of the older checks; the Lambda always has one.
+type Signing struct {
+	Assets Assets
+	Key    SigningKey
+	Now    func() time.Time
+}
+
 // Run checks once and raises one alert naming every problem found. A
 // problem is published even when Check also returns an error, because a
 // disagreement found before a later failure is real: the caller (the
 // scheduled Lambda) should still see the error too, so its own errors alarm
-// fires and someone looks at why the check could not finish.
-func Run(ctx context.Context, objs Objects, rel Releases, n Notifier) error {
+// fires and someone looks at why the check could not finish. The signed
+// manifest is checked after the image, for the version latest.json names,
+// only when latest.json itself was readable enough to name one.
+func Run(ctx context.Context, objs Objects, rel Releases, n Notifier, signing *Signing) error {
 	problems, err := Check(ctx, objs, rel)
+	if signing != nil && err == nil {
+		if version := latestVersion(ctx, objs); version != "" {
+			more, signedErr := CheckSigned(ctx, objs, signing.Assets, signing.Key, signing.Now(), version)
+			problems = append(problems, more...)
+			err = signedErr
+		}
+	}
 	if len(problems) == 0 {
 		if err == nil {
 			slog.Info("image mirror agrees with its release")
@@ -171,7 +203,7 @@ func Run(ctx context.Context, objs Objects, rel Releases, n Notifier) error {
 	slog.Warn("image mirror disagrees with its release", "problems", len(problems))
 	msg := "The scoreboard image mirror at images.scoreboard.davidjdrake.com disagrees with its GitHub release:\n\n- " +
 		strings.Join(problems, "\n- ") +
-		"\n\nIf this was not a release in progress, assume the image strangers download may have been replaced. " +
+		"\n\nIf this was not a release in progress, assume the image strangers download, or the update panels will install, may have been replaced. " +
 		"See HockeyTrack's docs/threat-model.md, section 7."
 	if notifyErr := n.Notify(ctx, alertSubject, msg); notifyErr != nil {
 		return errors.Join(err, notifyErr)

@@ -1,11 +1,18 @@
-"""Network configuration: the boot-partition Wi-Fi file, and NetworkManager.
+"""Network configuration: the SETUP-partition Wi-Fi file, and NetworkManager.
 
 The file exists because Raspberry Pi OS keeps Wi-Fi credentials in
 /etc/NetworkManager/system-connections/, on the ext4 root partition, which
-Windows and macOS cannot read. /boot/firmware is FAT, so it is the only
-part of the card a user with any computer can reach. It is read on every
-boot, not only the first, which is what makes it a repair tool rather than
-a first-run convenience.
+Windows and macOS cannot read. The card's FAT partitions are the only part
+of it a user with any computer can reach, and on the A/B card there are
+three of them: the file lives on the first, labeled SETUP, the one Windows
+has always shown for removable media and the one whose name the site's
+instructions can use. It is read on every boot, not only the first, which
+is what makes it a repair tool rather than a first-run convenience.
+
+The regulatory domain is applied at runtime on every boot from a file on
+STATE, because the root is read-only and the slot's boot partition is
+replaced by every update: neither of the places raspi-config used to write
+it survives, so raspi-config is no longer called.
 """
 from __future__ import annotations
 
@@ -20,23 +27,22 @@ from pathlib import Path
 
 from .config import parse_rotate
 
-BOOT_FILE = Path("/boot/firmware/scoreboard-setup.txt")
+BOOT_FILE = Path("/boot/setup/scoreboard-setup.txt")
 # The name this file had when it carried only Wi-Fi. Cards written before the
 # rename still work: a panel that refused to read the file the user was told
 # to write last month is a support call, and the file's contents are
 # unambiguous either way.
-LEGACY_BOOT_FILE = Path("/boot/firmware/scoreboard-wifi.txt")
+LEGACY_BOOT_FILE = Path("/boot/setup/scoreboard-wifi.txt")
+# Where the country code is kept between boots (OTA design 4.3): on STATE,
+# beside NetworkManager's own state, so it survives an update. Written when
+# a setup file's country line is applied, read on every boot after that.
+COUNTRY_FILE = Path("/state/network/country")
 MAX_SSID_BYTES = 32
 MIN_PSK_CHARS, MAX_PSK_CHARS = 8, 63
 # Generous for an email address, and this is a typo guard, not a real limit:
 # owner_hint() puts this straight into the enrollment POST body, and nothing
 # upstream of it caps the length of a line on a FAT partition anyone can edit.
 MAX_OWNER_BYTES = 256
-
-# The kernel command line, where raspi-config leaves cfg80211.ieee80211_regdom=
-# so a regulatory domain survives a reboot. A module-level name so tests can
-# point it somewhere harmless.
-PROC_CMDLINE = Path("/proc/cmdline")
 
 # What a panel with no regulatory domain is told when its setup file has no
 # country line. This is the entire diagnosis for whoever is holding the card:
@@ -353,11 +359,13 @@ CONNECT_TIMEOUT_S = 45
 # local D-Bus round trip; it exists to bound a hung binary, not to allow for
 # slow work, because none of these do any.
 #
-# raspi-config is the opposite case and keeps its own: do_wifi_country edits
-# cmdline.txt, runs `iw reg set` and makes an nmcli call of its own, so it is
-# the one step on this path that can honestly take seconds.
+# The regulatory-domain step keeps its own, larger cap: `iw reg set` asks the
+# kernel to load and apply a regulatory database, and `iw reg get` answers
+# from the same driver, so it is the one step on this path that can honestly
+# take seconds. (raspi-config held this slot before the root went read-only;
+# the budget table's row is the same size, so the arithmetic is unchanged.)
 FAST_TIMEOUT_S = 5
-RASPI_TIMEOUT_S = 10
+REG_TIMEOUT_S = 10
 
 # The one call allowed to run after the deadline, and the only one.
 #
@@ -412,10 +420,10 @@ VERIFY_OVERRUN_S = STATUS_QUERIES * VERIFY_TIMEOUT_S
 # deadline AFTER a call returns, because the call is where the time goes. A
 # call therefore cannot finish past the deadline.
 #
-#   set_country -> raspi-config                 RASPI_TIMEOUT_S    10 s
-#     OR, when the file has no country= line and /proc/cmdline has no
-#     regdom either, the other half of the same slot:
-#     regulatory_domain -> iw reg get           RASPI_TIMEOUT_S   (10 s)
+#   set_country -> iw reg set                   REG_TIMEOUT_S    10 s
+#     OR, when the file has no country= line and STATE has no saved
+#     country either, the other half of the same slot:
+#     regulatory_domain -> iw reg get           REG_TIMEOUT_S   (10 s)
 #   radio_on    -> nmcli radio wifi on          FAST_TIMEOUT_S      5 s
 #   wait_for_wifi (device-state queries + naps) WIFI_READY_S       10 s
 #   wait_for_ssid (rescans + list polls + naps) SCAN_BUDGET_S      15 s
@@ -432,7 +440,7 @@ VERIFY_OVERRUN_S = STATUS_QUERIES * VERIFY_TIMEOUT_S
 # The first row is an either/or, never both: apply_boot_file takes exactly one
 # of those two branches. The iw call was off this table for a round and
 # unclamped, which was harmless only because QUERY_TIMEOUT_S happens to equal
-# RASPI_TIMEOUT_S -- an arithmetic coincidence rather than a construction, and
+# REG_TIMEOUT_S -- an arithmetic coincidence rather than a construction, and
 # the third time a call on this path had been left off the table it bounds.
 #
 # The sum is exact on purpose: 40 + 45 = 85, so even when every earlier step
@@ -780,19 +788,21 @@ def _run_nmcli(args: list[str], timeout: float | None = QUERY_TIMEOUT_S) -> str:
     return result.stdout
 
 
-def _run_raspi_config(args: list[str], timeout: float = QUERY_TIMEOUT_S) -> str:
+def _run_iw_reg_set(args: list[str], timeout: float = QUERY_TIMEOUT_S) -> str:
     # Same shape as _run_nmcli: raise outside the handler so no argv-bearing
-    # exception is left on __context__.
-    timed_out = False
+    # exception is left on __context__. OSError is caught like the timeout
+    # because iw is a package this image happens to have rather than one it
+    # depends on, and a missing binary must read as "could not set".
+    failed = False
     try:
-        result = subprocess.run(["raspi-config", *args], capture_output=True, timeout=timeout,
+        result = subprocess.run(["iw", *args], capture_output=True, timeout=timeout,
                                 env=UTF8_LOCALE_ENV, **DECODE)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-    if timed_out:
-        raise NetworkError("raspi-config timed out")
+    except (subprocess.TimeoutExpired, OSError):
+        failed = True
+    if failed:
+        raise NetworkError("iw reg set failed")
     if result.returncode != 0:
-        raise NetworkError((result.stderr or result.stdout).strip() or "raspi-config failed")
+        raise NetworkError((result.stderr or result.stdout).strip() or "iw reg set failed")
     return result.stdout
 
 
@@ -819,25 +829,20 @@ def regulatory_domain(run_iw=None, budget: "Budget | None" = None) -> str | None
     """The Wi-Fi regulatory domain this panel already has, or None.
 
     **This is on the boot path, so it is on the budget.** apply_boot_file
-    calls it whenever the setup file carries no ``country=`` line, and the
-    ``iw reg get`` below is then a subprocess like any other. It was off the
-    table and unclamped for a round, and harmless only by arithmetic accident:
-    QUERY_TIMEOUT_S happens to equal RASPI_TIMEOUT_S, and this branch happens
-    to be the else of the set_country branch, so the total came out right.
-    Neither of those is construction, and the unit file's claim that "every
-    call on the path is on that table" was simply false. It now takes the
-    budget and draws RASPI_TIMEOUT_S from it -- the same slot as
-    raspi-config, because it is the alternative to raspi-config, never both.
+    calls it when the setup file carries no ``country=`` line and STATE has
+    no saved code to replay, and the ``iw reg get`` below is then a
+    subprocess like any other. It draws REG_TIMEOUT_S from the budget, the
+    same slot as set_country, because it is the alternative to set_country,
+    never both.
 
     Two sources, because they answer slightly different questions and neither
     alone is enough:
 
-    - ``/proc/cmdline``, where raspi-config leaves
-      ``cfg80211.ieee80211_regdom=XX``. This is the one that survives a
-      reboot, so it is what "this panel is configured" actually means.
-    - ``iw reg get``, because raspi-config also runs ``iw reg set`` at once,
-      so a domain set earlier in THIS boot is live before it has ever
-      appeared on the kernel command line.
+    - COUNTRY_FILE on STATE, written by set_country(). This is the one that
+      survives a reboot and an update, so it is what "this panel is
+      configured" actually means.
+    - ``iw reg get``, because a domain set earlier in THIS boot is live in
+      the kernel before anything else has been written down.
 
     Any pair that is not two letters reads as None -- that is the whole rule,
     and it is what is load-bearing here. "00" is the world regulatory domain,
@@ -854,24 +859,18 @@ def regulatory_domain(run_iw=None, budget: "Budget | None" = None) -> str | None
     first ``phy#`` line on belongs to a self-managed device, which carries its
     own domain whether or not this panel has ever been configured -- a USB
     dongle with a real alpha2 would otherwise make a fresh panel look set, so
-    set_country() would be skipped and the domain never written into
-    cmdline.txt, dropping a legally meaningful step in silence.
+    set_country() would be skipped and the domain never saved to STATE,
+    dropping a legally meaningful step in silence.
     """
-    try:
-        for token in PROC_CMDLINE.read_text().split():
-            key, sep, value = token.partition("=")
-            if sep and key == "cfg80211.ieee80211_regdom":
-                code = value.strip().upper()
-                if len(code) == 2 and code.isalpha():
-                    return code
-    except OSError:
-        pass
+    saved = saved_country()
+    if saved is not None:
+        return saved
     # min(its own cap, time remaining), exactly like every other call, and
     # passed to the injected runner too so a test can see the bound rather
     # than take it on trust.
     try:
         out = (run_iw or _run_iw_reg_get)(
-            timeout=budget.allow(RASPI_TIMEOUT_S) if budget else RASPI_TIMEOUT_S)
+            timeout=budget.allow(REG_TIMEOUT_S) if budget else REG_TIMEOUT_S)
     except NetworkError:
         return None
     for line in out.splitlines():
@@ -886,7 +885,20 @@ def regulatory_domain(run_iw=None, budget: "Budget | None" = None) -> str | None
     return None
 
 
-def set_country(code: str, run=None, timeout: float = RASPI_TIMEOUT_S) -> None:
+def saved_country() -> str | None:
+    """The country code saved on STATE, or None if there is none, or it is
+    unreadable, or it is not two letters. A missing STATE (nofail, design
+    4.3) reads as "not configured", which is the safe direction."""
+    try:
+        code = COUNTRY_FILE.read_text().strip().upper()
+    except OSError:
+        return None
+    if len(code) == 2 and code.isalpha():
+        return code
+    return None
+
+
+def set_country(code: str, run=None, timeout: float = REG_TIMEOUT_S) -> None:
     """Set the Wi-Fi regulatory domain, which is what turns the radio ON.
 
     An earlier version of this docstring said the radio "may refuse 5 GHz
@@ -899,51 +911,62 @@ def set_country(code: str, run=None, timeout: float = RASPI_TIMEOUT_S) -> None:
     it is here, deliberately (see 6.1: the image is downloaded by strangers
     and cannot know where any of them lives).
 
-    raspi-config's do_wifi_country (20260730, read from the deb) validates the
-    code against /usr/share/zoneinfo/iso3166.tab and returns 1 on a bad one,
-    writes cfg80211.ieee80211_regdom= into cmdline.txt so it survives a
-    reboot, and calls `iw reg set`. It then unblocks the radio -- by one of
-    two branches: `nmcli radio wifi on` IF systemd is up, it is not in a
-    chroot and NetworkManager is already active, ELSE `rfkill unblock wifi`
-    plus a sed of NetworkManager.state. Only after that does it zero
-    /var/lib/systemd/rfkill/*:wlan, inside its own `if is_pi`, which is what
-    makes the unblock survive the next boot.
+    This used to call raspi-config's do_wifi_country, which validated the
+    code, wrote cfg80211.ieee80211_regdom= into cmdline.txt so it survived a
+    reboot, ran `iw reg set`, and unblocked the radio by one of two branches
+    depending on whether NetworkManager was up. On the A/B card none of its
+    persistence works: the root is read-only and the slot's cmdline is
+    replaced by every update. So the two things that mattered are done here
+    directly: `iw reg set` for this boot, and the code saved to COUNTRY_FILE
+    on STATE for every boot after (restore_country() replays it). The
+    caller says `nmcli radio wifi on` itself afterwards, as it always did.
 
-    Which of those two branches runs depends on timing we do not control, so
-    the caller says `nmcli radio wifi on` itself afterwards rather than depend
-    on it.
+    The code is validated as two letters before it reaches a command line,
+    which is the whole of what raspi-config's iso3166 check bought on a
+    panel: a code the kernel does not know leaves the radio in the world
+    domain, which is visible in `iw reg get` and in the journal.
     """
-    (run or _run_raspi_config)(["nonint", "do_wifi_country", code], timeout=timeout)
+    code = code.strip().upper()
+    if len(code) != 2 or not code.isalpha():
+        raise ValueError(f"country must be a two-letter code such as US, got '{code}'")
+    (run or _run_iw_reg_set)(["reg", "set", code], timeout=timeout)
+    try:
+        COUNTRY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        COUNTRY_FILE.write_text(code + "\n")
+    except OSError as e:
+        # STATE is nofail: a panel whose STATE did not mount still gets its
+        # radio for this boot, and says here why it will not next time.
+        log.warning("country %s set for this boot, but could not be saved to %s: %s",
+                    code, COUNTRY_FILE, e.strerror or e)
 
 
 class NetworkManager:
     """nmcli, wrapped. The runner is injected so tests never shell out."""
 
-    def __init__(self, run=None, run_raspi_config=None) -> None:
+    def __init__(self, run=None, run_reg_set=None) -> None:
         self._run = run if run is not None else _run_nmcli
-        self._run_raspi_config = run_raspi_config
+        self._run_iw_reg_set = run_reg_set
 
     def set_country(self, code: str, budget: "Budget | None" = None) -> None:
         """The regulatory domain, which is the precondition for the radio.
 
         Delegates to the module-level set_country so there is one explanation
         of why this exists, and one place tests can replace. Inside the
-        budget: raspi-config is the slowest single step on this path, and a
-        ceiling that leaves it out is not a ceiling.
+        budget: the regulatory step is the slowest single step on this path,
+        and a ceiling that leaves it out is not a ceiling.
         """
-        set_country(code, run=self._run_raspi_config,
-                    timeout=budget.allow(RASPI_TIMEOUT_S) if budget else RASPI_TIMEOUT_S)
+        set_country(code, run=self._run_iw_reg_set,
+                    timeout=budget.allow(REG_TIMEOUT_S) if budget else REG_TIMEOUT_S)
 
     def radio_on(self, budget: "Budget | None" = None) -> None:
-        """Switch the Wi-Fi radio on, whatever raspi-config just did.
+        """Switch the Wi-Fi radio on.
 
-        raspi-config's do_wifi_country only runs `nmcli radio wifi on` when
-        NetworkManager is already active at that instant; otherwise it takes
-        `rfkill unblock wifi` and rewrites NetworkManager.state instead. Both
-        branches are meant to work, but which one runs depends on timing this
-        service does not control, and this call is idempotent, instant, and
-        available to us as root -- so it is cheaper to say it than to reason
-        about which branch upstream took.
+        Setting the regulatory domain does not unblock the radio by itself,
+        and on the A/B card the rfkill state systemd would restore lives on
+        a tmpfs, so every boot starts blocked (rfkill.default_state=0) and
+        this call is what lifts it. It is idempotent, instant, and available
+        to us as root; NetworkManager records the result in its own state
+        file, which is on STATE.
 
         It draws from the budget like everything else, at FAST_TIMEOUT_S:
         setting a property on a local daemon cannot honestly take longer, and
@@ -1455,8 +1478,8 @@ def apply_boot_file(path: Path | None = None, nm: "NetworkManager | None" = None
 
     # Order matters, and the first three steps are all the radio. The
     # regulatory domain is what makes transmitting legal (and, on this image,
-    # possible at all); radio_on() covers whichever branch raspi-config took;
-    # and the interface then needs a moment to become usable.
+    # possible at all); radio_on() lifts the block the image boots with; and
+    # the interface then needs a moment to become usable.
     #
     # The fourth step is join(), not apply(). A usable interface is not the
     # same as a scanned one, and on both v0.1.2 boots the connect went out
@@ -1474,14 +1497,26 @@ def apply_boot_file(path: Path | None = None, nm: "NetworkManager | None" = None
         # it offline over a missing line of text would be a worse bug than the
         # one this check exists to prevent.
         #
-        # On the budget, and in the SAME slot as set_country above: exactly
-        # one of these two branches runs, so the table's raspi-config line
-        # covers whichever it is.
-        country = regulatory_domain(budget=budget)
-        if country is None:
-            raise ValueError(MISSING_COUNTRY)
-        budget.say("no country= line, but this panel is already set to %s; "
-                   "using that", country)
+        # A code saved on STATE is not yet in the kernel, though. On the old
+        # layout it was, because cfg80211.ieee80211_regdom= on the cmdline had
+        # set it before this ran; on the A/B card nothing else replays it
+        # (restore_country() runs only when there is no setup file at all),
+        # so it is set again here or the panel connects in the world domain
+        # for this boot. Idempotent, and it takes the same REG_TIMEOUT_S slot
+        # the `iw reg get` below would otherwise take: exactly one of the
+        # three regulatory calls on this path runs, so the table's one
+        # regulatory line covers whichever it is.
+        country = saved_country()
+        if country is not None:
+            manager.set_country(country, budget=budget)
+            budget.say("no country= line, but %s is saved on STATE; set again "
+                       "for this boot", country)
+        else:
+            country = regulatory_domain(budget=budget)
+            if country is None:
+                raise ValueError(MISSING_COUNTRY)
+            budget.say("no country= line, but this panel is already set to %s; "
+                       "using that", country)
     manager.radio_on(budget=budget)
     budget.say("radio on")
     if manager.wait_for_wifi(budget=budget, clock=clock):
@@ -1501,14 +1536,55 @@ def apply_boot_file(path: Path | None = None, nm: "NetworkManager | None" = None
                 _values(text).get("rotate") or None)
     except OSError:
         # The connect succeeded, but the file could not be rewritten -- most
-        # realistically a /boot/firmware remounted read-only after an unclean
-        # power cut. Say so distinctly: silence here would mean a cleartext
-        # Wi-Fi password stays on the boot partition with nothing anywhere
-        # to say so.
+        # realistically SETUP remounted read-only after an unclean power cut,
+        # or not mounted at all (it is nofail). Say so distinctly: silence
+        # here would mean a cleartext Wi-Fi password stays on the SETUP
+        # partition with nothing anywhere to say so.
         log.warning(
             "applied Wi-Fi settings from %s, but the file could not be "
             "cleared -- your password is still on the boot partition", target)
     return True
+
+
+def restore_country(nm: "NetworkManager | None" = None, clock=None) -> str | None:
+    """Every boot with no setup file: replay the saved country and lift the
+    radio block. Returns the code applied, or None when there is none saved.
+
+    This is what raspi-config's persistence used to do for free through
+    cmdline.txt. With a read-only root and a slot that every update replaces,
+    the only place the code survives is STATE, and the only way it reaches
+    the kernel is to be set again. It draws from a budget of its own so a
+    hung iw or nmcli cannot hold the panel dark: the same two rows of the
+    table, REG_TIMEOUT_S and FAST_TIMEOUT_S, and nothing else.
+    """
+    code = saved_country()
+    if code is None:
+        return None
+    manager = nm if nm is not None else NetworkManager()
+    budget = Budget(REG_TIMEOUT_S + FAST_TIMEOUT_S, clock=clock)
+    manager.set_country(code, budget=budget)
+    manager.radio_on(budget=budget)
+    return code
+
+
+def _restore_after_failure() -> None:
+    """After a setup file that could not be applied: replay the saved country
+    as a boot with no file would, and never let that raise past main().
+
+    Time: restore_country() runs on its own REG_TIMEOUT_S + FAST_TIMEOUT_S
+    budget, and it only runs on the ValueError path, which spent at most one
+    REG_TIMEOUT_S (the `iw reg get` before MISSING_COUNTRY, on a panel that
+    then has nothing saved to replay). Either way this path stays far inside
+    ABSOLUTE_CEILING_S, so the unit's TimeoutStartSec arithmetic is untouched.
+    """
+    try:
+        code = restore_country()
+    except NetworkError as e:
+        log.error("could not restore the saved country either: %s", e)
+        return
+    if code is not None:
+        log.info("country %s restored from %s after the setup file failed",
+                 code, COUNTRY_FILE)
 
 
 def main(argv=None) -> int:
@@ -1524,14 +1600,32 @@ def main(argv=None) -> int:
         target = boot_file()
         if apply_boot_file(target):
             log.info("applied Wi-Fi settings from %s", target)
+        elif (code := restore_country()) is not None:
+            log.info("no setup file; country %s restored from %s", code, COUNTRY_FILE)
         return 0
     except ValueError as e:
         # Deliberately not a failure exit: a typo in a user's file must not
         # stop the panel booting. Say so in the journal and carry on.
         log.error("%s: %s -- left in place so it can be corrected", target, e)
+        # Every ValueError is raised before `iw reg set` runs: parse_wifi_file,
+        # MISSING_COUNTRY and set_country's own two-letter check all come
+        # first. So this boot has no regulatory domain and a blocked radio,
+        # and on the A/B card nothing else supplies them (the cmdline has no
+        # regdom, and the rfkill state systemd would restore is on a tmpfs).
+        # The old layout persisted both independently of this service, so a
+        # typo could not take a working panel dark; now it could, and the
+        # setup file is the repair tool a person edits blind. A previously
+        # configured panel therefore gets what a boot with no file gets; a
+        # panel with nothing saved gets nothing, which is where it was.
+        _restore_after_failure()
         return 0
     except NetworkError as e:
         log.error("could not apply %s: %s", target, e)
+        # Not restored here, and on purpose: a NetworkError can only be raised
+        # once the country phase has been attempted (regulatory_domain
+        # swallows its own), so either the domain is already set and the
+        # radio on, or `iw reg set` itself hung or failed and replaying the
+        # same command would spend another REG_TIMEOUT_S on the same result.
         return 0
     except Exception:
         # Anything else -- a timed-out nmcli call that slipped past the guard

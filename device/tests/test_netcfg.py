@@ -1,3 +1,4 @@
+import inspect
 import json
 import logging
 import os
@@ -142,7 +143,7 @@ def test_the_note_the_panel_writes_is_accepted_once_it_is_filled_in(tmp_path, mo
     monkeypatch.setattr(netcfg, "regulatory_domain", lambda budget=None: None)
     first = FakeNmcli()
     assert apply_boot_file(
-        path, nm=NetworkManager(run=first, run_raspi_config=NO_RASPI_CONFIG),
+        path, nm=NetworkManager(run=first, run_reg_set=NO_REG_SET),
         now=lambda: "NOW") is True
 
     note = path.read_text()
@@ -161,7 +162,7 @@ def test_the_note_the_panel_writes_is_accepted_once_it_is_filled_in(tmp_path, mo
     path.write_text(filled)
     second = FakeNmcli()
     assert apply_boot_file(
-        path, nm=NetworkManager(run=second, run_raspi_config=NO_RASPI_CONFIG),
+        path, nm=NetworkManager(run=second, run_reg_set=NO_REG_SET),
         now=lambda: "LATER") is True, "the panel refused the file its own note told the owner to write"
     assert ["-w", "43", "device", "wifi", "connect", "OtherNet", "password", "othersecret"] in second.calls
     assert netcfg.parse_owner(path.read_text()) == "friend@example.com"
@@ -180,7 +181,7 @@ def test_the_note_records_the_domain_relied_on_when_the_file_had_no_country(
     path.write_text("ssid=HomeNet\npsk=supersecret\n")
     monkeypatch.setattr(netcfg, "regulatory_domain", lambda budget=None: "CA")
     assert apply_boot_file(
-        path, nm=NetworkManager(run=FakeNmcli(), run_raspi_config=NO_RASPI_CONFIG),
+        path, nm=NetworkManager(run=FakeNmcli(), run_reg_set=NO_REG_SET),
         now=lambda: "NOW") is True
     assert "country=CA" in path.read_text()
 
@@ -400,7 +401,7 @@ class FakeNmcli:
 # raspi-config as well as nmcli. A test that fakes only nmcli would shell out
 # to the real raspi-config, which is not on this machine and must never be run
 # by this suite even where it is.
-NO_RASPI_CONFIG = lambda args, timeout=None: ""
+NO_REG_SET = lambda args, timeout=None: ""
 
 
 def test_split_terse_plain():
@@ -582,7 +583,7 @@ def test_apply_boot_file_applies_then_consumes(tmp_path):
     path = tmp_path / "scoreboard-wifi.txt"
     path.write_text("ssid=HomeNet\npsk=supersecret\ncountry=US\n")
     fake = FakeNmcli()
-    nm = NetworkManager(run=fake, run_raspi_config=NO_RASPI_CONFIG)
+    nm = NetworkManager(run=fake, run_reg_set=NO_REG_SET)
     assert apply_boot_file(path, nm=nm, now=lambda: "NOW") is True
     assert ["-w", "43", "device", "wifi", "connect", "HomeNet", "password", "supersecret"] in fake.calls
     assert "supersecret" not in path.read_text()
@@ -607,7 +608,7 @@ def test_apply_boot_file_leaves_a_broken_file_alone(tmp_path):
 def test_apply_boot_file_leaves_the_file_when_nmcli_fails(tmp_path):
     path = tmp_path / "scoreboard-wifi.txt"
     path.write_text("ssid=HomeNet\npsk=supersecret\ncountry=US\n")
-    nm = NetworkManager(run=FakeNmcli(fail_on="connect"), run_raspi_config=NO_RASPI_CONFIG)
+    nm = NetworkManager(run=FakeNmcli(fail_on="connect"), run_reg_set=NO_REG_SET)
     with pytest.raises(NetworkError):
         apply_boot_file(path, nm=nm)
     assert "psk=supersecret" in path.read_text()
@@ -625,7 +626,7 @@ def test_a_fresh_panel_refuses_a_file_with_no_country(tmp_path, monkeypatch):
     path.write_text("ssid=HomeNet\npsk=supersecret\n")
     monkeypatch.setattr(netcfg, "regulatory_domain", lambda budget=None: None)
     with pytest.raises(ValueError, match="country"):
-        apply_boot_file(path, nm=NetworkManager(run=FakeNmcli(), run_raspi_config=NO_RASPI_CONFIG))
+        apply_boot_file(path, nm=NetworkManager(run=FakeNmcli(), run_reg_set=NO_REG_SET))
     assert "psk=supersecret" in path.read_text(), "the user's only copy was destroyed"
 
 
@@ -636,7 +637,7 @@ def test_the_missing_country_message_says_what_to_add(tmp_path, monkeypatch):
     path.write_text("ssid=HomeNet\npsk=supersecret\n")
     monkeypatch.setattr(netcfg, "regulatory_domain", lambda budget=None: None)
     with pytest.raises(ValueError) as caught:
-        apply_boot_file(path, nm=NetworkManager(run=FakeNmcli(), run_raspi_config=NO_RASPI_CONFIG))
+        apply_boot_file(path, nm=NetworkManager(run=FakeNmcli(), run_reg_set=NO_REG_SET))
     message = str(caught.value)
     assert "country=" in message
     assert "US" in message
@@ -647,36 +648,45 @@ def test_a_panel_that_already_has_a_domain_does_not_go_dark_over_a_missing_line(
         tmp_path, monkeypatch, caplog):
     # The case that matters most in the field: a working panel, set up before
     # the country line existed, or whose owner edited the file by hand. Its
-    # regulatory domain is already set and persists in cmdline.txt, so the
-    # radio is on and a country line would add nothing. Refusing here would
-    # take a working panel offline over a missing line of text.
+    # regulatory domain is already live in the kernel (set earlier this boot,
+    # with nothing saved on STATE), so a country line would add nothing.
+    # Refusing here would take a working panel offline over a missing line of
+    # text.
     path = tmp_path / "scoreboard-setup.txt"
     path.write_text("ssid=HomeNet\npsk=supersecret\n")
+    monkeypatch.setattr(netcfg, "COUNTRY_FILE", tmp_path / "does-not-exist")
     monkeypatch.setattr(netcfg, "regulatory_domain", lambda budget=None: "GB")
     fake = FakeNmcli()
     with caplog.at_level(logging.INFO, logger="scoreboard.netcfg"):
         assert apply_boot_file(
-            path, nm=NetworkManager(run=fake, run_raspi_config=NO_RASPI_CONFIG),
+            path, nm=NetworkManager(run=fake, run_reg_set=NO_REG_SET),
             now=lambda: "NOW") is True
     assert ["-w", "43", "device", "wifi", "connect", "HomeNet", "password", "supersecret"] in fake.calls
     assert "GB" in caplog.text, "the journal should say which domain it relied on"
 
 
-def test_regulatory_domain_reads_the_kernel_command_line(tmp_path, monkeypatch):
-    # What raspi-config writes into cmdline.txt, and therefore the signal that
-    # survives a reboot.
-    cmdline = tmp_path / "cmdline"
-    cmdline.write_text("console=serial0,115200 cfg80211.ieee80211_regdom=CA rootwait\n")
-    monkeypatch.setattr(netcfg, "PROC_CMDLINE", cmdline)
+def test_regulatory_domain_reads_the_country_saved_on_state(tmp_path, monkeypatch):
+    # What set_country() writes to STATE, and therefore the signal that
+    # survives a reboot and an update.
+    country = tmp_path / "country"
+    country.write_text("ca\n")
+    monkeypatch.setattr(netcfg, "COUNTRY_FILE", country)
     assert netcfg.regulatory_domain(run_iw=lambda timeout=None: "country 00: DFS-UNSET\n") == "CA"
 
 
+def test_a_saved_country_that_is_not_two_letters_reads_as_unset(tmp_path, monkeypatch):
+    country = tmp_path / "country"
+    country.write_text("00\n")
+    monkeypatch.setattr(netcfg, "COUNTRY_FILE", country)
+    assert netcfg.regulatory_domain(run_iw=lambda timeout=None: "country 00: DFS-UNSET\n") is None
+
+
 def test_regulatory_domain_falls_back_to_iw_within_the_same_boot(tmp_path, monkeypatch):
-    # raspi-config also runs `iw reg set` immediately, so a domain set earlier
-    # in THIS boot is live before it has ever been in /proc/cmdline.
-    cmdline = tmp_path / "cmdline"
-    cmdline.write_text("console=serial0,115200 rootwait\n")
-    monkeypatch.setattr(netcfg, "PROC_CMDLINE", cmdline)
+    # set_country() runs `iw reg set` immediately, so a domain set earlier in
+    # THIS boot is live before STATE has been written to (or when STATE did
+    # not mount).
+    cmdline = tmp_path / "does-not-exist"
+    monkeypatch.setattr(netcfg, "COUNTRY_FILE", cmdline)
     assert netcfg.regulatory_domain(run_iw=lambda timeout=None: "global\ncountry DE: DFS-ETSI\n") == "DE"
 
 
@@ -685,9 +695,7 @@ def test_regulatory_domain_treats_the_world_domain_as_unset(tmp_path, monkeypatc
     # falls back to when nobody has said where it is. That is precisely "not
     # configured", and treating it as configured would put us back where
     # v0.1.1 was.
-    cmdline = tmp_path / "cmdline"
-    cmdline.write_text("console=serial0,115200 rootwait\n")
-    monkeypatch.setattr(netcfg, "PROC_CMDLINE", cmdline)
+    monkeypatch.setattr(netcfg, "COUNTRY_FILE", tmp_path / "does-not-exist")
     assert netcfg.regulatory_domain(run_iw=lambda timeout=None: "global\ncountry 00: DFS-UNSET\n") is None
 
 
@@ -696,10 +704,8 @@ def test_regulatory_domain_ignores_a_self_managed_phy_block(tmp_path, monkeypatc
     # manages its own. A phy block's country says nothing about whether THIS
     # panel has been configured -- a USB dongle carries a real alpha2 out of
     # the box -- so reading it would let a fresh panel report as already set,
-    # skip set_country, and never write the domain into cmdline.txt.
-    cmdline = tmp_path / "cmdline"
-    cmdline.write_text("console=serial0,115200 rootwait\n")
-    monkeypatch.setattr(netcfg, "PROC_CMDLINE", cmdline)
+    # skip set_country, and never save the domain to STATE.
+    monkeypatch.setattr(netcfg, "COUNTRY_FILE", tmp_path / "does-not-exist")
     out = ("global\ncountry 00: DFS-UNSET\n"
            "\nphy#0 (self-managed)\ncountry US: DFS-FCC\n")
     assert netcfg.regulatory_domain(run_iw=lambda timeout=None: out) is None
@@ -708,9 +714,7 @@ def test_regulatory_domain_ignores_a_self_managed_phy_block(tmp_path, monkeypatc
 def test_regulatory_domain_reads_the_global_block_whatever_follows_it(tmp_path, monkeypatch):
     # The other side of the same rule: a real global domain is still read, and
     # a phy block underneath it neither adds to nor overrides it.
-    cmdline = tmp_path / "cmdline"
-    cmdline.write_text("console=serial0,115200 rootwait\n")
-    monkeypatch.setattr(netcfg, "PROC_CMDLINE", cmdline)
+    monkeypatch.setattr(netcfg, "COUNTRY_FILE", tmp_path / "does-not-exist")
     out = ("global\ncountry US: DFS-FCC\n"
            "\nphy#0 (self-managed)\ncountry DE: DFS-ETSI\n")
     assert netcfg.regulatory_domain(run_iw=lambda timeout=None: out) == "US"
@@ -720,16 +724,14 @@ def test_regulatory_domain_treats_the_drivers_own_default_as_unset(tmp_path, mon
     # brcmfmac, the Pi's own Wi-Fi driver, reports its built-in regdom as
     # alpha2 "99" rather than "00". Neither is a country, and what rejects
     # both is "not two letters", not a list of special codes.
-    cmdline = tmp_path / "cmdline"
-    cmdline.write_text("console=serial0,115200 rootwait\n")
-    monkeypatch.setattr(netcfg, "PROC_CMDLINE", cmdline)
+    monkeypatch.setattr(netcfg, "COUNTRY_FILE", tmp_path / "does-not-exist")
     assert netcfg.regulatory_domain(run_iw=lambda timeout=None: "global\ncountry 99: DFS-UNSET\n") is None
 
 
 def test_regulatory_domain_is_none_when_nothing_can_be_read(tmp_path, monkeypatch):
     # No cmdline, no iw. Unknown must read as "not configured", so the file is
     # refused with an explanation rather than applied into a radio that is off.
-    monkeypatch.setattr(netcfg, "PROC_CMDLINE", tmp_path / "does-not-exist")
+    monkeypatch.setattr(netcfg, "COUNTRY_FILE", tmp_path / "does-not-exist")
 
     def boom(timeout=None):
         raise NetworkError("iw is not installed")
@@ -741,10 +743,10 @@ def test_the_iw_call_is_clamped_by_the_budget_like_every_other(tmp_path, monkeyp
     # regulatory_domain() runs `iw reg get`, a subprocess, on the boot path --
     # whenever the setup file has no country= line and /proc/cmdline has no
     # regdom. It was off the budget table and unclamped, and harmless only
-    # because QUERY_TIMEOUT_S happens to equal RASPI_TIMEOUT_S and this is the
+    # because QUERY_TIMEOUT_S happens to equal REG_TIMEOUT_S and this is the
     # else-branch of the raspi-config slot. Arithmetic coincidence is not a
     # bound, and the unit file claims every call on the path is on the table.
-    monkeypatch.setattr(netcfg, "PROC_CMDLINE", tmp_path / "does-not-exist")
+    monkeypatch.setattr(netcfg, "COUNTRY_FILE", tmp_path / "does-not-exist")
     seen = []
 
     def record(timeout=None):
@@ -754,21 +756,21 @@ def test_the_iw_call_is_clamped_by_the_budget_like_every_other(tmp_path, monkeyp
     # Its own cap when there is plenty of budget left.
     plenty = netcfg.Budget(netcfg.BOOT_BUDGET_S)
     assert netcfg.regulatory_domain(run_iw=record, budget=plenty) == "GB"
-    assert seen == [netcfg.RASPI_TIMEOUT_S], \
-        f"the iw call was granted {seen}, not its own {netcfg.RASPI_TIMEOUT_S}s cap"
+    assert seen == [netcfg.REG_TIMEOUT_S], \
+        f"the iw call was granted {seen}, not its own {netcfg.REG_TIMEOUT_S}s cap"
 
     # What is left, when that is less -- which is the whole point of a clamp.
     seen.clear()
     nearly_spent = netcfg.Budget(3, clock=lambda: 1000.0)
     assert netcfg.regulatory_domain(run_iw=record, budget=nearly_spent) == "GB"
     assert seen == [3], f"the iw call was granted {seen} against 3s of budget"
-    assert seen[0] <= netcfg.RASPI_TIMEOUT_S
+    assert seen[0] <= netcfg.REG_TIMEOUT_S
 
 
 def test_a_panel_with_no_country_line_puts_its_iw_call_on_the_budget(tmp_path, monkeypatch):
     # End to end through apply_boot_file, so the call site is covered and not
     # only the function. A budget with nothing left must grant nothing.
-    monkeypatch.setattr(netcfg, "PROC_CMDLINE", tmp_path / "does-not-exist")
+    monkeypatch.setattr(netcfg, "COUNTRY_FILE", tmp_path / "does-not-exist")
     path = tmp_path / "scoreboard-setup.txt"
     path.write_text("ssid=HomeNet\npsk=supersecret\n")
     seen = []
@@ -779,12 +781,40 @@ def test_a_panel_with_no_country_line_puts_its_iw_call_on_the_budget(tmp_path, m
 
     monkeypatch.setattr(netcfg, "_run_iw_reg_get", record)
     fake = FakeNmcli()
-    nm = NetworkManager(run=fake, run_raspi_config=NO_RASPI_CONFIG)
+    nm = NetworkManager(run=fake, run_reg_set=NO_REG_SET)
     assert apply_boot_file(path, nm=nm, now=lambda: "NOW") is True
     assert seen, "apply_boot_file never asked for the regulatory domain"
     assert seen[0] is not None, "the iw call on the boot path was left unbounded"
-    assert seen[0] <= netcfg.RASPI_TIMEOUT_S, \
-        f"the iw call was granted {seen[0]}s, over the {netcfg.RASPI_TIMEOUT_S}s slot"
+    assert seen[0] <= netcfg.REG_TIMEOUT_S, \
+        f"the iw call was granted {seen[0]}s, over the {netcfg.REG_TIMEOUT_S}s slot"
+
+
+def test_a_setup_file_with_no_country_line_replays_the_code_saved_on_state(tmp_path, monkeypatch):
+    # The other half of the "already has a domain" case, and the one the A/B
+    # card changes. The code on STATE is what "configured" means, but it is
+    # not in the kernel until something runs `iw reg set`: the old layout's
+    # cmdline did that before this service ran, and nothing on the new card
+    # does (restore_country() runs only when there is no file). Reading the
+    # code and going on to connect would put the panel in the world domain
+    # for this boot -- the very case the branch says it protects.
+    country = tmp_path / "country"
+    country.write_text("US\n")
+    monkeypatch.setattr(netcfg, "COUNTRY_FILE", country)
+    path = tmp_path / "scoreboard-setup.txt"
+    path.write_text("ssid=HomeNet\npsk=supersecret\n")
+    reg_get, reg_set = [], []
+    monkeypatch.setattr(netcfg, "_run_iw_reg_get", lambda timeout=None: reg_get.append(timeout) or "")
+    fake = FakeNmcli()
+    nm = NetworkManager(run=fake, run_reg_set=lambda args, timeout=None: reg_set.append((args, timeout)) or "")
+    assert apply_boot_file(path, nm=nm, now=lambda: "NOW") is True
+    assert [args for args, _ in reg_set] == [["reg", "set", "US"]], \
+        "a saved country must be set again for this boot, not only read"
+    assert reg_get == [], "with a saved code there is nothing to ask iw; that is the other half of the slot"
+    assert reg_set[0][1] is not None and reg_set[0][1] <= netcfg.REG_TIMEOUT_S, \
+        "the replay is on the boot budget like the branch it replaces"
+    # The radio still comes on and the connect still goes out.
+    assert ["radio", "wifi", "on"] in fake.calls
+    assert ["-w", "43", "device", "wifi", "connect", "HomeNet", "password", "supersecret"] in fake.calls
 
 
 def test_the_radio_is_switched_on_before_connecting(tmp_path, monkeypatch):
@@ -1207,7 +1237,7 @@ def test_the_boot_path_joins_rather_than_connecting_blind(tmp_path, clock):
     path = tmp_path / "scoreboard-setup.txt"
     path.write_text("ssid=ExampleNet\npsk=supersecret\ncountry=US\n")
     air = Air(appears_after=("ExampleNet", 1), clock=clock)
-    nm = NetworkManager(run=air, run_raspi_config=NO_RASPI_CONFIG)
+    nm = NetworkManager(run=air, run_reg_set=NO_REG_SET)
     assert apply_boot_file(path, nm=nm, now=lambda: "NOW") is True
     assert air.rescans >= 1, "the boot path connected without asking for a scan"
     assert air.connects == 1
@@ -1265,14 +1295,14 @@ def test_run_nmcli_timeout_does_not_leak_the_password(monkeypatch):
     assert secret not in rendered
 
 
-def test_run_raspi_config_timeout_raises_network_error(monkeypatch):
+def test_run_iw_reg_set_timeout_raises_network_error(monkeypatch):
     def fake_run(*args, **kwargs):
-        raise subprocess.TimeoutExpired(["raspi-config", "nonint", "do_wifi_country", "US"], 10)
+        raise subprocess.TimeoutExpired(["iw", "reg", "set", "US"], 10)
 
     monkeypatch.setattr(netcfg.subprocess, "run", fake_run)
 
     with pytest.raises(NetworkError):
-        netcfg._run_raspi_config(["nonint", "do_wifi_country", "US"])
+        netcfg._run_iw_reg_set(["reg", "set", "US"])
 
 
 def _capture_subprocess(monkeypatch, stdout=""):
@@ -1290,7 +1320,7 @@ def _capture_subprocess(monkeypatch, stdout=""):
 
 RUNNERS = [
     ("nmcli", lambda: netcfg._run_nmcli(["-t", "-f", "STATE", "general"])),
-    ("raspi-config", lambda: netcfg._run_raspi_config(["nonint", "do_wifi_country", "US"])),
+    ("iw-reg-set", lambda: netcfg._run_iw_reg_set(["reg", "set", "US"])),
     ("iw", netcfg._run_iw_reg_get),
 ]
 
@@ -1369,7 +1399,7 @@ def test_apply_boot_file_warns_but_still_succeeds_when_the_file_cannot_be_cleare
     monkeypatch.setattr(netcfg, "consume", consume_that_fails)
     with caplog.at_level("WARNING"):
         assert apply_boot_file(
-            path, nm=NetworkManager(run=FakeNmcli(), run_raspi_config=NO_RASPI_CONFIG)) is True
+            path, nm=NetworkManager(run=FakeNmcli(), run_reg_set=NO_REG_SET)) is True
     assert "still on the boot partition" in caplog.text
 
 
@@ -1571,8 +1601,8 @@ def test_the_whole_boot_path_is_bounded_when_every_call_runs_to_its_timeout(tmp_
     path = tmp_path / "scoreboard-setup.txt"
     path.write_text("ssid=ExampleNet\npsk=supersecret\ncountry=US\n")
     air = Air(clock=clock, slow=True, connect_errors=[NOT_FOUND] * 20)
-    slow_raspi = lambda args, timeout=None: (clock.sleep(timeout or netcfg.QUERY_TIMEOUT_S), "")[1]
-    nm = NetworkManager(run=air, run_raspi_config=slow_raspi)
+    slow_reg = lambda args, timeout=None: (clock.sleep(timeout or netcfg.QUERY_TIMEOUT_S), "")[1]
+    nm = NetworkManager(run=air, run_reg_set=slow_reg)
     started = clock()
     with pytest.raises(NetworkError):
         apply_boot_file(path, nm=nm, now=lambda: "NOW", clock=clock)
@@ -1614,7 +1644,7 @@ def test_the_enforced_budget_fits_the_unit_and_the_site(clock):
     # And the parts have to fit inside it, or a step is dead code.
     # Every call on the path, named -- the composition is checked in full by
     # test_the_budget_table_names_every_call_on_the_path.
-    assert (netcfg.RASPI_TIMEOUT_S + netcfg.FAST_TIMEOUT_S + netcfg.WIFI_READY_S
+    assert (netcfg.REG_TIMEOUT_S + netcfg.FAST_TIMEOUT_S + netcfg.WIFI_READY_S
             + netcfg.SCAN_BUDGET_S + netcfg.CONNECT_TIMEOUT_S) == netcfg.BOOT_BUDGET_S, \
         "the sequential worst path is not the budget that bounds it"
 
@@ -1721,7 +1751,7 @@ def test_the_milestones_reach_the_journal_with_their_timings(tmp_path, clock, ca
     path = tmp_path / "scoreboard-setup.txt"
     path.write_text("ssid=ExampleNet\npsk=supersecret\ncountry=US\n")
     air = Air(appears_at=("ExampleNet", 3.0), clock=clock)
-    nm = NetworkManager(run=air, run_raspi_config=NO_RASPI_CONFIG)
+    nm = NetworkManager(run=air, run_reg_set=NO_REG_SET)
     with caplog.at_level(logging.INFO, logger="scoreboard.netcfg"):
         assert apply_boot_file(path, nm=nm, now=lambda: "NOW", clock=clock) is True
     said = caplog.text
@@ -1739,7 +1769,7 @@ def test_the_journal_never_carries_the_password(tmp_path, clock, caplog):
     path = tmp_path / "scoreboard-setup.txt"
     path.write_text("ssid=ExampleNet\npsk=supersecret\ncountry=US\n")
     air = Air(visible=["ExampleNet"], connect_errors=[NOT_FOUND, BAD_PASSWORD], clock=clock)
-    nm = NetworkManager(run=air, run_raspi_config=NO_RASPI_CONFIG)
+    nm = NetworkManager(run=air, run_reg_set=NO_REG_SET)
     with caplog.at_level(logging.DEBUG, logger="scoreboard.netcfg"):
         with pytest.raises(NetworkError):
             apply_boot_file(path, nm=nm, now=lambda: "NOW", clock=clock)
@@ -1750,7 +1780,7 @@ def test_the_failure_path_says_how_long_it_spent_and_on_what(tmp_path, clock, ca
     path = tmp_path / "scoreboard-setup.txt"
     path.write_text("ssid=ExampleNet\npsk=supersecret\ncountry=US\n")
     air = Air(visible=["Neighbour"], connect_errors=[NOT_FOUND] * 20, clock=clock)
-    nm = NetworkManager(run=air, run_raspi_config=NO_RASPI_CONFIG)
+    nm = NetworkManager(run=air, run_reg_set=NO_REG_SET)
     with caplog.at_level(logging.INFO, logger="scoreboard.netcfg"):
         with pytest.raises(NetworkError):
             apply_boot_file(path, nm=nm, now=lambda: "NOW", clock=clock)
@@ -1787,7 +1817,7 @@ def test_the_budget_table_names_every_call_on_the_path(tmp_path, clock):
     path = tmp_path / "scoreboard-setup.txt"
     path.write_text("ssid=ExampleNet\npsk=supersecret\ncountry=US\n")
     air = Air(visible=["ExampleNet"], clock=clock)
-    nm = NetworkManager(run=air, run_raspi_config=NO_RASPI_CONFIG)
+    nm = NetworkManager(run=air, run_reg_set=NO_REG_SET)
     apply_boot_file(path, nm=nm, now=lambda: "NOW", clock=clock)
 
     kinds = {tuple(c[:3]) for c in calls_before_the_first_connect(air)}
@@ -1797,7 +1827,7 @@ def test_the_budget_table_names_every_call_on_the_path(tmp_path, clock):
 
     # Every one of them has to be accounted for by a named cap, and the caps
     # have to add up to the enforced ceiling with a full connect left over.
-    before_connect = (netcfg.RASPI_TIMEOUT_S      # set_country
+    before_connect = (netcfg.REG_TIMEOUT_S      # set_country
                       + netcfg.FAST_TIMEOUT_S     # radio wifi on
                       + netcfg.WIFI_READY_S       # the device-state loop
                       + netcfg.SCAN_BUDGET_S)     # the rescan + list loop
@@ -1827,8 +1857,8 @@ def test_the_first_connect_is_guaranteed_a_full_association_even_at_the_worst(cl
     path = tmp_path / "scoreboard-setup.txt"
     path.write_text("ssid=ExampleNet\npsk=supersecret\ncountry=US\n")
     air = Air(clock=clock, slow=True, connect_errors=[NOT_FOUND] * 9)
-    slow_raspi = lambda args, timeout=None: (clock.sleep(timeout or netcfg.RASPI_TIMEOUT_S), "")[1]
-    nm = NetworkManager(run=air, run_raspi_config=slow_raspi)
+    slow_reg = lambda args, timeout=None: (clock.sleep(timeout or netcfg.REG_TIMEOUT_S), "")[1]
+    nm = NetworkManager(run=air, run_reg_set=slow_reg)
     with pytest.raises(NetworkError):
         apply_boot_file(path, nm=nm, now=lambda: "NOW", clock=clock)
     assert air.connect_timeouts, "no connect was attempted at all"
@@ -1838,7 +1868,7 @@ def test_the_first_connect_is_guaranteed_a_full_association_even_at_the_worst(cl
     # raspi-config, radio_on, the device wait and the scan wait all running to
     # their caps, 85 - 40 is exactly 45.
     assert netcfg.CONNECT_TIMEOUT_S == 45
-    before_connect = (netcfg.RASPI_TIMEOUT_S + netcfg.FAST_TIMEOUT_S
+    before_connect = (netcfg.REG_TIMEOUT_S + netcfg.FAST_TIMEOUT_S
                       + netcfg.WIFI_READY_S + netcfg.SCAN_BUDGET_S)
     assert netcfg.BOOT_BUDGET_S - before_connect == netcfg.CONNECT_TIMEOUT_S, \
         (f"{before_connect}s before the connect leaves "
@@ -1965,7 +1995,7 @@ def test_a_connect_that_timed_out_but_actually_worked_is_treated_as_success(cloc
             return super().__call__(args, timeout=timeout)
 
     air = TimesOutThenOnline(visible=["ExampleNet"], clock=clock)
-    nm = NetworkManager(run=air, run_raspi_config=NO_RASPI_CONFIG)
+    nm = NetworkManager(run=air, run_reg_set=NO_REG_SET)
     with caplog.at_level(logging.INFO, logger="scoreboard.netcfg"):
         assert apply_boot_file(path, nm=nm, now=lambda: "NOW", clock=clock) is True
     assert "supersecret" not in path.read_text(), \
@@ -1989,7 +2019,7 @@ def test_a_connect_that_timed_out_and_did_not_work_is_still_a_failure(clock, tmp
             return super().__call__(args, timeout=timeout)
 
     air = TimesOutAndStaysOffline(visible=["ExampleNet"], clock=clock)
-    nm = NetworkManager(run=air, run_raspi_config=NO_RASPI_CONFIG)
+    nm = NetworkManager(run=air, run_reg_set=NO_REG_SET)
     with pytest.raises(NetworkError):
         apply_boot_file(path, nm=nm, now=lambda: "NOW", clock=clock)
     assert "psk=supersecret" in path.read_text(), "the user's only copy was consumed"
@@ -2129,3 +2159,166 @@ def test_the_absolute_ceiling_covers_the_one_check_allowed_past_the_deadline(clo
     assert air.verify_timeouts, "joined() never asked NetworkManager anything"
     assert all(t == netcfg.VERIFY_TIMEOUT_S for t in air.verify_timeouts), \
         f"a verification query was granted {air.verify_timeouts}, not {netcfg.VERIFY_TIMEOUT_S}s"
+
+
+# --- The regulatory domain on the A/B card (OTA design 4.3) ------------------
+#
+# The root is read-only and the slot's boot partition is replaced by every
+# update, so neither place raspi-config persisted the country survives. The
+# country is set with iw for this boot and saved on STATE for the next.
+
+
+def test_set_country_runs_iw_reg_set_and_saves_the_code_on_state(tmp_path, monkeypatch):
+    country = tmp_path / "network" / "country"
+    monkeypatch.setattr(netcfg, "COUNTRY_FILE", country)
+    seen = []
+    netcfg.set_country("us", run=lambda args, timeout=None: seen.append((args, timeout)) or "")
+    assert seen == [(["reg", "set", "US"], netcfg.REG_TIMEOUT_S)]
+    assert country.read_text() == "US\n"
+
+
+def test_set_country_refuses_anything_but_two_letters_before_running_anything(tmp_path, monkeypatch):
+    monkeypatch.setattr(netcfg, "COUNTRY_FILE", tmp_path / "country")
+    seen = []
+    for bad in ("USA", "U", "", "U$", "us; reboot"):
+        with pytest.raises(ValueError):
+            netcfg.set_country(bad, run=lambda args, timeout=None: seen.append(args) or "")
+    assert seen == []
+    assert not (tmp_path / "country").exists()
+
+
+def test_set_country_still_sets_this_boot_when_state_cannot_be_written(tmp_path, monkeypatch, caplog):
+    # STATE is nofail: a panel whose STATE did not mount gets its radio now
+    # and a warning saying it will not next time.
+    monkeypatch.setattr(netcfg, "COUNTRY_FILE", tmp_path / "not-a-dir.txt" / "country")
+    (tmp_path / "not-a-dir.txt").write_text("")
+    seen = []
+    with caplog.at_level("WARNING", logger="scoreboard.netcfg"):
+        netcfg.set_country("GB", run=lambda args, timeout=None: seen.append(args) or "")
+    assert seen == [["reg", "set", "GB"]]
+    assert "could not be saved" in caplog.text
+
+
+def test_set_country_never_calls_raspi_config():
+    # raspi-config writes under /etc and into cmdline.txt, neither of which
+    # is writable or slot-stable on the A/B card.
+    src = inspect.getsource(netcfg.set_country) + inspect.getsource(netcfg._run_iw_reg_set)
+    assert "raspi-config" not in src.replace("raspi-config's", "").replace("call raspi-config", "")
+
+
+def test_restore_country_replays_the_saved_code_and_lifts_the_radio(tmp_path, monkeypatch):
+    country = tmp_path / "country"
+    country.write_text("DE\n")
+    monkeypatch.setattr(netcfg, "COUNTRY_FILE", country)
+    reg, nmcli = [], []
+    nm = NetworkManager(run=lambda args, timeout=None: nmcli.append(args) or "",
+                        run_reg_set=lambda args, timeout=None: reg.append(args) or "")
+    assert netcfg.restore_country(nm) == "DE"
+    assert reg == [["reg", "set", "DE"]]
+    assert nmcli == [["radio", "wifi", "on"]]
+
+
+def test_restore_country_does_nothing_without_a_saved_code(tmp_path, monkeypatch):
+    monkeypatch.setattr(netcfg, "COUNTRY_FILE", tmp_path / "does-not-exist")
+    reg, nmcli = [], []
+    nm = NetworkManager(run=lambda args, timeout=None: nmcli.append(args) or "",
+                        run_reg_set=lambda args, timeout=None: reg.append(args) or "")
+    assert netcfg.restore_country(nm) is None
+    assert reg == [] and nmcli == []
+
+
+def test_restore_country_is_on_a_budget_of_its_own(tmp_path, monkeypatch):
+    country = tmp_path / "country"
+    country.write_text("DE\n")
+    monkeypatch.setattr(netcfg, "COUNTRY_FILE", country)
+    timeouts = []
+    nm = NetworkManager(run=lambda args, timeout=None: timeouts.append(("nmcli", timeout)) or "",
+                        run_reg_set=lambda args, timeout=None: timeouts.append(("iw", timeout)) or "")
+    netcfg.restore_country(nm)
+    assert timeouts[0][0] == "iw" and timeouts[0][1] <= netcfg.REG_TIMEOUT_S
+    assert timeouts[1][0] == "nmcli" and timeouts[1][1] <= netcfg.FAST_TIMEOUT_S
+
+
+def test_main_restores_the_country_on_a_boot_with_no_setup_file(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(netcfg, "BOOT_FILE", tmp_path / "scoreboard-setup.txt")
+    monkeypatch.setattr(netcfg, "LEGACY_BOOT_FILE", tmp_path / "scoreboard-wifi.txt")
+    restored = []
+    monkeypatch.setattr(netcfg, "restore_country", lambda: restored.append(True) or "US")
+    with caplog.at_level("INFO", logger="scoreboard.netcfg"):
+        assert netcfg.main([]) == 0
+    assert restored == [True]
+    assert "country US restored" in caplog.text
+
+
+def test_main_restores_the_country_when_the_setup_file_is_refused(tmp_path, monkeypatch, caplog):
+    # A psk of three characters is a ValueError from parse_wifi_file, raised
+    # before `iw reg set` could run. Under the old layout that left a working
+    # panel working: the cmdline's regdom and the zeroed rfkill file persisted
+    # on their own. On the A/B card neither does, so a typo in the file --
+    # the repair tool a person edits blind -- would boot the panel with no
+    # domain and a blocked radio unless main() replays the saved country the
+    # way a boot with no file does.
+    path = tmp_path / "scoreboard-setup.txt"
+    path.write_text("ssid=HomeNet\npsk=abc\ncountry=US\n")
+    monkeypatch.setattr(netcfg, "BOOT_FILE", path)
+    monkeypatch.setattr(netcfg, "LEGACY_BOOT_FILE", tmp_path / "scoreboard-wifi.txt")
+    country = tmp_path / "country"
+    country.write_text("US\n")
+    monkeypatch.setattr(netcfg, "COUNTRY_FILE", country)
+    reg, nmcli = [], []
+    monkeypatch.setattr(netcfg, "_run_iw_reg_set", lambda args, timeout=None: reg.append(args) or "")
+    monkeypatch.setattr(netcfg, "_run_nmcli", lambda args, timeout=None: nmcli.append(args) or "")
+    with caplog.at_level("INFO", logger="scoreboard.netcfg"):
+        assert netcfg.main([]) == 0
+    assert reg == [["reg", "set", "US"]], "the saved country was not set again after the file was refused"
+    assert nmcli == [["radio", "wifi", "on"]], "the radio block was not lifted after the file was refused"
+    assert "left in place" in caplog.text, "the error about the file must still be logged"
+    assert "country US restored" in caplog.text
+    assert path.exists(), "the refused file stays for the person to correct"
+
+
+def test_main_does_not_replay_the_country_after_a_network_error(tmp_path, monkeypatch, caplog):
+    # A NetworkError is only ever raised after the country phase has been
+    # attempted -- here the connect failed with the domain set and the radio
+    # on. Replaying would be the same two commands again, and on a hung iw it
+    # would be another REG_TIMEOUT_S for the same answer.
+    path = tmp_path / "scoreboard-setup.txt"
+    path.write_text("ssid=HomeNet\npsk=supersecret\ncountry=US\n")
+    monkeypatch.setattr(netcfg, "BOOT_FILE", path)
+    monkeypatch.setattr(netcfg, "LEGACY_BOOT_FILE", tmp_path / "scoreboard-wifi.txt")
+    monkeypatch.setattr(netcfg, "COUNTRY_FILE", tmp_path / "country")
+    reg = []
+    monkeypatch.setattr(netcfg, "_run_iw_reg_set", lambda args, timeout=None: reg.append(args) or "")
+    monkeypatch.setattr(netcfg, "_run_nmcli", FakeNmcli(fail_on="connect"))
+    with caplog.at_level("ERROR", logger="scoreboard.netcfg"):
+        assert netcfg.main([]) == 0
+    assert reg == [["reg", "set", "US"]], "the country is set exactly once on this path"
+
+
+def test_a_failed_restore_after_a_refused_file_still_exits_zero(tmp_path, monkeypatch, caplog):
+    # The replay is a courtesy to a configured panel; a hung iw during it must
+    # not turn a typo into a failed unit, any more than the typo itself does.
+    path = tmp_path / "scoreboard-setup.txt"
+    path.write_text("ssid=HomeNet\npsk=abc\n")
+    monkeypatch.setattr(netcfg, "BOOT_FILE", path)
+    monkeypatch.setattr(netcfg, "LEGACY_BOOT_FILE", tmp_path / "scoreboard-wifi.txt")
+    country = tmp_path / "country"
+    country.write_text("US\n")
+    monkeypatch.setattr(netcfg, "COUNTRY_FILE", country)
+
+    def hung(args, timeout=None):
+        raise NetworkError("iw reg set timed out")
+
+    monkeypatch.setattr(netcfg, "_run_iw_reg_set", hung)
+    with caplog.at_level("ERROR", logger="scoreboard.netcfg"):
+        assert netcfg.main([]) == 0
+    assert "could not restore the saved country" in caplog.text
+
+
+def test_the_setup_file_lives_on_the_setup_partition():
+    # /boot/firmware is now the running slot's own FAT, replaced by every
+    # update and one of three FAT partitions a computer may show; the setup
+    # file lives on the one whose label the instructions can name.
+    assert str(netcfg.BOOT_FILE) == "/boot/setup/scoreboard-setup.txt"
+    assert str(netcfg.LEGACY_BOOT_FILE) == "/boot/setup/scoreboard-wifi.txt"
+    assert str(netcfg.COUNTRY_FILE) == "/state/network/country"

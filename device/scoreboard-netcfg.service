@@ -1,12 +1,22 @@
-# Applies device/config-free Wi-Fi settings left on the boot partition, then
-# removes them from it. Runs on every boot, not just the first: this is the
-# only way to change a panel's network from a Windows or Mac machine, because
-# NetworkManager keeps its connections on the ext4 root partition that neither
-# can read.
+# Applies device/config-free Wi-Fi settings left on the SETUP partition, then
+# removes them from it; on a boot with no setup file it replays the saved
+# regulatory domain from STATE instead. Runs on every boot, not just the
+# first: this is the only way to change a panel's network from a Windows or
+# Mac machine, because NetworkManager keeps its connections on an ext4
+# partition that neither can read.
 
 [Unit]
-Description=Apply scoreboard Wi-Fi settings from the boot partition
-After=NetworkManager.service
+Description=Apply scoreboard Wi-Fi settings from the SETUP partition
+# boot-setup.mount is SETUP, where the setup file is; state.mount carries
+# the saved country this unit replays. Both are `nofail`, so local-fs.target
+# does not wait for them (systemd.mount(5)) and nothing else here would: on
+# a boot where their fsck is slow this unit would find no file and no saved
+# country and leave the radio blocked for the boot. After= waits for the
+# mount jobs to end, and no more -- not RequiresMountsFor=, which would stop
+# the unit on a torn partition instead of letting the panel reach its help
+# screen (design 4.3). NetworkManager itself is ordered after its own two
+# binds by the drop-in in device/NetworkManager.service.d/.
+After=NetworkManager.service boot-setup.mount state.mount
 Wants=NetworkManager.service
 Before=scoreboard.service
 
@@ -16,25 +26,56 @@ RemainAfterExit=no
 WorkingDirectory=/opt/scoreboard
 ExecStart=/opt/scoreboard/.venv/bin/python -m scoreboard.netcfg
 # Runs as root: it writes a NetworkManager system connection, sets the Wi-Fi
-# regulatory domain through raspi-config, and rewrites a file on the boot
-# partition. It is seconds at boot, not a resident service, and it exits 0
-# even when the file is wrong so a typo cannot stop the panel starting.
+# regulatory domain with iw and saves it on STATE, and rewrites a file on
+# the SETUP partition. It is seconds at boot, not a resident service, and it
+# exits 0 even when the file is wrong so a typo cannot stop the panel
+# starting.
+#
+# Root, but not root everywhere. This is one of the two units the OTA design
+# (4.3) allows to write SETUP, and the design's rule that nothing of ours may
+# write /boot/firmware is enforced by the gate only through "no unit names
+# /boot/firmware in ReadWritePaths=" -- which says nothing about a unit that
+# has no ProtectSystem= at all and can therefore write the running slot's
+# FAT, the read-only root's remounted paths and all of STATE. So the whole
+# tree is read-only to this process except the two places it has to write:
+# the setup file it consumes, and the country it saves. The NetworkManager
+# profile goes over D-Bus, so nothing under /etc is needed; iw is a netlink
+# call; the venv and /opt/scoreboard are only read. The gate asserts both
+# lines are here, and that any unit naming /boot/setup in ReadWritePaths=
+# carries ProtectSystem=strict, because without it the list is decoration.
+#
+# The dash on /state/network is the torn-STATE boot (design 4.3, H10).
+# /boot/setup is a directory on the read-only root, a mount point that is
+# there whether or not SETUP mounted; /state/network is not: it lives inside
+# STATE, and when STATE's mount job fails, /state is an empty directory on
+# the root and the path does not exist. Without the dash systemd cannot set
+# up the namespace (226/NAMESPACE), the unit never starts, and the SETUP-file
+# repair path this unit exists for is dead on exactly the boot that needs it.
+# With it the missing path is skipped; the country save then fails on the
+# read-only root (mkdir under an empty /state), which set_country() logs
+# and survives, as it already does for any unmounted STATE. The gate refuses an
+# undashed STATE path in any unit's ReadWritePaths= for the same reason.
+#
+# Provisional until H10 boots the image, like every directive on this card;
+# if either line has to come out, H10 records why.
+ProtectSystem=strict
+ReadWritePaths=/boot/setup -/state/network
 #
 # Stated rather than inherited, because this unit is Before=scoreboard.service
 # and so every second it takes is a second the panel shows nothing.
 #
 # netcfg ENFORCES its own budget rather than adding one up. BOOT_BUDGET_S in
 # device/scoreboard/netcfg.py is a single monotonic deadline, created once and
-# threaded through every step; each nmcli call, and raspi-config, is given
+# threaded through every step; each nmcli call, and iw, is given
 # timeout=min(its own cap, time remaining), and every loop re-checks the
 # deadline after a call returns rather than only before one. So the ceiling is
 # the number, by construction:
 #
-#   set_country   -> raspi-config               RASPI_TIMEOUT_S    10 s
-#     or, when the setup file has no country= line and the kernel command
-#     line carries no regdom either, the other half of that same slot --
-#     one branch or the other, never both:
-#     regulatory_domain -> iw reg get           RASPI_TIMEOUT_S   (10 s)
+#   set_country   -> iw reg set                 REG_TIMEOUT_S    10 s
+#     or, when the setup file has no country= line and STATE carries no
+#     saved country either, the other half of that same slot -- one branch
+#     or the other, never both:
+#     regulatory_domain -> iw reg get           REG_TIMEOUT_S   (10 s)
 #   radio_on      -> nmcli radio wifi on        FAST_TIMEOUT_S      5 s
 #   wait_for_wifi -> device-state queries+naps  WIFI_READY_S       10 s
 #   wait_for_ssid -> rescans, list polls, naps  SCAN_BUDGET_S      15 s
@@ -49,7 +90,7 @@ ExecStart=/opt/scoreboard/.venv/bin/python -m scoreboard.netcfg
 # path was really 57 s and the first connect was measured getting 32 s and
 # 27 s while the table claimed 45; and regulatory_domain()'s `iw reg get` was
 # missing from it too, unclamped, and harmless only because QUERY_TIMEOUT_S
-# happens to equal RASPI_TIMEOUT_S. It is now drawn from the budget like
+# happens to equal REG_TIMEOUT_S (then called RASPI_TIMEOUT_S). It is now drawn from the budget like
 # everything else. The instant calls now have a 5 s cap of their own
 # rather than the 10 s hung-binary default, the rescans live inside
 # wait_for_ssid's budget, and 40 + 45 = 85 exactly -- so even when every

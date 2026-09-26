@@ -71,6 +71,11 @@ test("the provider is looked up, not created here", () => {
 // Amended by the controller's Task 3 review ruling: the publisher may also
 // read latest.json (to refuse moving it backwards) and list the bucket, but
 // only for that one key -- never a general read, and never an open list.
+// Since the update path (OTA design 6.4) the test channel's pointer,
+// latest-test.json, is the second and only other key treated this way; and
+// since SCO-67's review the publisher may also list one version's own
+// images/<v>/ prefix, names only, to refuse a number already published on
+// the other channel (the two channels share the prefix).
 test("the publisher can upload, invalidate, and read only the manifest, and nothing else", () => {
   const policyText = code(block(images, 'data "aws_iam_policy_document" "image_publisher" {'));
   const actions = [...policyText.matchAll(/actions\s*=\s*\[([^\]]*)\]/g)]
@@ -80,6 +85,7 @@ test("the publisher can upload, invalidate, and read only the manifest, and noth
     "cloudfront:CreateInvalidation",
     "s3:AbortMultipartUpload",
     "s3:GetObject",
+    "s3:ListBucket",
     "s3:ListBucket",
     "s3:PutObject",
   ]);
@@ -98,26 +104,39 @@ test("the publisher can upload, invalidate, and read only the manifest, and noth
   const uploadResources = [...uploadStatement.matchAll(/resources\s*=\s*\[([^\]]*)\]/g)].map((m) => m[1].trim());
   assert.equal(uploadResources.length, 1, "the Upload statement must have exactly one resources assignment");
   assert.equal(
-    uploadResources[0],
-    '"${aws_s3_bucket.images.arn}/images/*", "${aws_s3_bucket.images.arn}/latest.json"',
-    "the Upload statement's resources must be exactly images/* and latest.json, nothing wider",
+    uploadResources[0].replace(/\s+/g, " "),
+    '"${aws_s3_bucket.images.arn}/images/*", "${aws_s3_bucket.images.arn}/latest.json", "${aws_s3_bucket.images.arn}/latest-test.json"',
+    "the Upload statement's resources must be exactly images/*, latest.json and latest-test.json, nothing wider",
   );
 
   const getStatement = statements.find((s) => /"s3:GetObject"/.test(s));
   assert.ok(getStatement, "no statement grants s3:GetObject");
   const getResources = [...getStatement.matchAll(/resources\s*=\s*\[([^\]]*)\]/g)].map((m) => m[1].trim());
   assert.equal(getResources.length, 1, "s3:GetObject must appear in exactly one resources assignment");
-  assert.equal(getResources[0], '"${aws_s3_bucket.images.arn}/latest.json"', "s3:GetObject's only resource must be latest.json");
+  assert.equal(getResources[0].replace(/\s+/g, " "), '"${aws_s3_bucket.images.arn}/latest.json", "${aws_s3_bucket.images.arn}/latest-test.json"',
+    "s3:GetObject's only resources must be the two channel pointers");
 
-  const listStatement = statements.find((s) => /"s3:ListBucket"/.test(s));
-  assert.ok(listStatement, "no statement grants s3:ListBucket");
-  assert.match(listStatement, /resources\s*=\s*\[\s*aws_s3_bucket\.images\.arn\s*\]/, "s3:ListBucket must be scoped to the bucket ARN, not an object path");
-  const listConditions = braceBodies(listStatement, "condition {");
-  assert.equal(listConditions.length, 1, "s3:ListBucket must carry exactly one condition");
-  assert.match(listConditions[0], /test\s*=\s*"StringEquals"/);
-  assert.match(listConditions[0], /variable\s*=\s*"s3:prefix"/);
-  assert.match(listConditions[0], /values\s*=\s*\["latest\.json"\]/);
-  assert.doesNotMatch(listConditions[0], /StringLike/, "the ListBucket condition must be an exact match, not a pattern");
+  const listStatements = statements.filter((s) => /"s3:ListBucket"/.test(s));
+  assert.equal(listStatements.length, 2, "s3:ListBucket is granted in exactly two statements: the pointers, and one version prefix");
+  for (const listStatement of listStatements) {
+    assert.match(listStatement, /resources\s*=\s*\[\s*aws_s3_bucket\.images\.arn\s*\]/, "s3:ListBucket must be scoped to the bucket ARN, not an object path");
+    assert.match(listStatement, /actions\s*=\s*\["s3:ListBucket"\]/, "a ListBucket statement grants nothing else");
+    const listConditions = braceBodies(listStatement, "condition {");
+    assert.equal(listConditions.length, 1, "each s3:ListBucket statement must carry exactly one condition");
+    assert.match(listConditions[0], /variable\s*=\s*"s3:prefix"/);
+  }
+  const pointers = listStatements.find((s) => /latest\.json/.test(s));
+  const pointerCondition = braceBodies(pointers, "condition {")[0];
+  assert.match(pointerCondition, /test\s*=\s*"StringEquals"/);
+  assert.match(pointerCondition, /values\s*=\s*\["latest\.json", "latest-test\.json"\]/);
+  assert.doesNotMatch(pointerCondition, /StringLike/, "the pointer condition must be an exact match, not a pattern");
+  // The version prefix: a pattern, because the version is not known when
+  // the policy is written, but one that can only name a directory under
+  // images/ whose name starts with v -- not the bucket root, not latest*.
+  const prefix = listStatements.find((s) => /images\//.test(s));
+  const prefixCondition = braceBodies(prefix, "condition {")[0];
+  assert.match(prefixCondition, /test\s*=\s*"StringLike"/);
+  assert.match(prefixCondition, /values\s*=\s*\["images\/v\*\/"\]/, "the prefix pattern is exactly images/v*/");
 
   const invalidateStatement = statements.find((s) => /"cloudfront:CreateInvalidation"/.test(s));
   assert.ok(invalidateStatement, "no statement grants cloudfront:CreateInvalidation");
