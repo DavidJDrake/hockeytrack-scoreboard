@@ -16,6 +16,11 @@ __pycache__/
 # Public root CA, pinned at build time and committed on purpose -- see
 # device/scoreboard/identity.py. Nothing else certificate-shaped is.
 !device/certs/AmazonRootCA1.pem
+# The release-signing PUBLIC keys, exported from KMS and committed on purpose:
+# the trust root every panel verifies a release against. The image gate
+# refuses any file in this directory that is a private key, and the publish
+# job cross-checks each one against KMS before it signs.
+!device/certs/release-signing/*.pem
 .playwright-mcp/
 
 # Written by `make site-config` from terraform outputs. Nothing in it is a
