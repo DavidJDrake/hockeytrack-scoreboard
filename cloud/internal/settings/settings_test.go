@@ -192,3 +192,65 @@ func TestTheBoundsAndDefaultsAreThePanels(t *testing.T) {
 		t.Error("this package's numbers have moved away from the panel's")
 	}
 }
+
+// --- orientation: a panel's own, one of five words, and never an account's
+
+func rot(n int) *Rotate { r := Rotate(n); return &r }
+
+func TestRotateIsOneOfFourTurnsOrAuto(t *testing.T) {
+	for _, body := range []string{`{"rotate":0}`, `{"rotate":90}`, `{"rotate":180}`, `{"rotate":270}`} {
+		if s, err := Decode([]byte(body)); err != nil || s.Rotate == nil {
+			t.Errorf("%s: %+v, %v", body, s, err)
+		}
+	}
+	// "auto" is a request, not a value: it is stored as nothing, so the
+	// panel decides from its shape or its card as it did before.
+	if s, err := Decode([]byte(`{"rotate":"auto"}`)); err != nil || s.Rotate != nil {
+		t.Errorf("auto: %+v, %v", s, err)
+	}
+	// The panel's placement raises on anything but a quarter turn, so
+	// nothing else may be stored, whatever shape it takes.
+	for _, body := range []string{`{"rotate":45}`, `{"rotate":-90}`, `{"rotate":360}`, `{"rotate":"90"}`, `{"rotate":"sideways"}`,
+		`{"rotate":true}`, `{"rotate":90.0}`, `{"rotate":1.5}`, `{"rotate":[90]}`, `{"rotate":{}}`, `{"rotate":""}`} {
+		if _, err := Decode([]byte(body)); !errors.Is(err, ErrInvalid) {
+			t.Errorf("%s was accepted", body)
+		}
+	}
+	// null says nothing, as it does for every other key of a layer.
+	if s, err := Decode([]byte(`{"rotate":null}`)); err != nil || s.Rotate != nil {
+		t.Errorf("null: %+v, %v", s, err)
+	}
+}
+
+func TestZeroDegreesIsAValueOnTheWire(t *testing.T) {
+	r, _ := Resolve(Settings{}, Settings{Rotate: rot(0)})
+	if got, _ := json.Marshal(r.Wire()); string(got) != `{"v":1,"countdownLeadMin":720,"finalHoldMin":180,"rotate":0}` {
+		t.Errorf("wire = %s", got)
+	}
+	r, _ = Resolve(Settings{}, Settings{})
+	if got, _ := json.Marshal(r.Wire()); strings.Contains(string(got), "rotate") {
+		t.Errorf("nothing set, yet the wire says %s", got)
+	}
+}
+
+func TestRotateIsReadFromThePanelLayerOnly(t *testing.T) {
+	// The handler refuses the key on the account route; this is the second
+	// lock, for a value that reached the account layer some other way.
+	r, _ := Resolve(Settings{Rotate: rot(180)}, Settings{})
+	if r.Rotate != nil {
+		t.Errorf("an account's rotate reached a panel: %v", *r.Rotate)
+	}
+	r, _ = Resolve(Settings{Rotate: rot(180)}, Settings{Rotate: rot(270)})
+	if r.Rotate == nil || *r.Rotate != 270 {
+		t.Errorf("resolved = %+v", r)
+	}
+}
+
+func TestADamagedStoredRotateReadsAsNothing(t *testing.T) {
+	if s := Load(`{"finalHoldMin":30,"rotate":45}`); s.Rotate != nil || s.FinalHoldMin != nil {
+		t.Errorf("loaded %+v from a row that cannot be right", s)
+	}
+	if s := Load(Stored(Settings{Rotate: rot(270)})); s.Rotate == nil || *s.Rotate != 270 {
+		t.Errorf("round trip lost the orientation: %+v", s)
+	}
+}

@@ -2,8 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
-  BUILT_IN, HOLD_CHOICES, OLDER_PANELS_NOTE, SETTINGS_SINCE, HOLD_ZERO, LEAD_CHOICES, LEAD_ZERO, SettingsError, choicesWith, displayFor, durationLabel,
-  formFrom, layerFrom, sleepLabel, underlying, zoneList,
+  BUILT_IN, HOLD_CHOICES, OLDER_PANELS_NOTE, ROTATE_AUTO, ROTATE_CHOICES, ROTATE_NOTE, ROTATE_SINCE, SETTINGS_SINCE, HOLD_ZERO, LEAD_CHOICES, LEAD_ZERO,
+  SettingsError, choicesWith, displayFor, durationLabel, formFrom, layerFrom, rotateLabel, sleepLabel, underlying, zoneList,
 } from "../assets/settings.js";
 
 const TORONTO = { enabled: true, start: "23:00", end: "07:00", zone: "America/Toronto" };
@@ -102,4 +102,41 @@ test("the version the note names is the one whose panel reads settings", () => {
   // The built-in values the note quotes are the real ones.
   assert.match(OLDER_PANELS_NOTE, /12 hours before/);
   assert.match(OLDER_PANELS_NOTE, /up for 3 hours/);
+});
+
+// --- which way up (SCO-34)
+
+test("the orientation choices are the panel's four quarter turns and automatic", () => {
+  assert.deepEqual(ROTATE_CHOICES, [0, 90, 180, 270]);
+  const py = readFileSync(new URL("../../device/scoreboard/config.py", import.meta.url), "utf8");
+  assert.match(py, /ROTATIONS = \(0, 90, 180, 270\)/, "the panel's own set moved");
+  assert.equal(rotateLabel(ROTATE_AUTO), "Automatic (from the panel's shape, or its card)");
+  assert.equal(rotateLabel(0), "0° (not turned)");
+  assert.equal(rotateLabel(270), "270° clockwise");
+});
+
+test("a stored turn round-trips, and automatic is sent as nothing", () => {
+  for (const layer of [{ rotate: 0 }, { rotate: 270, finalHoldMin: 30 }]) assert.deepEqual(layerFrom(formFrom(layer)), layer);
+  assert.equal(formFrom({}).rotate, ROTATE_AUTO);
+  assert.deepEqual(layerFrom({ lead: "inherit", hold: "inherit", sleepMode: "inherit", rotate: ROTATE_AUTO }), {});
+  // An account's form has no such field, and sends no such key.
+  assert.deepEqual(layerFrom({ lead: "inherit", hold: "inherit", sleepMode: "inherit" }), {});
+});
+
+test("a turn that is not one of the four is refused here, in words", () => {
+  for (const rotate of ["45", "-90", "360", "90.5", "sideways", "", " 90"]) {
+    assert.throws(() => layerFrom({ lead: "inherit", hold: "inherit", sleepMode: "inherit", rotate }), SettingsError, rotate);
+  }
+});
+
+test("the version the orientation note names is the one whose panel turns on it", () => {
+  // Display.rotate and the re-placement in the loop arrived in the image
+  // after v0.1.6. If this number and the image that carries it part ways
+  // the note is a lie; the release notes for that image are where to check.
+  assert.equal(ROTATE_SINCE, "v0.1.7");
+  const py = readFileSync(new URL("../../device/scoreboard/main.py", import.meta.url), "utf8");
+  assert.match(py, /^    rotate: int \| None = None$/m, "the panel no longer reads rotate from the document");
+  assert.match(py, /cfg\.save_rotate\(display\.rotate\)/, "the panel no longer keeps the orientation on its card");
+  assert.match(ROTATE_NOTE, /within seconds/);
+  assert.match(ROTATE_NOTE, /older than v0\.1\.7 ignore it/);
 });

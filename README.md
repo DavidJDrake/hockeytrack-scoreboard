@@ -168,12 +168,17 @@ Wi-Fi, so it is set once and then left alone.
 
 It belongs on the card because that is the only place a panel can be told
 before it has been registered, and the pairing code an unregistered panel
-shows is exactly the screen you have to be able to read. Two other places can
-override it, in this order: `SCOREBOARD_ROTATE` in the environment (the
-desktop preview's knob) beats `"rotate"` in `device.json`, which beats the
-card. `device.json` is written by the panel when it enrolls and carries only
-its thing name and endpoint, so in practice nothing puts a rotation there
-today — see `docs/hardware-checks.md` for the note on that.
+shows is exactly the screen you have to be able to read. Once the panel is
+on your account, the site's panel page has the same choice under **Display
+settings** (Automatic, 0, 90, 180, 270): the panel turns its next frame,
+with no restart, and writes the value into its own `device.json` so the next
+boot is right from the first frame. The order, when more than one has
+something to say: `SCOREBOARD_ROTATE` in the environment (the desktop
+preview's knob) beats the site's config document, which beats `"rotate"` in
+`device.json` (the site's last word, kept on the card), which beats the
+setup file. Choosing Automatic on the site hands the decision back to the
+setup file and the display's shape. Needs image v0.1.7; an older panel
+ignores the site's value.
 
 The display font, Barlow Condensed, is bundled in `device/scoreboard/fonts/`
 under the SIL Open Font Licence.

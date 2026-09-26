@@ -60,3 +60,51 @@ def test_config_dir_follows_the_environment(tmp_path, monkeypatch):
 def test_config_dir_defaults_to_the_checkout(monkeypatch):
     monkeypatch.delenv("SCOREBOARD_CONFIG_DIR", raising=False)
     assert default_config_dir().name == "config"
+
+
+# --- the site's orientation is kept on the card (SCO-34)
+
+def test_a_new_orientation_is_written_to_device_json_and_read_back_next_boot(tmp_path):
+    cfg = Config.load(config_dir(tmp_path, rotate=90))
+    assert cfg.save_rotate(270) is True
+    assert cfg.rotate == 270
+    assert Config.load(tmp_path).rotate == 270
+    # The rest of the identity survives the rewrite.
+    d = json.loads((tmp_path / "device.json").read_text())
+    assert (d["thingName"], d["endpoint"], d["brightness"]) == ("scoreboard-test", "example-ats.iot.us-east-1.amazonaws.com", 1.0)
+    assert not (tmp_path / "device.json.tmp").exists()
+
+
+def test_the_same_orientation_again_costs_no_write(tmp_path):
+    # The retained document is replayed on every reconnect; the card is not
+    # rewritten for it.
+    cfg = Config.load(config_dir(tmp_path, rotate=270))
+    before = (tmp_path / "device.json").stat().st_mtime_ns
+    assert cfg.save_rotate(270) is False
+    assert (tmp_path / "device.json").stat().st_mtime_ns == before
+    cfg = Config.load(config_dir(tmp_path))  # no key at all
+    assert cfg.save_rotate(None) is False
+    assert "rotate" not in json.loads((tmp_path / "device.json").read_text())
+
+
+def test_nothing_from_the_site_is_written_as_auto(tmp_path):
+    # So the card and the display's shape get their turn again next boot.
+    cfg = Config.load(config_dir(tmp_path, rotate=180))
+    assert cfg.save_rotate(None) is True
+    assert json.loads((tmp_path / "device.json").read_text())["rotate"] == "auto"
+    assert Config.load(tmp_path).rotate is None
+
+
+def test_a_reset_panel_forgets_its_orientation(tmp_path):
+    from scoreboard.reset import factory_reset
+
+    class NM:
+        def forget_all(self):
+            pass
+
+    cfg = Config.load(config_dir(tmp_path))
+    cfg.save_rotate(270)
+    factory_reset(tmp_path, NM())
+    assert not (tmp_path / "device.json").exists()
+    with pytest.raises(NotProvisioned):
+        Config.load(tmp_path)

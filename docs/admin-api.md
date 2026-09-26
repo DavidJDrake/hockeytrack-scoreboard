@@ -157,6 +157,13 @@ key says nothing, so the layer beneath shows through:
 - `countdownLeadMin` 0 to 2880, `finalHoldMin` 0 to 1440: whole minutes.
 - `sleep.enabled: false` is a value, not an absence: it is how a panel says
   "no sleep hours" over an account default that has some.
+- `rotate`: `0`, `90`, `180`, `270` (degrees clockwise) or `"auto"`, which is
+  stored as nothing. **Panel only**: which way up a panel hangs is a fact
+  about one piece of glass, and `PUT /api/settings` refuses the key with a
+  400. Cleared with the rest of the overrides when the panel is released.
+  The document carries `display.rotate` only when one is set; absent, the
+  panel decides from its card or the shape of its display, as before. A
+  panel on an image before v0.1.7 reads the key and ignores it.
 - `start`/`end` are `HH:MM`; `zone` is an IANA name, checked against an
   alphabet and then against the time zone data built into the binary. Equal
   ends are stored as switched off.
@@ -209,7 +216,8 @@ whole document, because a retained message replaces what was there:
 ```json
 {"gameId": 2026020001, "chosenAt": 1789871240471,
  "display": {"v":1,"countdownLeadMin":120,"finalHoldMin":180,
-             "sleep":{"start":"23:00","end":"07:00","zone":"America/Toronto"}}}
+             "sleep":{"start":"23:00","end":"07:00","zone":"America/Toronto"},
+             "rotate":270}}
 ```
 
 `chosenAt` changes only when the owner chooses a game; every other publish

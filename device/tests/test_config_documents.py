@@ -24,4 +24,5 @@ def test_the_panel_reads_what_the_cloud_writes(case):
         "gameId": parse_config(payload), "chosenAt": parse_chosen_at(payload),
         "countdownLeadS": display.countdown_lead_s, "finalHoldS": display.final_hold_s, "sleep": sleep,
         "wake": display.wake and [display.wake.mode, display.wake.until_ms],
+        "rotate": display.rotate,
     } == want

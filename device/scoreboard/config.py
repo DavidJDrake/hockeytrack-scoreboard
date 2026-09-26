@@ -90,6 +90,38 @@ class Config:
             brightness=float(d.get("brightness", 1.0)), rotate=rotate,
         )
 
+    def save_rotate(self, rotate: int | None) -> bool:
+        """Remember which way up the site says this panel hangs, so the next
+        boot draws its first frame turned the right way rather than waiting
+        for the document to arrive. Returns whether anything was written.
+
+        Orientation is read before the display opens (``main.chosen_rotation``),
+        so it is the one setting the panel keeps on its card, and device.json
+        is the file that already holds what is the panel's own. None is
+        written as ``"auto"``, the word the site used, which parse_rotate
+        reads back as None. Nothing is written when the file already says
+        the same, so a retained document replayed on every reconnect costs
+        no writes to the card.
+
+        The file is the panel's identity, and a half-written identity is a
+        panel that will not start (Config.load refuses corrupt JSON so a
+        claimed panel never shows a claim code again), so it is replaced
+        whole: written beside itself and renamed over.
+        """
+        device_json = self.state_file.parent / "device.json"
+        d = json.loads(device_json.read_text())
+        try:
+            if parse_rotate(d.get("rotate")) == rotate:
+                return False
+        except ValueError:
+            pass  # a value the boot refused; the site's replaces it
+        d["rotate"] = "auto" if rotate is None else rotate
+        tmp = device_json.with_name("device.json.tmp")
+        tmp.write_text(json.dumps(d))
+        os.replace(tmp, device_json)
+        self.rotate = rotate
+        return True
+
     def load_game_id(self) -> int | None:
         try:
             return json.loads(self.state_file.read_text()).get("gameId")

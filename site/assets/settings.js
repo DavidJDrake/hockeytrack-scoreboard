@@ -25,6 +25,23 @@ export const BUILT_IN = Object.freeze({ countdownLeadMin: 720, finalHoldMin: 180
 export const SETTINGS_SINCE = "v0.1.6";
 export const OLDER_PANELS_NOTE = `Panels running an image older than ${SETTINGS_SINCE} ignore these settings and use the built-in ones (countdown 12 hours before, final score up for 3 hours, no sleep hours). This site cannot tell which image a panel runs, so on an older panel “Should be showing” on Home can be wrong about countdowns, finals and sleep hours. Reflashing the panel with the current image fixes both. One more difference: a ${SETTINGS_SINCE} panel times a final from when it first saw it, not from when the game ended, so a panel given a game that finished a while ago keeps the final up longer than Home says. The next image times it from the end of the game, as Home does. It also lights for five minutes when a game is chosen during sleep hours, and ignores the Sleep switch on a panel’s page; the next image does neither.`;
 
+// Which way up a panel hangs, in degrees clockwise: the four quarter turns
+// the panel's placement accepts, and "auto" for "decide from the shape of
+// the display, or from the card". Per panel only: it is a fact about one
+// piece of glass, and the API refuses it as an account default.
+export const ROTATE_CHOICES = [0, 90, 180, 270];
+export const ROTATE_AUTO = "auto";
+// The first image whose panels turn on the site's say-so. Before it the
+// panel reads the key and ignores it, so on an older panel the choice is
+// stored, shown here, and does nothing until the panel is reflashed.
+export const ROTATE_SINCE = "v0.1.7";
+export const ROTATE_NOTE = `Takes effect within seconds, with no restart. Panels running an image older than ${ROTATE_SINCE} ignore it; on those, rotate= on the card still decides.`;
+
+export function rotateLabel(value) {
+  if (value === ROTATE_AUTO) return "Automatic (from the panel's shape, or its card)";
+  return value === 0 ? "0° (not turned)" : `${value}° clockwise`;
+}
+
 export class SettingsError extends Error {}
 
 export function durationLabel(minutes, zeroLabel = "Off") {
@@ -68,6 +85,9 @@ export function formFrom(layer = {}, { guessedZone = "" } = {}) {
   return {
     lead: Number.isInteger(layer.countdownLeadMin) ? String(layer.countdownLeadMin) : INHERIT,
     hold: Number.isInteger(layer.finalHoldMin) ? String(layer.finalHoldMin) : INHERIT,
+    // Stored as nothing when automatic: the API turns "auto" into an absent
+    // key, and the document then says nothing, which is what "auto" means.
+    rotate: Number.isInteger(layer.rotate) ? String(layer.rotate) : ROTATE_AUTO,
     sleepMode: !sleep ? INHERIT : sleep.enabled ? "on" : "off",
     start: sleep?.enabled ? sleep.start : "23:00",
     end: sleep?.enabled ? sleep.end : "07:00",
@@ -97,6 +117,13 @@ export function layerFrom(form, { zones = [] } = {}) {
   const hold = minutesFrom(form.hold, "how long a final score stays up", 1440);
   if (lead !== undefined) layer.countdownLeadMin = lead;
   if (hold !== undefined) layer.finalHoldMin = hold;
+  // An account's form has no orientation field at all (undefined), and the
+  // API would refuse one; a panel's sends a turn or nothing.
+  if (form.rotate !== undefined && form.rotate !== ROTATE_AUTO) {
+    const n = Number(form.rotate);
+    if (!/^\d+$/.test(String(form.rotate)) || !ROTATE_CHOICES.includes(n)) throw new SettingsError("Choose which way up the panel hangs.");
+    layer.rotate = n;
+  }
   if (form.sleepMode === "off") layer.sleep = { enabled: false };
   else if (form.sleepMode === "on") {
     if (!HHMM.test(form.start ?? "") || !HHMM.test(form.end ?? "")) throw new SettingsError("Sleep hours need a start and an end time.");

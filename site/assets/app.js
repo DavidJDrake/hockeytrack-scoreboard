@@ -346,6 +346,8 @@ function displayCard(device) {
       layer: device.display?.overrides ?? {},
       shownThrough: underlying(loaded.settings.defaults, loaded.settings.builtIn),
       inheritWord: "Use my default",
+      // A physical setting: only a panel's own form asks it.
+      orientation: true,
       zones: ZONES,
       guessedZone: guessZone(),
       busy: () => busy,

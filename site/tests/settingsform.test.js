@@ -98,3 +98,40 @@ test("the form says that older panels ignore it", () => {
   assert.match(text, /older than v0\.1\.6 ignore these settings/);
   assert.match(text, /Should be showing/);
 });
+
+// --- which way up (SCO-34): a panel's form asks, an account's does not
+
+test("a panel's form offers automatic and the four turns, with the note", () => {
+  const { byId, labels, nodes } = build({}, { orientation: true });
+  assert.deepEqual(labels("p-rotate"), ["Automatic (from the panel's shape, or its card)", "0° (not turned)", "90° clockwise", "180° clockwise", "270° clockwise"]);
+  assert.equal(byId("p-rotate").value, "auto");
+  const text = nodes.map((n) => n.text).join(" ");
+  assert.match(text, /within seconds/);
+  assert.match(text, /older than v0\.1\.7 ignore it/);
+});
+
+test("the account's form has no orientation field", () => {
+  const { byId, form, saved } = build({}, { inheritWord: "Built-in" });
+  assert.equal(byId("p-rotate"), undefined);
+  form.fire("submit");
+  assert.deepEqual(saved, [{}]);
+});
+
+test("the stored turn is selected, and choosing another sends it", () => {
+  const { byId, form, saved } = build({ rotate: 270 }, { orientation: true });
+  assert.equal(byId("p-rotate").value, "270");
+  byId("p-rotate").value = "180";
+  form.fire("submit");
+  assert.deepEqual(saved, [{ rotate: 180 }]);
+  byId("p-rotate").value = "auto";
+  form.fire("submit");
+  assert.deepEqual(saved[1], {}, "automatic is sent as nothing, which the API stores as nothing");
+});
+
+test("every control of a panel's form has a label that points at it", () => {
+  const { nodes } = build({}, { orientation: true });
+  const ids = nodes.filter((n) => ["select", "input"].includes(n.tagName)).map((n) => n.id || n.attrs.id);
+  const fors = nodes.filter((n) => n.tagName === "label").map((n) => n.attrs.for ?? n.htmlFor ?? n.for);
+  assert.ok(ids.includes("p-rotate"));
+  for (const id of ids) assert.ok(fors.includes(id), `${id} has no label`);
+});

@@ -41,6 +41,19 @@ func TestAPanelFollowingNothingIsSentNullNotZero(t *testing.T) {
 	}
 }
 
+// The panel turns every frame through the value in the document, so it is
+// carried only when the owner set one: a panel nobody asked to turn keeps
+// deciding from its own shape and its own card.
+func TestOrientationIsCarriedOnlyWhenSet(t *testing.T) {
+	rot := settings.Rotate(270)
+	r, _ := settings.Resolve(settings.Settings{}, settings.Settings{Rotate: &rot})
+	got, _ := Compose(0, 0, r, nil)
+	want := `{"gameId":null,"display":{"v":1,"countdownLeadMin":720,"finalHoldMin":180,"rotate":270}}`
+	if string(got) != want {
+		t.Errorf("got  %s\nwant %s", got, want)
+	}
+}
+
 func TestTopic(t *testing.T) {
 	if Topic("scoreboard-7qf2") != "scoreboard/scoreboard-7qf2/config" {
 		t.Error(Topic("scoreboard-7qf2"))
