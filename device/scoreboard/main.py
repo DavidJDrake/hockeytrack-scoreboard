@@ -158,6 +158,99 @@ LAST_RESORT = (96, 48, 0)
 # both halves of "what time is it, locally?" are present on the panel.
 SYNC_FLAG = Path("/run/systemd/timesync/synchronized")
 
+# Where this program tells the updater's units what it is doing (design 5.2,
+# 7.2): RuntimeDirectory=scoreboard in both units, tmpfs, so nothing here
+# outlives the boot. status.json says whether the panel is quiet; `healthy`
+# appears once the link is up and the first frame has been drawn, and the
+# health unit commits a trial boot on the strength of it. Overridable for
+# the tests and a desktop preview, which have no /run/scoreboard; read when
+# RunFiles is made, not at import, so a test can point it at a directory.
+RUN_DIR = Path("/run/scoreboard")
+
+
+def run_dir() -> Path:
+    return Path(os.environ.get("SCOREBOARD_RUN_DIR") or RUN_DIR)
+
+
+# How often status.json is rewritten. The loop runs at 10 Hz and the planner
+# calls the file fresh for 120 s, so once a second is plenty and keeps the
+# rename off most frames.
+STATUS_EVERY_S = 1.0
+
+
+class RunFiles:
+    """The two files under /run/scoreboard, written from the render loop.
+
+    Both writes are best effort and complain once: a panel whose runtime
+    directory is missing must go on drawing, and a panel that cannot say it
+    is quiet is simply never updated, which is the safe direction. The
+    marker is written once per process, when ``mark_healthy`` is first
+    called with both halves true, and never removed: healthy means "reached
+    the broker and the display this boot", not "still fine".
+    """
+
+    def __init__(self, directory: Path | None = None, now=time.monotonic) -> None:
+        self.dir, self._now = run_dir() if directory is None else directory, now
+        self._last_status: float | None = None
+        self._marked = False
+
+    def status(self, at: int, showing: str, sleeping: bool, next_event_at: int | None) -> bool:
+        """Write status.json if a second has passed. True when it was."""
+        now = self._now()
+        if self._last_status is not None and now - self._last_status < STATUS_EVERY_S:
+            return False
+        self._last_status = now
+        doc = {"at": at, "showing": showing, "sleeping": sleeping, "nextEventAt": next_event_at}
+        try:
+            tmp = self.dir / "status.json.new"
+            tmp.write_text(json.dumps(doc))
+            os.replace(tmp, self.dir / "status.json")
+        except OSError as e:
+            _complain_once("status.json", "cannot write %s: %s (the updater will treat this panel as busy)",
+                           self.dir / "status.json", e)
+            return False
+        return True
+
+    def mark_healthy(self, link_ok: bool, drawn: bool) -> bool:
+        """Create the marker once both halves are true. True when it exists
+        after this call."""
+        if self._marked:
+            return True
+        if not (link_ok and drawn):
+            return False
+        try:
+            (self.dir / "healthy").touch()
+        except OSError as e:
+            _complain_once("healthy", "cannot write %s: %s (a trial boot of this build would roll back)",
+                           self.dir / "healthy", e)
+            return False
+        self._marked = True
+        log.info("healthy: connected to the broker and drew the first frame")
+        return True
+
+
+def next_event_at(now_utc: datetime | None, current: "GameState | None", today, lead_s: int) -> int | None:
+    """When the panel would next light by itself, as epoch seconds: the
+    earliest future puck drop this panel knows of, minus the countdown lead
+    (design 7.2). None when nothing is scheduled or the clock is not set.
+    Every game in today's list counts, not only the followed one, because
+    the owner can choose any of them from across the room."""
+    if now_utc is None:
+        return None
+    starts = []
+    for g in [current, *today]:
+        if g is None or getattr(g, "state", None) != "PRE" or not g.start:
+            continue
+        try:
+            when = datetime.fromisoformat(g.start.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        if when > now_utc:
+            starts.append(int(when.timestamp()) - lead_s)
+    return min(starts) if starts else None
+
 
 @dataclass(frozen=True)
 class Sleep:
@@ -816,6 +909,18 @@ def live_holds_panel(state: GameState | None, state_age: float | None) -> bool:
             and state_age is not None and state_age < STALE_AFTER_S)
 
 
+def is_sleeping(now_utc: datetime | None, display: "Display", switch: str | None = None) -> bool:
+    """Sleep hours, or the owner's switch in their place. The grace period
+    is NOT an exception any more (the owner's ruling, 2026-09-21: a game
+    chosen at one in the morning lit the panel at one in the morning).
+    Somebody who wants the panel on during its sleep hours says so, with
+    the switch. One function, because presentation decides the frame by it
+    and status.json reports it to the updater, and the two must not drift."""
+    if switch is None:
+        switch = wake_now(display, now_utc)
+    return switch == ASLEEP or (switch != AWAKE and asleep(now_utc, display.sleep))
+
+
 def presentation(now: float, now_utc: datetime | None, screen: str,
                  state: GameState | None, state_age: float | None,
                  final_seen: float | None,
@@ -853,11 +958,7 @@ def presentation(now: float, now_utc: datetime | None, screen: str,
     shift = shift_at(now)
     within_grace = now - last_change < GRACE_S
     switch = wake_now(display, now_utc)
-    # Sleep hours, or the owner's switch in their place. The grace period is
-    # NOT an exception any more (the owner's ruling, 2026-09-21: a game chosen
-    # at one in the morning lit the panel at one in the morning). Somebody who
-    # wants the panel on during its sleep hours says so, with the switch.
-    sleeping = switch == ASLEEP or (switch != AWAKE and asleep(now_utc, display.sleep))
+    sleeping = is_sleeping(now_utc, display, switch)
     if screen != screens.SCOREBOARD:
         # The screens that ask for help are never off -- except this one.
         # "Cannot reach the service" is not a request for somebody to come
@@ -1063,6 +1164,24 @@ def needs_link_help(down_since: float | None, now: float,
     return down_since is not None and now - down_since >= after_s
 
 
+def version_topics(thing: str) -> list[str]:
+    """What this panel subscribes to so the site can learn its version
+    (design 8.1). A checkout has no build file and no records, and says
+    nothing. Read once at start: the version cannot change without a
+    reboot, and the records only change through the updater's units, which
+    never run while the panel is lit."""
+    from . import update
+    try:
+        version = update.running_version(screens.BUILD_FILE)
+    except update.Refused:
+        return []
+    try:
+        return update.status_topics(thing, version, update.Records())
+    except (OSError, ValueError) as e:
+        log.warning("cannot read the updater's records: %s", e)
+        return [f"scoreboard/{thing}/status/running/{version}"]
+
+
 def main() -> None:
     logging.basicConfig(level=os.environ.get("LOGLEVEL", "INFO"))
     fixture = os.environ.get("SCOREBOARD_FIXTURE")  # desktop preview: render a fixture, no broker
@@ -1086,7 +1205,8 @@ def main() -> None:
                     on_state=lambda gid, b: events.put(("state", gid, b)),
                     on_today=lambda b: events.put(("today", b)),
                     on_link=lambda ok: events.put(("link", ok)),
-                    on_config=lambda b, r: events.put(("config", b, r)))
+                    on_config=lambda b, r: events.put(("config", b, r)),
+                    status_topics=version_topics(cfg.client_id))
     # Read before the display is opened, because placement() needs it and the
     # pairing code an unregistered panel draws is the one screen its owner
     # must be able to read. rotate_hint() opens the boot-partition file and
@@ -1193,6 +1313,8 @@ def main() -> None:
     # see config_action. In memory only, deliberately.
     last_chosen_at: int | None = None
     brightness = cfg.brightness if cfg else 1.0
+    run_files = RunFiles()
+    drawn = False
     if fixture:
         with open(fixture, "rb") as f:
             current = GameState.from_json(f.read())
@@ -1551,6 +1673,14 @@ def main() -> None:
                 frame.blit(dim, (0, 0))
             present(screen, frame, place)
             pygame.display.flip()
+            # The frame is on the wall: tell the updater what it shows, and
+            # once the link is also up, that this boot is healthy. "Drew a
+            # frame" cannot mean "lit" -- a panel in a quiet window is dark
+            # by rule -- it means the loop reached the display (design 5.2).
+            drawn = True
+            run_files.mark_healthy(link_ok and not fixture, drawn)
+            run_files.status(int(time.time()), now_showing.show, is_sleeping(now_utc, display),
+                             next_event_at(now_utc, current, today, display.countdown_lead_s))
             # The network poll is asked for AFTER the frame, and answered by
             # the "radio" event at the top of a later pass.
             #

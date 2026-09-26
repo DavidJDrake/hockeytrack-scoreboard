@@ -19,3 +19,12 @@ def no_enrollment_reaches_production():
     ECONNREFUSED instead of waiting out a DNS timeout.
     """
     os.environ["SCOREBOARD_API"] = "https://127.0.0.1:9"
+
+
+@pytest.fixture(scope="session", autouse=True)
+def run_dir_is_not_the_real_one(tmp_path_factory):
+    """Every loop test writes status.json and the health marker somewhere.
+    /run/scoreboard is the appliance's RuntimeDirectory and does not exist
+    on a development machine; a test must neither fail on that nor, on a
+    panel, tell a real health unit that a test run was a healthy boot."""
+    os.environ["SCOREBOARD_RUN_DIR"] = str(tmp_path_factory.mktemp("run"))

@@ -2177,25 +2177,49 @@ Record also, for facts 6 and 5 of the design:
 
 Result: **not yet run.**
 
+## H11 to H17 — the update path
+
+Spec: `docs/superpowers/specs/2026-09-25-ota-update-design.md`, section 10.
+None of these has been run. SCO-67 wrote them for the layout and SCO-68
+extended them with what the updater's code assumes about the hardware, so
+each is on record before anybody flashes a card, and names the file whose
+assumption it tests. The spare board runs them; **no real panel is reflashed
+to the six-partition layout until H13 has passed** (design 11, step 4).
+
+Partition numbers throughout are the card's as `tools/image-layout.sh`
+builds it: SETUP 1, BOOT-A 2, BOOT-B 3, the extended container 4, ROOT-A 5,
+ROOT-B 6, STATE 7. The design's table numbered the roots 4 and 5, which MBR
+cannot do; the updater (`device/scoreboard/update/__init__.py`, `slot()`,
+and the two `slot.conf` drop-ins) follows the layout.
+
 ## H11 — Slot B boots by hand
 
-Needs SCO-68's health unit to commit; until then the second half of the
-criterion (commit, swap) cannot pass and the check records only the boot.
-
 From a serial console or a test build with a getty, on a panel that passed
-H10: `sudo reboot '0 tryboot'`.
+H10, in two halves.
+
+**H11a — a bare trial rolls back.** With no `trial.json` on STATE:
+`sudo reboot '0 tryboot'`.
 
 Pass criterion: the panel comes back from partition 3 (`bootloader/partition`
-reads 3, `tryboot` reads 1, `findmnt /` shows `/dev/mmcblk0p6`,
-`findmnt /boot/firmware` shows `/dev/mmcblk0p3`); the identity, the Wi-Fi
-profile and the journal are all still there, because they are on STATE; the
-health unit commits and `/boot/setup/autoboot.txt` now reads
-`boot_partition=3` under `[all]` and `boot_partition=2` under `[tryboot]`; a
-power cycle boots B.
+reads 3, `tryboot` reads 1 (`update.read_u32`), `findmnt /` shows
+`/dev/mmcblk0p6`, `findmnt /boot/firmware` shows `/dev/mmcblk0p3`); the
+identity, the Wi-Fi profile and the journal are all still there, because
+they are on STATE; `scoreboard-health.service` logs `a trial boot with no
+pending trial` and reboots (`HealthUnit.decide_trial`: a trial nobody armed
+is one it cannot decide); the next boot is partition 2, and
+`/boot/setup/autoboot.txt` still reads exactly `update.render_autoboot(2, 3)`.
+That is the rollback path with no code of ours choosing, and seeing it is
+worth recording on its own.
 
-Before SCO-68: without the health unit nothing commits, so a further plain
-reboot boots A again. That is the rollback path with no code of ours
-running, and seeing it is worth recording on its own.
+**H11b — a hand-armed trial commits.** Write `trial.json` on STATE by hand
+(`{"version": <B's version>, "slot": "b", "attempts": 1, "outcome":
+"pending"}`, 0644) and `sudo reboot '0 tryboot'`.
+
+Pass criterion: boots from partition 3; the health unit waits for
+`/run/scoreboard/healthy` and commits; `/boot/setup/autoboot.txt` now reads
+exactly `update.render_autoboot(3, 2)` (`boot_partition=3` under `[all]`,
+`boot_partition=2` under `[tryboot]`); `trial.json` reads `committed`; a
+power cycle boots B.
 
 Result: **not yet run.**
 
@@ -2204,6 +2228,10 @@ Result: **not yet run.**
 SCO-68 and SCO-69. The spare board on v(N), a v(N+1) release published,
 nobody touching the board: within a day and inside a quiet window it
 downloads, stages, arms, trial-boots, commits, and Home shows v(N+1).
+
+Pass criterion: `journalctl -u scoreboard-update` shows `staging`, `-u
+scoreboard-update@b` shows the stage and the arm, the trial boot commits,
+and Home shows the new version from the `status/running` subscription.
 
 Result: **not yet run.**
 
@@ -2217,13 +2245,14 @@ published under `latest-test.json` with a six-hour expiry, and never pointed
 at by `latest.json`. The release is real and signed because the panel trusts
 nothing else.
 
-Pass criterion: the spare board tries it, shows nothing for 240 s, reboots
-into the old version by itself, `failed.json` names the version with reason
-`unhealthy`, the trial slot's boot partition's first 4 MiB read as zeros
-(`sudo dd if=/dev/mmcblk0p3 bs=1M count=4 | od -An -tx1 | sort -u` prints
-one line of zeros), and Home says it failed. A good `test` release then
-updates it. **No real panel is reflashed to the six-partition layout until
-this has passed.**
+Pass criterion: the spare board tries it, shows nothing for 240 s,
+`scoreboard-health.service` reboots into the old version by itself, the
+next boot's health unit requests `invalidate`, `failed.json` names the
+version with reason `unhealthy`, the trial slot's boot partition's first
+4 MiB read as zeros (`sudo dd if=/dev/mmcblk0p3 bs=1M count=4 | od -An -tx1
+| sort -u` prints one line of zeros), and Home says it failed. A good `test`
+release then updates it. **No real panel is reflashed to the six-partition
+layout until this has passed.**
 
 Result: **not yet run.**
 
@@ -2234,11 +2263,12 @@ version staged into A but not armed: delete `autoboot.txt` from SETUP and
 power cycle. The bootloader finds partition 1 not bootable and walks.
 
 Pass criterion: **B boots, not A**, because A's boot partition has a zeroed
-head and holds no `start4.elf` the walk can find; `bootloader/partition`
-reads 3. Then, on a card with nothing staged, delete it again: A boots
-(fact 5), and the updater re-stages the next day. Restore `autoboot.txt`
-afterwards from `tools/image-layout.sh --print autoboot` with the numbers
-swapped to match the committed slot.
+head and holds no `start4.elf` the walk can find (`writer.stage` zeroes it
+and `writer.arm` alone writes it); `bootloader/partition` reads 3. Then, on
+a card with nothing staged, delete it again: A boots (fact 5), and the
+planner re-stages the next day. Restore `autoboot.txt` afterwards from
+`tools/image-layout.sh --print autoboot` with the numbers swapped to match
+the committed slot.
 
 Result: **not yet run.**
 
@@ -2247,13 +2277,13 @@ Result: **not yet run.**
 Each pulls the plug at a different moment of an update and checks what the
 next boot finds (design 5.3, 7.3):
 
-1. **During the root download.** Next boot is the running slot; the target
-   slot's boot head is zero; `staged.json` is absent or discarded; the next
-   run starts over.
+1. **During the root download.** Next boot is the running slot;
+   `/dev/mmcblk0p3`'s first 4 MiB are zero; `staged.json` is absent or
+   discarded; the next run starts over.
 2. **During the arm re-hash.** Same as 1.
 3. **During a healthy trial, before commit.** The old slot boots; `rsts`
-   reads a power-on reset; `trial.json` is left open with `attempts` 1 and
-   nothing in `failed.json`, so the next day re-arms rather than blaming
+   reads a power-on reset; `trial.json` is `unattributed` with `attempts` 1
+   and nothing in `failed.json`, so the next day re-arms rather than blaming
    the version.
 
 Result: **not yet run.**
@@ -2271,16 +2301,19 @@ the journal line, not the file: `journalctl -b -u init.scope -o cat | grep
 -i watchdog` (or `journalctl -b | grep 'Hardware watchdog'`) shows systemd
 reporting the watchdog set to **1min**, with no `Failed to set` line;
 `cat /sys/class/watchdog/watchdog0/timeout` prints `60` and `.../state`
-prints `active`. Record `uname -r` beside it and copy it into the conf
-file's `verified on:` line. Then prove it bites: `echo c >
+prints `active`. Record `uname -r` beside it (design fact 14) and copy it
+into the conf file's `verified on:` line. Then prove it bites: `echo c >
 /proc/sysrq-trigger` from a getty (or a test build with `systemctl
 kill -s STOP 1` is not available; a crash is the honest way), and the board
 resets within about 60 s and comes back; `rsts` on that boot is the
 watchdog value H17 records.
 
-**The units.** SCO-68: every directive in design 7.1 survives on the three
-updater units, or its removal is recorded here with the symptom, as H1 did
-for `scoreboard.service`.
+**The units.** Every directive in `device/scoreboard-update.service`,
+`scoreboard-update@.service` and `scoreboard-health.service` (design 7.1)
+survives a plan, a stage, an arm and a health verdict, or its removal is
+recorded here with the symptom, as H1 did for `scoreboard.service`. This is
+also where a torn STATE is seen to reach the help screen with the health
+unit rolling back rather than committing (see the provisional list below).
 
 **The bootloader self-update.** With the EEPROM bootloader in
 `rpi-eeprom-update`'s package newer than the board's:
@@ -2311,7 +2344,10 @@ the BCM2711 register layout and must be confirmed by doing both:
   /proc/device-tree/chosen/bootloader/rsts` — _____
 - After a watchdog reset (H16's crash) or `sudo reboot`: — _____
 
-Record both as the two constants SCO-68's health unit decodes.
+Pass criterion: `update.health.reset_cause` decodes the two as `power` and
+`hung` respectively. Record both raw values here as the constants
+`RSTS_WATCHDOG`, `RSTS_SOFTWARE` and `RSTS_POWER_ON` in
+`device/scoreboard/update/health.py`, corrected if they disagree.
 
 **The partition walk.** `PARTITION_WALK` is EEPROM configuration, a property
 of the board, not of the card, so the image gate cannot assert it and no
@@ -2325,3 +2361,25 @@ default is 1). Also record `vcgencmd bootloader_version` for each.
 - Spare board: `PARTITION_WALK=` _____ ; bootloader _____
 
 Result: **not yet run.**
+
+Three things in the updater's code are provisional until these run, and
+each says so where it lives:
+
+- **The `rsts` bit values** (`health.py`, `RSTS_*`). They are the BCM2835
+  power-management register names as the firmware exposes them; a value with
+  none of the named bits set is decoded as a power-on reset, which counts
+  against the re-trial cap and never against the version. If H17 shows the
+  bits are otherwise, the constants change and the tests in
+  `device/tests/test_update.py` that decode them change with them.
+- **The planner's outbound sockets** (`scoreboard-update.service`). The
+  design's 7.1 table gave the planner no network, and its 7.3 has the planner
+  fetch `latest.json` and the manifest; the unit follows 7.3 and the comment
+  in the unit file says why. If the owner prefers the table, the three fetches
+  move into the write unit and `Planner.fetch_version` and `fetch_manifest`
+  move with them; the refusals do not change.
+- **The health unit's view of `/state`** (`health.py`, `state_mounted`).
+  `/state` is an `InaccessiblePaths=` entry for the unit, so "is STATE
+  mounted" is asked of the bind at `/var/lib/scoreboard-update`, which is a
+  mount point exactly when `/state/update` was bound over it. H16 is where a
+  torn STATE is seen to reach the help screen with the health unit rolling
+  back rather than committing.

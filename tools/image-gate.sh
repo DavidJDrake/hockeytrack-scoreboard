@@ -967,9 +967,12 @@ while IFS= read -r entry; do
   if [ "$suspect" -eq 1 ]; then
     case "$rel" in
       certs/AmazonRootCA1.pem) ;;
+      # The release public keys (design 6.3): the repository's copies, byte
+      # for byte, here and again below against the whole directory.
       certs/release-signing/*.pem)
+        [ -f "$REPO/device/$rel" ] || fail "release-signing key $rel is in the image but not in the repository"
         [ -f "$path" ] && [ ! -L "$path" ] && cmp -s "$path" "$REPO/device/$rel" \
-          || fail "release-signing key $rel is not a regular file identical to the repository's device/$rel" ;;
+          || fail "release-signing key $rel is not a regular file or differs from the repository's device/$rel" ;;
       *) fail "unexpected certificate or key file under /opt/scoreboard: $rel" ;;
     esac
   fi
@@ -983,34 +986,64 @@ cmp -s "$ca" "$REPO/device/certs/AmazonRootCA1.pem" \
   || fail "/opt/scoreboard/certs/AmazonRootCA1.pem differs from the repository's copy"
 ok "the only certificate shipped is Amazon's root CA"
 
-# The other direction: every release-signing key the repository names is in
-# the image, and nothing else is in that directory. A panel with a missing
-# key cannot verify the next release and reflashes; the README beside the
-# keys is the one non-key file allowed.
-reject_symlink "$ROOT/opt/scoreboard/certs/release-signing" "/opt/scoreboard/certs/release-signing"
-[ -d "$ROOT/opt/scoreboard/certs/release-signing" ] || fail "/opt/scoreboard/certs/release-signing is missing; the panel would have no key to verify a release with"
-run_find "$ROOT/opt/scoreboard/certs/release-signing" -mindepth 1 -print
+# The release public keys are the trust root every update is verified
+# against (design 6.3): the panel accepts a manifest that any key in
+# /opt/scoreboard/certs/release-signing/ verifies. So the directory must
+# hold exactly the files the repository names, each byte for byte the
+# repository's: every .pem a public key (a key added to the image that is
+# not in the repository would let whoever holds its private half sign a
+# release for every panel), every repository key present (a panel with a
+# missing key cannot verify the next release and is stranded at the next
+# rotation), and the README beside the keys the one non-key file allowed.
+# The private halves live in AWS KMS and never in either place; the
+# "no private keys" scan above already covers the directory, and the
+# repository's copies are checked for one too, because this is where a
+# mistake would be worst.
+keydir="$ROOT/opt/scoreboard/certs/release-signing"
+repokeys="$REPO/device/certs/release-signing"
+reject_symlink "$keydir" "/opt/scoreboard/certs/release-signing"
+[ -d "$keydir" ] || fail "/opt/scoreboard/certs/release-signing is missing; the panel would have no key to verify a release with"
+run_find "$keydir" -mindepth 1 -print
 while IFS= read -r entry; do
   [ -n "$entry" ] || continue
-  name="${entry##*/}"
+  name="${entry#"$keydir/"}"
+  [ -f "$entry" ] && [ ! -L "$entry" ] || fail "release-signing/$(sanitize_for_log "$name") is not a regular file"
   case "$name" in
-    README.md | *.pem) [ -f "$REPO/device/certs/release-signing/$name" ] \
-      || fail "/opt/scoreboard/certs/release-signing/$name is not in the repository" ;;
-    *) fail "unexpected file in /opt/scoreboard/certs/release-signing: $(sanitize_for_log "$name")" ;;
+    README.md) ;;
+    *.pem)
+      grep_or_fail -qa -- '-----BEGIN PUBLIC KEY-----' "$entry" \
+        || fail "release-signing/$name is not a SubjectPublicKeyInfo public key" ;;
+    *) fail "release-signing/$(sanitize_for_log "$name") is not a .pem public key or the README" ;;
   esac
-done <<<"$FOUND"
-run_find "$REPO/device/certs/release-signing" -mindepth 1 -name '*.pem' -print
+  [ -f "$repokeys/$name" ] || fail "release-signing/$name is in the image but not in the repository"
+  cmp -s "$entry" "$repokeys/$name" || fail "release-signing/$name differs from the repository's copy"
+done <<<"$(printf '%s\n' "$FOUND" | sort)"
+run_find "$repokeys" -mindepth 1 -name '*.pem' -print
 while IFS= read -r entry; do
   [ -n "$entry" ] || continue
   name="${entry##*/}"
-  cmp -s "$entry" "$ROOT/opt/scoreboard/certs/release-signing/$name" \
-    || fail "release-signing key $name is missing from the image or differs from the repository's"
-  # A public key only. The private-key scan above already covers /opt, but
-  # this directory is where a mistake would be worst, so it is said here too.
+  [ -f "$keydir/$name" ] \
+    || fail "release-signing/$name is in the repository but not in the image; the panel could not verify a release signed by it"
   ! grep_or_fail -qaE -- '-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----' "$entry" \
     || fail "device/certs/release-signing/$name is a private key; only the public half may ever be in the repository"
 done <<<"$FOUND"
 ok "the release-signing keys are exactly the repository's public keys"
+
+# The updater's health unit is what turns a trial boot into a commit or a
+# rollback (design 5.2). A root without it enabled would run a trial slot
+# uncommitted with nothing to reboot it, and the planner would then refuse to
+# plan forever; the gate refuses to build it instead (design 7.3 step 1).
+# The timer is what makes the panel look at all.
+for pair in "multi-user.target.wants/scoreboard-health.service" "timers.target.wants/scoreboard-update.timer"; do
+  link="$ROOT/etc/systemd/system/$pair"
+  [ -L "$link" ] || fail "${pair#*/} is not enabled (/etc/systemd/system/$pair is not a symlink)"
+  [ -f "$ROOT/etc/systemd/system/${pair#*/}" ] || fail "${pair#*/} is enabled but the unit file is missing"
+done
+for unit in scoreboard-update.service 'scoreboard-update@.service' \
+            'scoreboard-update@a.service.d/slot.conf' 'scoreboard-update@b.service.d/slot.conf'; do
+  [ -f "$ROOT/etc/systemd/system/$unit" ] || fail "the updater's $unit is missing"
+done
+ok "the updater's health unit and timer are enabled"
 
 # --- The A/B layout (added 2026-09-25) ---------------------------------------
 #
@@ -1077,13 +1110,19 @@ watchdog="$ROOT/etc/systemd/system.conf.d/10-scoreboard-watchdog.conf"
 cmp -s "$watchdog" "$REPO/device/system.conf.d/10-scoreboard-watchdog.conf" \
   || fail "the watchdog drop-in differs from device/system.conf.d/10-scoreboard-watchdog.conf"
 grep -qE '^RuntimeWatchdogSec=60$' "$watchdog" || fail "the watchdog drop-in does not set RuntimeWatchdogSec=60"
-# Nothing of ours may write /boot/firmware; only rpi-eeprom-update does.
-run_find "$ROOT/etc/systemd/system" -type f \( -name '*.service' -o -name '*.conf' \) -print
-while IFS= read -r unit_path; do
-  [ -n "$unit_path" ] || continue
-  ! grep_or_fail -qE '^[[:space:]]*ReadWritePaths=(.*[[:space:]])?-?/boot/firmware' "$unit_path" \
-    || fail "${unit_path#"$ROOT"} names /boot/firmware in ReadWritePaths=; only rpi-eeprom-update may write the running slot's boot partition"
-done <<<"$FOUND"
+# Nothing of ours may write /boot/firmware (design 4.3): the running slot's
+# boot partition is mounted read-write for rpi-eeprom-update alone, and a
+# unit that could write it could make the running slot unbootable. Every
+# unit and drop-in under /etc/systemd/system is checked, whatever its name.
+# Two directives can open the path: ReadWritePaths= and BindPaths=, whose
+# destination follows a colon. /boot itself (a parent that makes the same
+# directory writable) counts as /boot/firmware; /boot/setup, the health
+# unit's own write path on another partition, does not.
+reject_symlink "$ROOT/etc/systemd/system" "/etc/systemd/system"
+out="$(grep -rlaE -- '^[[:space:]]*(ReadWritePaths|BindPaths)=(.*[[:space:]=+:-])?/boot(/firmware([[:space:]/:]|$)|/?([[:space:]:]|$))' \
+  "$ROOT/etc/systemd/system" 2>&1)" && status=0 || status=$?
+[ "$status" -le 1 ] || fail "could not scan /etc/systemd/system for ReadWritePaths: $(sanitize_for_log "$out")"
+[ -z "$out" ] || fail "a unit may write /boot/firmware (ReadWritePaths= or BindPaths= naming /boot or /boot/firmware): $(sanitize_for_log "${out#"$ROOT"}")"
 ok "the bootfs generator and the 60 s watchdog are installed, and no unit writes /boot/firmware"
 
 # The rule above reads a unit's ReadWritePaths= and nothing else, which says
@@ -1092,9 +1131,9 @@ ok "the bootfs generator and the 60 s watchdog are installed, and no unit writes
 # STATE whatever list it carries or omits. So a unit that declares itself a
 # SETUP writer (names /boot/setup in ReadWritePaths=) must also carry
 # ProtectSystem=strict, or the declaration is decoration; and
-# scoreboard-netcfg, the SETUP writer this image ships, must declare exactly
-# the two places it writes. Design 4.3 allows two units to write SETUP;
-# the updater's is SCO-68's to add, under this same rule.
+# each of the two SETUP writers design 4.3 allows, scoreboard-netcfg and
+# the updater's health unit (which commits a trial by rewriting
+# autoboot.txt), must declare exactly the places it writes.
 run_find "$ROOT/etc/systemd/system" -type f \( -name '*.service' -o -name '*.conf' \) -print
 while IFS= read -r unit_path; do
   [ -n "$unit_path" ] || continue
@@ -1121,6 +1160,9 @@ while IFS= read -r unit_path; do
 done <<<"$FOUND"
 grep_or_fail -qE '^[[:space:]]*ReadWritePaths=/boot/setup -/state/network[[:space:]]*$' "$netcfg_unit" \
   || fail "scoreboard-netcfg.service does not open exactly /boot/setup and -/state/network in ReadWritePaths=; the setup file and the country are the only things it writes"
+health_unit="$ROOT/etc/systemd/system/scoreboard-health.service"
+grep_or_fail -qE '^[[:space:]]*ReadWritePaths=/boot/setup /var/lib/scoreboard-update[[:space:]]*$' "$health_unit" \
+  || fail "scoreboard-health.service does not open exactly /boot/setup and /var/lib/scoreboard-update in ReadWritePaths=; autoboot.txt and its records are the only things it writes"
 ok "every unit that writes SETUP is sandboxed to what it writes, and no unit requires a STATE path to exist"
 
 # The journal prune. /etc/machine-id is empty on the read-only root, so

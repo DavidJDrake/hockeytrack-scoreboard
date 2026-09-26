@@ -117,23 +117,38 @@ def test_the_flag_reaches_the_callback_off_the_wire():
 
 
 class FakeClient:
+    """What Link asks of paho's client: subscribe() returns (result, mid),
+    and the mid is what a later SUBACK is matched to."""
+
     def __init__(self):
         self.subscribed = []
+        self.qos = {}
+        self.mids = {}
 
     def subscribe(self, topic, qos=0):
         self.subscribed.append(topic)
+        self.qos[topic] = qos
+        self.mids[topic] = mid = len(self.subscribed)
+        return 0, mid
 
 
-def connect_with(reason_code):
+def make_link(status_topics=()):
     link = Link.__new__(Link)
     link.on_state = link.on_today = link.on_config = lambda *a: None
     link._config_topic = config_topic("scoreboard-abc123")
     link._game = 2026020001
-    seen = []
-    link.on_link = seen.append
+    link._status_topics = tuple(status_topics)
+    link._status_pending, link._status_refused = {}, set()
+    link.seen = []
+    link.on_link = link.seen.append
+    return link
+
+
+def connect_with(reason_code, status_topics=()):
+    link = make_link(status_topics)
     client = FakeClient()
     link._on_connect(client, None, {}, reason_code)
-    return seen, client.subscribed
+    return link.seen, client
 
 
 class ReasonCode:
@@ -147,15 +162,97 @@ class ReasonCode:
 
 
 def test_a_successful_connack_subscribes_and_reports_the_link_up():
-    seen, subscribed = connect_with(ReasonCode(False, "Success"))
+    seen, client = connect_with(ReasonCode(False, "Success"))
     assert seen == [True]
-    assert len(subscribed) == 3   # today, this device's config, the game
+    assert len(client.subscribed) == 3   # today, this device's config, the game
 
 
 def test_a_refused_connack_reports_the_link_down_and_subscribes_to_nothing():
-    seen, subscribed = connect_with(ReasonCode(True, "Not authorized"))
+    seen, client = connect_with(ReasonCode(True, "Not authorized"))
     assert seen == [False], "a refusal was reported as a working link"
-    assert subscribed == [], "subscribed on a connection that was refused"
+    assert client.subscribed == [], "subscribed on a connection that was refused"
+
+
+def test_the_status_topics_are_subscribed_last_at_qos_0_and_on_every_connect():
+    # design 8.1: the version rides to the site on a subscription nothing
+    # publishes to. It comes after the topics that carry data, so a policy
+    # that refused it could never cost the panel its state or config, and at
+    # QoS 0 because nothing will ever arrive on it.
+    topics = ["scoreboard/scoreboard-abc123/status/running/v0.1.6",
+              "scoreboard/scoreboard-abc123/status/failed/v0.2.0"]
+    seen, client = connect_with(ReasonCode(False, "Success"), topics)
+    assert seen == [True]
+    assert client.subscribed[-2:] == topics
+    assert [client.qos[t] for t in topics] == [0, 0]
+    seen, client = connect_with(ReasonCode(True, "Not authorized"), topics)
+    assert client.subscribed == []
+
+
+def test_a_link_built_without_status_topics_subscribes_to_none():
+    seen, client = connect_with(ReasonCode(False, "Success"))
+    assert not any("/status/" in t for t in client.subscribed)
+
+
+STATUS_TOPICS = ["scoreboard/scoreboard-abc123/status/running/v0.1.6",
+                 "scoreboard/scoreboard-abc123/status/failed/v0.2.0"]
+
+
+def test_a_status_topic_the_broker_refuses_is_logged_once_and_not_asked_for_again(caplog):
+    # A panel running this code against a policy without the status/*
+    # filter (SCO-69 not yet applied). If the broker answers the SUBSCRIBE
+    # with a SUBACK failure code, the topic is dropped for the life of the
+    # process and the next connect asks only for the topics that carry
+    # data plus the status topics that were granted.
+    link = make_link(STATUS_TOPICS)
+    client = FakeClient()
+    link._on_connect(client, None, {}, ReasonCode(False, "Success"))
+    assert link.seen == [True], "on_link fires before any SUBACK; the guard cannot change that"
+    with caplog.at_level("WARNING", logger="scoreboard.link"):
+        link._on_subscribe(client, None, client.mids[STATUS_TOPICS[0]], [ReasonCode(True, "Unspecified error")], None)
+        link._on_subscribe(client, None, client.mids[STATUS_TOPICS[1]], [ReasonCode(False, "Granted QoS 0")], None)
+    assert "refused the status subscription " + STATUS_TOPICS[0] in caplog.text
+    assert "SCO-69" in caplog.text
+    assert STATUS_TOPICS[1] not in caplog.text
+    again = FakeClient()
+    link._on_connect(again, None, {}, ReasonCode(False, "Success"))
+    assert STATUS_TOPICS[0] not in again.subscribed
+    assert again.subscribed[-1] == STATUS_TOPICS[1]
+    assert len(again.subscribed) == 4, "today, config, the game, and the one granted status topic"
+
+
+def test_the_data_topics_subacks_are_not_judged_by_the_status_guard():
+    link = make_link(STATUS_TOPICS)
+    client = FakeClient()
+    link._on_connect(client, None, {}, ReasonCode(False, "Success"))
+    for topic in ("hockeytrack/games/today", config_topic("scoreboard-abc123"), "hockeytrack/games/2026020001/state"):
+        link._on_subscribe(client, None, client.mids[topic], [ReasonCode(True, "Not authorized")], None)
+    assert link._status_refused == set()
+    # An unknown mid, as after a reconnect cleared the pending map, is ignored.
+    link._on_subscribe(client, None, 999, [ReasonCode(True, "Not authorized")], None)
+    assert link._status_refused == set()
+
+
+def test_an_mqtt3_granted_qos_byte_is_read_as_paho_would_hand_it():
+    # paho builds ReasonCode from MQTT 3's granted-QoS byte, where 0x80 is
+    # the one failure; a plain int is read by the same rule, and a shape
+    # nothing can read is not a refusal.
+    from scoreboard.link import _suback_failed
+    assert [_suback_failed(c) for c in (0, 1, 2, 0x80)] == [False, False, False, True]
+    assert not _suback_failed(Inscrutable())
+    link = make_link(STATUS_TOPICS)
+    client = FakeClient()
+    link._on_connect(client, None, {}, ReasonCode(False, "Success"))
+    link._on_subscribe(client, None, client.mids[STATUS_TOPICS[0]], [0x80], None)
+    assert link._status_refused == {STATUS_TOPICS[0]}
+
+
+def test_a_disconnect_forgets_the_subacks_still_awaited():
+    link = make_link(STATUS_TOPICS)
+    client = FakeClient()
+    link._on_connect(client, None, {}, ReasonCode(False, "Success"))
+    assert len(link._status_pending) == 2
+    link._on_disconnect(client, None, {}, ReasonCode(False, "Success"))
+    assert link._status_pending == {} and link.seen == [True, False]
 
 
 def test_an_integer_reason_code_is_read_the_same_way():
@@ -164,7 +261,7 @@ def test_an_integer_reason_code_is_read_the_same_way():
     # success and anything else is a refusal.
     assert connect_with(0)[0] == [True]
     assert connect_with(5)[0] == [False]      # 5: not authorized
-    assert connect_with(5)[1] == []
+    assert connect_with(5)[1].subscribed == []
 
 
 class ValueOnly:
@@ -196,9 +293,9 @@ def test_a_reason_code_that_only_knows_its_number_is_read_by_that_number():
     # with is_failure gone the fallback raised rather than answering -- out
     # of a paho callback, where nothing catches it.
     assert connect_with(ValueOnly(0))[0] == [True]
-    assert len(connect_with(ValueOnly(0))[1]) == 3
+    assert len(connect_with(ValueOnly(0))[1].subscribed) == 3
     assert connect_with(ValueOnly(5))[0] == [False]
-    assert connect_with(ValueOnly(5))[1] == []
+    assert connect_with(ValueOnly(5))[1].subscribed == []
 
 
 def test_a_reason_code_nothing_can_read_connects_anyway(caplog):
@@ -213,8 +310,8 @@ def test_a_reason_code_nothing_can_read_connects_anyway(caplog):
     # ordinary path -- so the panel subscribes, says so, and lets the
     # disconnect tell the truth.
     with caplog.at_level("WARNING"):
-        seen, subscribed = connect_with(Inscrutable())
+        seen, client = connect_with(Inscrutable())
     assert seen == [True]
-    assert len(subscribed) == 3
+    assert len(client.subscribed) == 3
     assert any("who knows" in r.getMessage() for r in caplog.records), \
         "a reason code nothing could read went into the journal unremarked"

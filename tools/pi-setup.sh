@@ -221,18 +221,38 @@ install_appliance() {
   cp "$DEVICE/scoreboard-journal-prune.service" /etc/systemd/system/scoreboard-journal-prune.service
   install -D -m 644 "$DEVICE/polkit/10-scoreboard-network.rules" \
     /etc/polkit-1/rules.d/10-scoreboard-network.rules
+  # The updater: a timer, the planner it starts, the write unit template
+  # with its two per-slot device drop-ins, and the health unit that decides
+  # a trial boot (design 7.1). The planner service is not enabled: only the
+  # timer starts it. The write instances are started only by the planner and
+  # the health unit, through request.json.
+  cp "$DEVICE/scoreboard-update.timer" "$DEVICE/scoreboard-update.service" \
+     "$DEVICE/scoreboard-update@.service" "$DEVICE/scoreboard-health.service" /etc/systemd/system/
+  install -D -m 644 "$DEVICE/scoreboard-update@a.service.d/slot.conf" \
+    /etc/systemd/system/scoreboard-update@a.service.d/slot.conf
+  install -D -m 644 "$DEVICE/scoreboard-update@b.service.d/slot.conf" \
+    /etc/systemd/system/scoreboard-update@b.service.d/slot.conf
   # Enabled by symlink rather than `systemctl enable`: this also runs inside a
   # pi-gen chroot, where there is no running systemd to talk to.
-  mkdir -p /etc/systemd/system/multi-user.target.wants /etc/systemd/system/sysinit.target.wants
+  mkdir -p /etc/systemd/system/multi-user.target.wants /etc/systemd/system/sysinit.target.wants \
+    /etc/systemd/system/timers.target.wants
   ln -sf /etc/systemd/system/scoreboard.service \
     /etc/systemd/system/multi-user.target.wants/scoreboard.service
   ln -sf /etc/systemd/system/scoreboard-netcfg.service \
     /etc/systemd/system/multi-user.target.wants/scoreboard-netcfg.service
+  ln -sf /etc/systemd/system/scoreboard-health.service \
+    /etc/systemd/system/multi-user.target.wants/scoreboard-health.service
+  ln -sf /etc/systemd/system/scoreboard-update.timer \
+    /etc/systemd/system/timers.target.wants/scoreboard-update.timer
   # sysinit.target, not multi-user: the prune has DefaultDependencies=no so
   # it can run before systemd-journal-flush.service, which is itself wanted
   # by sysinit.target.
   ln -sf /etc/systemd/system/scoreboard-journal-prune.service \
     /etc/systemd/system/sysinit.target.wants/scoreboard-journal-prune.service
+  # The updater's records directory, /var/lib/scoreboard-update, was created
+  # with the identity directory above: on the six-partition layout it is the
+  # bind-mount target for STATE's update/ (design 4.3), and on a checkout a
+  # plain directory on the root.
   echo "Appliance installed. It starts on the next boot."
 }
 
