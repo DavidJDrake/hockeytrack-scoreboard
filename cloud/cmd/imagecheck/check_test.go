@@ -92,7 +92,7 @@ func agreeing() (*fakeObjects, fakeReleases) {
 func TestAMirrorThatAgreesRaisesNothing(t *testing.T) {
 	objs, rel := agreeing()
 	n := &fakeNotifier{}
-	if err := Run(context.Background(), objs, rel, n); err != nil {
+	if err := Run(context.Background(), objs, rel, n, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(n.subjects) != 0 {
@@ -102,7 +102,7 @@ func TestAMirrorThatAgreesRaisesNothing(t *testing.T) {
 
 func TestNothingPublishedYetIsNotAProblem(t *testing.T) {
 	n := &fakeNotifier{}
-	err := Run(context.Background(), &fakeObjects{objects: map[string][]byte{}}, fakeReleases{latestErr: ErrNoRelease}, n)
+	err := Run(context.Background(), &fakeObjects{objects: map[string][]byte{}}, fakeReleases{latestErr: ErrNoRelease}, n, nil)
 	if err != nil || len(n.subjects) != 0 {
 		t.Errorf("err %v, notified %v", err, n.messages)
 	}
@@ -176,7 +176,7 @@ func TestAnUnreachableGitHubIsAnErrorNotAnAlert(t *testing.T) {
 	objs, rel := agreeing()
 	rel.latestErr = errors.New("connection reset")
 	n := &fakeNotifier{}
-	if err := Run(context.Background(), objs, rel, n); err == nil {
+	if err := Run(context.Background(), objs, rel, n, nil); err == nil {
 		t.Fatal("want an error so the function's error alarm fires")
 	}
 	if len(n.subjects) != 0 {
@@ -189,7 +189,7 @@ func TestRunNamesEveryProblemInOneAlert(t *testing.T) {
 	objs.objects["images/v0.1.0/scoreboard-v0.1.0.img.xz"] = []byte("x")
 	rel.latest = "v0.2.0"
 	n := &fakeNotifier{}
-	if err := Run(context.Background(), objs, rel, n); err != nil {
+	if err := Run(context.Background(), objs, rel, n, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(n.subjects) != 1 || n.subjects[0] != alertSubject {
@@ -323,7 +323,7 @@ func TestAVersionGitHubDoesNotHaveIsReportedAsTampering(t *testing.T) {
 	objs.objects["latest.json"] = manifest("v9.9.9", "scoreboard-v9.9.9.img.xz", sum(image))
 	objs.objects["images/v9.9.9/scoreboard-v9.9.9.img.xz"] = image
 	n := &fakeNotifier{}
-	if err := Run(context.Background(), objs, rel, n); err != nil {
+	if err := Run(context.Background(), objs, rel, n, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(n.subjects) != 1 || n.subjects[0] != alertSubject {
@@ -344,7 +344,7 @@ func TestProblemsFoundSoFarArePublishedEvenIfALaterStepErrors(t *testing.T) {
 	rel.latest = "v0.2.0"
 	objs.errs = map[string]error{"images/v0.1.0/scoreboard-v0.1.0.img.xz": errors.New("connection reset")}
 	n := &fakeNotifier{}
-	err := Run(context.Background(), objs, rel, n)
+	err := Run(context.Background(), objs, rel, n, nil)
 	if err == nil {
 		t.Fatal("want an error so the function's error alarm also fires")
 	}

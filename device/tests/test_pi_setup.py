@@ -172,6 +172,32 @@ def test_the_network_unit_states_its_own_start_budget():
         f"the unit's comment no longer states the {int(budget - ceiling)}s above the absolute ceiling"
 
 
+def test_the_network_unit_can_write_only_the_setup_file_and_the_country():
+    # scoreboard-netcfg is one of the two units the OTA design (4.3) allows to
+    # write SETUP, and it runs as root. The gate's "no unit names
+    # /boot/firmware in ReadWritePaths=" rule is vacuous for a unit with no
+    # ProtectSystem= at all: such a process can write the running slot's FAT,
+    # the read-only root's remounted paths and every file on STATE. So the
+    # unit pins the whole tree read-only and opens exactly the two places
+    # netcfg writes -- the setup file it consumes and the country it saves.
+    # The NetworkManager profile goes over D-Bus and iw over netlink, so
+    # nothing under /etc or /var/lib is on the list, and nothing should be.
+    #
+    # The STATE path carries the `-` prefix and the SETUP path does not.
+    # /boot/setup is a mount point on the read-only root, present on every
+    # boot; /state/network is inside STATE, and on the torn-STATE boot the
+    # design (4.3) promises to survive it does not exist. An undashed path
+    # that is missing fails the unit's namespace setup (226/NAMESPACE), so
+    # netcfg would never run on exactly the boot the SETUP-file repair path
+    # is for.
+    text = NETCFG_UNIT.read_text()
+    fields = unit(text)
+    assert fields.get("ProtectSystem") == "strict", \
+        "scoreboard-netcfg runs as root with the whole card writable"
+    assert fields.get("ReadWritePaths", "").split() == ["/boot/setup", "-/state/network"], \
+        f"ReadWritePaths={fields.get('ReadWritePaths')!r}; only the setup file and the country are written, and the STATE path must be optional"
+
+
 def test_appliance_unit_runs_as_its_own_account(checkout):
     done = run(checkout, "--appliance", "--print-unit")
     assert done.returncode == 0
@@ -527,3 +553,143 @@ def test_the_root_ca_travels_with_the_code():
     ca = REPO / "device" / "certs" / "AmazonRootCA1.pem"
     assert ca.exists(), "an enrolling appliance has no provisioning step to download this"
     assert "BEGIN CERTIFICATE" in ca.read_text()
+
+
+# --- The A/B card's read-only root (OTA design 4.3) --------------------------
+
+def test_the_appliance_pins_the_scoreboard_uid_and_gid():
+    # The identity on STATE is owned by this number, and a new root can read
+    # it only if its scoreboard user has the same one. Left floating, one
+    # release that adds a system user would strand the fleet.
+    script = (REPO / "tools" / "pi-setup.sh").read_text()
+    assert re.search(r"^SERVICE_ID=900$", script, re.M)
+    body = install_appliance_body()
+    assert re.search(r'groupadd --system --gid "\$SERVICE_ID" "\$SERVICE_USER"', body)
+    assert re.search(r'useradd --system --uid "\$SERVICE_ID" --gid "\$SERVICE_ID"', body)
+    assert 'id -u "$SERVICE_USER")" = "$SERVICE_ID"' in body, "a pre-existing account with another number must fail the install"
+    # The layout script carries the same number, and the gate reads it from
+    # there rather than keeping a third copy.
+    assert re.search(r"^SCOREBOARD_ID=900$", (REPO / "tools" / "image-layout.sh").read_text(), re.M)
+    gate = (REPO / "tools" / "image-gate.sh").read_text()
+    assert 'SCOREBOARD_ID="$("$LAYOUT" --print scoreboard-id)"' in gate
+    assert not re.search(r"^SCOREBOARD_ID=[0-9]+$", gate, re.M), "the gate must not carry its own copy of the number"
+    printed = subprocess.run(["bash", str(REPO / "tools" / "image-layout.sh"), "--print", "scoreboard-id"],
+                             capture_output=True, text=True, check=True).stdout
+    assert printed == "900\n"
+
+
+def install_appliance_body() -> str:
+    script = (REPO / "tools" / "pi-setup.sh").read_text()
+    start = script.index("install_appliance() {")
+    return script[start:script.index("\n}\n", start)]
+
+
+def test_the_appliance_installs_what_a_read_only_root_needs():
+    body = install_appliance_body()
+    assert "ln -sfn /run/NetworkManager/resolv.conf /etc/resolv.conf" in body
+    assert ":>/etc/fake-hwclock.data" in body.replace(" ", "") or "/etc/fake-hwclock.data" in body
+    assert 'install -d -m 755 "$UPDATE_DIR"' in body
+    assert '"$DEVICE/generators/scoreboard-bootfs"' in body
+    assert "/usr/lib/systemd/system-generators/scoreboard-bootfs" in body
+    assert '"$DEVICE/system.conf.d/10-scoreboard-watchdog.conf"' in body
+    assert "/etc/systemd/system.conf.d/10-scoreboard-watchdog.conf" in body
+    # The journal prune: without it the transient machine id fills STATE
+    # with one journal directory per boot (see device/scoreboard-journal-prune).
+    assert '"$DEVICE/scoreboard-journal-prune"' in body
+    assert "/usr/local/sbin/scoreboard-journal-prune" in body
+    assert "/etc/systemd/system/scoreboard-journal-prune.service" in body
+    assert "/etc/systemd/system/sysinit.target.wants/scoreboard-journal-prune.service" in body
+    # NetworkManager's ordering after its two nofail binds from STATE.
+    assert '"$DEVICE/NetworkManager.service.d/10-scoreboard-state.conf"' in body
+    assert "/etc/systemd/system/NetworkManager.service.d/10-scoreboard-state.conf" in body
+
+
+def after_units(text: str) -> set[str]:
+    return {name for line in text.splitlines() if line.startswith("After=") for name in line[6:].split()}
+
+
+def directive(text: str, name: str) -> list[str]:
+    # Directive lines only; the comments are allowed to name what they reject.
+    return [line for line in text.splitlines() if line.startswith(name + "=")]
+
+
+def test_the_units_that_read_state_and_setup_are_ordered_after_their_mounts():
+    # STATE, SETUP and the binds are nofail, and systemd.mount(5) says a
+    # nofail mount is not ordered before local-fs.target -- so nothing waits
+    # for them unless the unit that reads them says so. After= only; a
+    # RequiresMountsFor= would stop the unit on a torn partition, and the
+    # design wants that panel to boot to its help screen.
+    appliance = (REPO / "device" / "scoreboard-appliance.service").read_text()
+    assert after_units(appliance) >= {"state.mount", "var-lib-scoreboard.mount", "var-lib-scoreboard\\x2dupdate.mount"}, \
+        "the panel would start against an empty /var/lib/scoreboard on a slow STATE"
+    assert not directive(appliance, "RequiresMountsFor")
+    netcfg = NETCFG_UNIT.read_text()
+    assert after_units(netcfg) >= {"boot-setup.mount", "state.mount", "NetworkManager.service"}
+    assert not directive(netcfg, "RequiresMountsFor")
+    dropin = (REPO / "device" / "NetworkManager.service.d" / "10-scoreboard-state.conf").read_text()
+    assert after_units(dropin) == {"etc-NetworkManager-system\\x2dconnections.mount", "var-lib-NetworkManager.mount"}
+    assert dropin.count("[Unit]") == 1 and "[Service]" not in dropin, "an ordering drop-in changes nothing else"
+    # The escaped names are what systemd derives from the paths, and a typo
+    # here is a silent no-op on the panel: After= on a unit that does not
+    # exist orders nothing. systemd-escape is the reference where it exists.
+    if shutil.which("systemd-escape"):
+        for path, name in (("/var/lib/scoreboard-update", "var-lib-scoreboard\\x2dupdate.mount"),
+                           ("/etc/NetworkManager/system-connections", "etc-NetworkManager-system\\x2dconnections.mount"),
+                           ("/boot/setup", "boot-setup.mount"), ("/state", "state.mount")):
+            escaped = subprocess.run(["systemd-escape", "-p", "--suffix=mount", path],
+                                     capture_output=True, text=True, check=True).stdout.strip()
+            assert escaped == name, f"{path} escapes to {escaped}, and the units name {name}"
+
+
+def test_the_watchdog_drop_in_arms_sixty_seconds_and_records_its_caveat():
+    conf = (REPO / "device" / "system.conf.d" / "10-scoreboard-watchdog.conf").read_text()
+    assert re.search(r"^RuntimeWatchdogSec=60$", conf, re.M)
+    # The hardware counts to about 16 s; 60 is valid only on a kernel whose
+    # watchdog core re-pings underneath, so the file has to say which.
+    assert "16 s" in conf and "verified on:" in conf
+
+
+def test_the_bootfs_generator_mounts_the_slot_the_firmware_booted(tmp_path):
+    generator = REPO / "device" / "generators" / "scoreboard-bootfs"
+    assert os.access(generator, os.X_OK)
+    # Run it against a fake device tree and cmdline for slot B.
+    dt = tmp_path / "partition"
+    dt.write_bytes(b"\x00\x00\x00\x03")
+    cmdline = tmp_path / "cmdline"
+    cmdline.write_text("console=tty1 root=PARTUUID=5c0ab0ad-06 rootfstype=ext4 rootwait ro\n")
+    script = generator.read_text().replace("/proc/device-tree/chosen/bootloader/partition", str(dt)).replace("/proc/cmdline", str(cmdline))
+    out = tmp_path / "generator.d"
+    out.mkdir()
+    r = subprocess.run(["sh", "-c", script, "scoreboard-bootfs", str(out)], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr
+    unit = (out / "boot-firmware.mount").read_text()
+    assert "What=/dev/disk/by-partuuid/5c0ab0ad-03" in unit
+    assert "Where=/boot/firmware" in unit
+    # systemd.mount(5): nofail and x-systemd.device-timeout are read only
+    # from /etc/fstab and ignored in a unit's Options=. The wants link is
+    # what makes the mount optional, and the bound on the wait is a drop-in
+    # on the device unit, as systemd-fstab-generator writes it.
+    assert not re.search(r"^Options=.*\b(nofail|x-systemd\.device-timeout)", unit, re.M), \
+        "these options are ignored in a unit file and would claim a bound that does not exist"
+    assert (out / "local-fs.target.wants" / "boot-firmware.mount").is_symlink()
+    timeout = out / "dev-disk-by\\x2dpartuuid-5c0ab0ad\\x2d03.device.d" / "50-device-timeout.conf"
+    assert timeout.is_file(), sorted(p.name for p in out.iterdir())
+    assert "JobRunningTimeoutSec=10s" in timeout.read_text()
+
+
+def test_the_bootfs_generator_writes_nothing_on_a_card_that_is_not_this_layout(tmp_path):
+    generator = REPO / "device" / "generators" / "scoreboard-bootfs"
+    dt = tmp_path / "partition"
+    dt.write_bytes(b"\x00\x00\x00\x01")  # pi-gen's two-partition card boots from 1
+    cmdline = tmp_path / "cmdline"
+    cmdline.write_text("root=PARTUUID=abc-02 rw\n")
+    script = generator.read_text().replace("/proc/device-tree/chosen/bootloader/partition", str(dt)).replace("/proc/cmdline", str(cmdline))
+    out = tmp_path / "generator.d"
+    out.mkdir()
+    r = subprocess.run(["sh", "-c", script, "scoreboard-bootfs", str(out)], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr
+    assert list(out.iterdir()) == []
+    # And no device-tree entry at all (not a Pi): the same.
+    script = generator.read_text().replace("/proc/device-tree/chosen/bootloader/partition", str(tmp_path / "none"))
+    r = subprocess.run(["sh", "-c", script, "scoreboard-bootfs", str(out)], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0 and list(out.iterdir()) == []

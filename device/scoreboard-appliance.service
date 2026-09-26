@@ -8,7 +8,18 @@
 
 [Unit]
 Description=HockeyTrack scoreboard
-After=network-online.target
+# The three mounts are the identity (/var/lib/scoreboard) and the updater's
+# records (/var/lib/scoreboard-update), both bound from /state. They are
+# `nofail` in the fstab, and a nofail mount is not ordered before
+# local-fs.target (systemd.mount(5)), so without this line a slow fsck of
+# STATE would start the panel against the empty mount points on the
+# read-only root: it would find no identity, behave as unenrolled, and under
+# SCO-68 a trial boot would roll back for a reason that is not the
+# release's. After= waits for each mount job to end, however it ends; it is
+# deliberately not RequiresMountsFor=, because a panel with a torn STATE
+# must still start and show its help screen (design 4.3). The mount unit
+# names are systemd's escaping of the paths.
+After=network-online.target state.mount var-lib-scoreboard.mount var-lib-scoreboard\x2dupdate.mount
 Wants=network-online.target
 
 [Service]

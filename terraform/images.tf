@@ -310,17 +310,20 @@ resource "aws_iam_role" "image_publisher" {
 # s3:ListBucket scoped to that one key because a plain GetObject can't tell a
 # missing key from one denied by policy without it (Task 3's "Mirror to the
 # image CDN" step; controller ruling on Task 3's review, spec 9.5). No
-# delete, no read or list of anything else, no other bucket.
+# delete, no read or list of anything else, no other bucket. The test
+# channel's pointer, latest-test.json, is treated exactly like latest.json:
+# the never-backwards rule is kept per pointer file (OTA design 6.4).
 data "aws_iam_policy_document" "image_publisher" {
   statement {
-    sid       = "Upload"
-    actions   = ["s3:PutObject", "s3:AbortMultipartUpload"]
-    resources = ["${aws_s3_bucket.images.arn}/images/*", "${aws_s3_bucket.images.arn}/latest.json"]
+    sid     = "Upload"
+    actions = ["s3:PutObject", "s3:AbortMultipartUpload"]
+    resources = ["${aws_s3_bucket.images.arn}/images/*", "${aws_s3_bucket.images.arn}/latest.json",
+    "${aws_s3_bucket.images.arn}/latest-test.json"]
   }
   statement {
     sid       = "ReadLatest"
     actions   = ["s3:GetObject"]
-    resources = ["${aws_s3_bucket.images.arn}/latest.json"]
+    resources = ["${aws_s3_bucket.images.arn}/latest.json", "${aws_s3_bucket.images.arn}/latest-test.json"]
   }
   statement {
     sid       = "ListLatestOnly"
@@ -329,7 +332,26 @@ data "aws_iam_policy_document" "image_publisher" {
     condition {
       test     = "StringEquals"
       variable = "s3:prefix"
-      values   = ["latest.json"]
+      values   = ["latest.json", "latest-test.json"]
+    }
+  }
+  # A version number is published once. v0.3.0 (stable) and v0.3.0-test
+  # (test) are different GitHub Releases but the same images/v0.3.0/ prefix,
+  # and the objects there are cached as immutable for a year; the second
+  # publish would overwrite the first channel's payloads and signed manifest
+  # in place, and every panel on that channel would then refuse the manifest
+  # (wrong channel) and stop updating. So before it creates a new Release the
+  # publish job lists images/<v>/ and refuses a prefix that already holds
+  # objects. Names only, under images/, which CloudFront serves to anyone;
+  # nothing is read through this grant.
+  statement {
+    sid       = "ListOneVersionPrefix"
+    actions   = ["s3:ListBucket"]
+    resources = [aws_s3_bucket.images.arn]
+    condition {
+      test     = "StringLike"
+      variable = "s3:prefix"
+      values   = ["images/v*/"]
     }
   }
   statement {

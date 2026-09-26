@@ -18,8 +18,20 @@ USER_NAME="$(id -un)"
 
 APPLIANCE=0
 SERVICE_USER=scoreboard
+# The uid AND gid, pinned. On the A/B card the panel's identity lives on the
+# shared STATE partition, owned by this number, and a new root can read it
+# only if its scoreboard user has the same number as the root that wrote it.
+# Left floating (useradd --system picks whatever is free), one release that
+# adds a system user would shift it, every trial boot would roll back, and
+# the fleet would be stranded on the old version until a reflash. Any fixed
+# number in the system range does; tools/image-layout.sh owns the same
+# number for the STATE skeleton and tools/image-gate.sh asserts both.
+SERVICE_ID=900
 APP_DIR=/opt/scoreboard
 STATE_DIR=/var/lib/scoreboard
+# The updater's records (SCO-68), bound from STATE like the identity; the
+# mount point has to exist in every root.
+UPDATE_DIR=/var/lib/scoreboard-update
 
 die() { echo "pi-setup: $*" >&2; exit 1; }
 
@@ -102,6 +114,8 @@ install_appliance() {
   # Every Python dependency comes from the distribution's signed archive:
   # pygame for its kmsdrm driver, cryptography for enrollment, and paho-mqtt
   # because the service that imports it holds the panel's IoT private key.
+  # iw is what scoreboard-netcfg sets the Wi-Fi regulatory domain with now
+  # that the root is read-only and raspi-config's writes have nowhere to go.
   #
   # The four graphics packages at the end are the display path. SDL's kmsdrm
   # backend dlopens them at runtime rather than linking them, so nothing in
@@ -122,11 +136,18 @@ install_appliance() {
   # tools/pi-gen/stage-scoreboard/00-packages/00-packages, which
   # device/tests/test_pi_gen_recipe.py enforces, and which carries the full
   # reasoning.
-  apt-get install -y python3-pygame python3-gpiozero python3-venv network-manager polkitd python3-cryptography python3-paho-mqtt ca-certificates libegl1 libegl-mesa0 libgles2 libgl1-mesa-dri
+  apt-get install -y python3-pygame python3-gpiozero python3-venv network-manager polkitd python3-cryptography python3-paho-mqtt ca-certificates iw libegl1 libegl-mesa0 libgles2 libgl1-mesa-dri
 
   echo "==> service account"
+  getent group "$SERVICE_USER" >/dev/null || groupadd --system --gid "$SERVICE_ID" "$SERVICE_USER"
   getent passwd "$SERVICE_USER" >/dev/null || \
-    useradd --system --home-dir "$STATE_DIR" --create-home --shell /usr/sbin/nologin "$SERVICE_USER"
+    useradd --system --uid "$SERVICE_ID" --gid "$SERVICE_ID" --home-dir "$STATE_DIR" --create-home \
+      --shell /usr/sbin/nologin "$SERVICE_USER"
+  # A pre-existing account with another number is not repaired here: files it
+  # already owns would be orphaned. The image gate asserts the number in
+  # every root, so it is a build failure, never a field one.
+  [ "$(id -u "$SERVICE_USER")" = "$SERVICE_ID" ] && [ "$(id -g "$SERVICE_USER")" = "$SERVICE_ID" ] \
+    || die "$SERVICE_USER is uid $(id -u "$SERVICE_USER") gid $(id -g "$SERVICE_USER"), not the pinned $SERVICE_ID; the identity on STATE is only readable by a root whose number matches"
   # video, render and input must resolve, or opening /dev/dri and the input
   # devices fails outright; the unit no longer declares SupplementaryGroups=
   # itself, so this loop is the only place membership comes from. gpio stays
@@ -139,6 +160,7 @@ install_appliance() {
   done
   getent group gpio >/dev/null && usermod -aG gpio "$SERVICE_USER"
   install -d -o "$SERVICE_USER" -g "$SERVICE_USER" -m 700 "$STATE_DIR"
+  install -d -m 755 "$UPDATE_DIR"
 
   echo "==> application"
   mkdir -p "$APP_DIR"
@@ -158,6 +180,33 @@ install_appliance() {
   esac
   chown -R root:root "$APP_DIR"
 
+  echo "==> read-only root"
+  # The root is mounted read-only on the A/B card (tools/image-layout.sh
+  # writes the fstab). What still has to be writable is on STATE by bind
+  # mount or on tmpfs; these are the three files in /etc that need a home.
+  #
+  # NetworkManager can keep resolv.conf under /run when /etc/resolv.conf is
+  # a symlink pointing there, which is the one arrangement that needs no
+  # write to /etc.
+  ln -sfn /run/NetworkManager/resolv.conf /etc/resolv.conf
+  # fake-hwclock's data file is bind-mounted from STATE, and a bind mount
+  # needs a target file to exist in the root.
+  [ -e /etc/fake-hwclock.data ] || : >/etc/fake-hwclock.data
+  # The running slot's boot partition differs by slot, so a generator mounts
+  # it from what the firmware reports rather than a static fstab line.
+  install -D -m 755 "$DEVICE/generators/scoreboard-bootfs" \
+    /usr/lib/systemd/system-generators/scoreboard-bootfs
+  # The hardware watchdog (design 5.2): a hung trial boot resets itself
+  # instead of waiting for someone to pull the plug. See the file for the
+  # 16 s hardware limit and why 60 s is valid only on a recent kernel.
+  install -D -m 644 "$DEVICE/system.conf.d/10-scoreboard-watchdog.conf" \
+    /etc/systemd/system.conf.d/10-scoreboard-watchdog.conf
+  # NetworkManager reads its profiles and state from two nofail bind mounts
+  # off STATE, which local-fs.target does not wait for; the drop-in orders
+  # it after them (see the file for why After= and not RequiresMountsFor=).
+  install -D -m 644 "$DEVICE/NetworkManager.service.d/10-scoreboard-state.conf" \
+    /etc/systemd/system/NetworkManager.service.d/10-scoreboard-state.conf
+
   echo "==> units and polkit"
   # Rendered before tee opens the target, so a failure cannot leave an empty
   # unit behind -- see install_checkout() above for why this matters.
@@ -165,15 +214,25 @@ install_appliance() {
   unit="$(render_unit)"
   printf '%s\n' "$unit" | tee /etc/systemd/system/scoreboard.service >/dev/null
   cp "$DEVICE/scoreboard-netcfg.service" /etc/systemd/system/scoreboard-netcfg.service
+  # The journal prune: the machine id is new every boot on the read-only
+  # root, so journald opens a new directory on STATE each boot and its own
+  # SystemMaxUse never touches the earlier ones. See the script.
+  install -D -m 755 "$DEVICE/scoreboard-journal-prune" /usr/local/sbin/scoreboard-journal-prune
+  cp "$DEVICE/scoreboard-journal-prune.service" /etc/systemd/system/scoreboard-journal-prune.service
   install -D -m 644 "$DEVICE/polkit/10-scoreboard-network.rules" \
     /etc/polkit-1/rules.d/10-scoreboard-network.rules
   # Enabled by symlink rather than `systemctl enable`: this also runs inside a
   # pi-gen chroot, where there is no running systemd to talk to.
-  mkdir -p /etc/systemd/system/multi-user.target.wants
+  mkdir -p /etc/systemd/system/multi-user.target.wants /etc/systemd/system/sysinit.target.wants
   ln -sf /etc/systemd/system/scoreboard.service \
     /etc/systemd/system/multi-user.target.wants/scoreboard.service
   ln -sf /etc/systemd/system/scoreboard-netcfg.service \
     /etc/systemd/system/multi-user.target.wants/scoreboard-netcfg.service
+  # sysinit.target, not multi-user: the prune has DefaultDependencies=no so
+  # it can run before systemd-journal-flush.service, which is itself wanted
+  # by sysinit.target.
+  ln -sf /etc/systemd/system/scoreboard-journal-prune.service \
+    /etc/systemd/system/sysinit.target.wants/scoreboard-journal-prune.service
   echo "Appliance installed. It starts on the next boot."
 }
 

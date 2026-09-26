@@ -141,6 +141,20 @@ def test_the_build_copies_only_what_the_appliance_needs_from_device():
     # device/config holds a developer's real identity; it must never be copied.
     assert "device/config" not in build
     assert re.search(r'cp -a "\$REPO/device/"\*', build) is None, "copy an explicit list, not device/*"
+    # What the read-only root needs travels with the rest (OTA design 4.3):
+    # pi-setup.sh --appliance installs each of these by path inside the
+    # chroot, and dies there if the copy list falls behind it.
+    assert '"$REPO/device/generators"' in build
+    assert '"$REPO/device/system.conf.d"' in build
+    assert '"$REPO/device/NetworkManager.service.d"' in build
+    assert '"$REPO/device/scoreboard-journal-prune"' in build
+    assert '"$REPO/device/scoreboard-journal-prune.service"' in build
+    setup = (REPO / "tools" / "pi-setup.sh").read_text()
+    appliance = setup[setup.index("install_appliance() {"):]
+    appliance = appliance[:appliance.index("\n}\n")]
+    for name in re.findall(r'"\$DEVICE/([^"]+)"', appliance):
+        top = name.split("/")[0]
+        assert f'"$REPO/device/{top}"' in build, f"pi-setup.sh installs $DEVICE/{name} but build.sh does not copy device/{top}"
 
 
 def test_the_stage_runs_appliance_mode_and_writes_the_build_identity():
@@ -397,6 +411,28 @@ def test_the_stage_and_the_gate_agree_on_the_purged_and_masked_sets():
         assert package in gate, f"the gate no longer checks {package}"
     for unit in MASKED_FOR_NETWORK_SURFACE:
         assert unit in gate, f"the gate no longer asserts the mask on {unit}"
+
+
+RESIZE_RUN = PIGEN / "stage-scoreboard" / "06-fixed-layout" / "00-run.sh"
+
+
+def test_the_stage_disarms_the_first_boot_resize_in_both_halves():
+    # pi-gen's cmdline carries `resize` (the initramfs grows the partition)
+    # and stage2 enables rpi-resize.service (grows the filesystem). The
+    # layout script drops the token; this stage masks the unit and removes
+    # the enablement stage2 wrote, and the gate asserts both, so a pi-gen
+    # bump that re-arms either fails the build rather than growing ROOT-A
+    # on a card whose two roots must stay identical.
+    run = RESIZE_RUN.read_text()
+    assert os.access(RESIZE_RUN, os.X_OK), f"{RESIZE_RUN} must be executable or pi-gen skips it"
+    assert 'ln -sfn /dev/null "${ROOTFS_DIR}/etc/systemd/system/rpi-resize.service"' in run
+    assert "-name 'rpi-resize.service' -delete" in run
+    assert "ConditionFirstBoot" in run, "the reason it is a mask and not a disable has to be written down"
+    gate = GATE.read_text()
+    assert "assert_masked rpi-resize.service" in gate
+    assert "-name 'rpi-resize.service' -print -quit" in gate
+    layout = (REPO / "tools" / "image-layout.sh").read_text()
+    assert "resize$" in layout and '" resize "' in gate, "the token is dropped by the layout and refused by the gate"
 
 
 def test_the_stage_turns_the_bluetooth_radio_off_in_the_device_tree():

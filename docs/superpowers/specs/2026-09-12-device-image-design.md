@@ -680,7 +680,8 @@ Until this pass, nobody had written down what the image actually listened on. §
 | `systemd-journald` / `dbus` / `systemd-udevd` / `systemd-creds` / `-hostnamed` / `-initctl` / `-sysext` / `-rfkill` sockets | AF_UNIX paths, a FIFO, netlink, and `/dev/rfkill` | the journal's `Listening on …` lines, and each unit's `Listen*=` read from its deb | **kept** — none is a network address |
 | `udisks2.service` | no network socket; D-Bus activated; mounts removable media | journal: `Started udisks2.service` | **kept** — physical access, not network surface (§9.12) |
 | `rpi-eeprom-update.service` | no socket; applies bootloader EEPROM from local, signed files | journal: `Finished rpi-eeprom-update.service` | **kept** (§9.12) |
-| `cron`, `polkit`, `logind`, `alsa-restore`, the `rpi-resize`/`rpi-setup-loop` oneshots | no network sockets | journal | **kept** |
+| `cron`, `polkit`, `logind`, `alsa-restore`, the `rpi-setup-loop` oneshot | no network sockets | journal | **kept** |
+| `rpi-resize.service` | no socket; grows the root filesystem into its partition on the first boot, the second half of pi-gen's first-boot resize (the first is the `resize` cmdline token the initramfs reads) | journal; `stage2/01-sys-tweaks` runs `systemctl enable rpi-resize` | **masked** since SCO-67 (`06-fixed-layout`): the A/B card's partitions are fixed and the root must never resize; and with the transient machine id its `ConditionFirstBoot=yes` would be true on every boot. The `resize` token is dropped from both slot cmdlines by `tools/image-layout.sh` |
 | `systemd-resolved`, `dhcpcd`, `triggerhappy`, `ModemManager`, `cups`, `rpcbind`, `nfs-common`, `samba`, `pi-bluetooth` | — | **not installed**: absent from the v0.1.3 build log and from both journals | n/a |
 
 #### The surface, after

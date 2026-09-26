@@ -139,4 +139,12 @@ test("the flash steps tell people to skip Imager's OS customization", () => {
 test("the page says how big a card is needed", () => {
   const html = readFileSync(new URL("../download/index.html", import.meta.url), "utf8");
   assert.match(html, /8 GB or larger/);
+  // The six-partition layout's minimum, from tools/image-layout.sh: 6,992
+  // MiB is 7.33 GB in the decimal units card makers print, so "7.0 GB"
+  // understated it and a card that really had 7.0 GB usable would not take
+  // the image. And the one flash the update path does not remove.
+  assert.match(html, /at least 7\.4 GB usable \(6,992 MiB/);
+  assert.doesNotMatch(html, /7\.0 GB/);
+  assert.match(html, /cannot update itself to it/);
+  assert.match(html, /drive called <strong>SETUP<\/strong>/);
 });

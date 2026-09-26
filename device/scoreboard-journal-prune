@@ -1,0 +1,73 @@
+#!/bin/sh
+# Remove the journal directories of earlier boots from STATE, keeping the
+# newest few. Installed by tools/pi-setup.sh --appliance to
+# /usr/local/sbin/, run once per boot by scoreboard-journal-prune.service.
+#
+# WHY. /etc/machine-id is empty on the read-only root (tools/image-layout.sh
+# writes it so, because an image strangers download cannot ship one id for
+# every panel), so systemd generates a new id every boot and journald opens
+# a new /var/log/journal/<id>/ on STATE each time. journald's SystemMaxUse
+# vacuums only the directory of the RUNNING id (server_vacuum acts on
+# system_storage.path); the directories of earlier boots are never touched,
+# each holds at least one journal file as allocated (8 MiB is typical), and
+# a panel power-cycled nightly would fill the 256 MiB STATE in about a
+# month. After that nothing on STATE can be written: no enrollment, no saved
+# country, no update record. journalctl --vacuum-* does not help either: it
+# removes archived files only, and a boot that ended without a rotation
+# leaves its system.journal active for good.
+#
+# WHEN. After STATE is mounted and before systemd-journal-flush.service
+# opens this boot's directory, so what is on the card at that moment is
+# exactly the earlier boots.
+#
+# HOW MUCH. All but the newest KEEP directories of earlier boots. KEEP is
+# not zero: the persistent journal exists so a panel that fails to start can
+# be diagnosed from its card, and the boot that failed is by definition an
+# earlier one. Two keeps the last two failed boots of a restart loop and
+# bounds the journal at (KEEP + 1) x SystemMaxUse = 150 MiB worst case, on
+# a STATE that holds little else.
+#
+# SAFETY. Only names shaped like a machine id (32 hex characters) are
+# candidates, never the running id, and nothing is removed when the running
+# id cannot be read: the safe direction is to keep. The unit runs this as
+# root with the rest of the card read-only (ProtectSystem=strict), so a bug
+# here can remove journals and nothing else. The arguments exist for the
+# tests; the unit passes none.
+#
+# PROVISIONAL. SCO-66's design accepted the transient id on the claim that
+# SystemMaxUse bounds the whole tree, which it does not. Whether to keep
+# this or persist the id instead (an initramfs hook) is the owner's call,
+# recorded against SCO-66; H10 counts the directories either way.
+set -eu
+
+journal="${1:-/var/log/journal}"
+id_file="${2:-/etc/machine-id}"
+keep="${3:-2}"
+
+is_machine_id() {
+  [ "${#1}" -eq 32 ] || return 1
+  case "$1" in *[!0-9a-f]*) return 1 ;; esac
+  return 0
+}
+
+current="$(tr -d '[:space:]' <"$id_file" 2>/dev/null || true)"
+if ! is_machine_id "$current"; then
+  echo "scoreboard-journal-prune: no readable machine id in $id_file; removing nothing" >&2
+  exit 0
+fi
+[ -d "$journal" ] || exit 0
+
+# Newest first by modification time, one level deep. The loop runs in a
+# subshell, which is fine: keep only has to count within it.
+find "$journal" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %f\n' 2>/dev/null \
+  | sort -rn \
+  | while read -r _ name; do
+      is_machine_id "$name" || continue
+      [ "$name" != "$current" ] || continue
+      if [ "$keep" -gt 0 ]; then
+        keep=$((keep - 1))
+        continue
+      fi
+      rm -rf -- "$journal/$name"
+      echo "scoreboard-journal-prune: removed $journal/$name, an earlier boot's journal"
+    done

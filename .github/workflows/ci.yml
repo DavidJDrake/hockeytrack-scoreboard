@@ -71,6 +71,12 @@ jobs:
           .venv/bin/pip install --upgrade pip
           .venv/bin/pip install -r device/requirements-dev.txt
 
+      # tools/image-layout.sh and the gate's --image step write and read the
+      # card's filesystems without mounting them; their tests build a real
+      # (sparse) image and skip themselves when these are missing.
+      - name: Install the image layout tools
+        run: sudo apt-get install -y --no-install-recommends dosfstools mtools
+
       - name: Run tests (headless)
         run: make test-py
 

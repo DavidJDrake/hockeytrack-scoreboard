@@ -12,6 +12,11 @@ polkitd
 python3-cryptography
 ca-certificates
 python3-paho-mqtt
+# iw: since the root went read-only (OTA design 4.3) scoreboard-netcfg sets
+# the Wi-Fi regulatory domain with `iw reg set` itself, on every boot, instead
+# of through raspi-config, which wrote under /etc and into cmdline.txt. Lite
+# images ship iw already; naming it makes that a dependency rather than luck.
+iw
 
 # --- The display path (added 2026-09-18, after v0.1.1) ---
 #
