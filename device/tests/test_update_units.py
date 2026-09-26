@@ -56,6 +56,12 @@ def test_the_health_unit_may_write_setup_and_its_records_and_has_no_network():
     assert d["WantedBy"] == ["multi-user.target"]
     assert "After" in d and not any("scoreboard.service" in a for a in d["After"]), \
         "the thing it judges may not start; it must not wait for it"
+    # The records and autoboot.txt are on nofail mounts, which local-fs.target
+    # does not wait for; waiting for it could judge a trial against empty
+    # mount points during a slow fsck and roll back a good release.
+    after = " ".join(d["After"]).split()
+    assert {"boot-setup.mount", "state.mount", "var-lib-scoreboard\\x2dupdate.mount"} <= set(after), after
+    assert "local-fs.target" not in after
     assert int(d["TimeoutStartSec"][0]) > 240
 
 

@@ -210,9 +210,15 @@ unused on purpose, so the image is the same on every card.
 | 1 | `SETUP` | FAT32 | 64 MiB | `autoboot.txt`, `scoreboard-setup.txt`, `README.txt` | `/boot/setup` | rw (only two units may write; 7.1) |
 | 2 | `BOOT-A` | FAT32 | 256 MiB | firmware, kernels, overlays, `config.txt`, `cmdline-a.txt`, `cmdline-b.txt`, initramfs | `/boot/firmware` when A is running | rw for `rpi-eeprom-update` only (4.3) |
 | 3 | `BOOT-B` | FAT32 | 256 MiB | identical files to `BOOT-A` (fact 4) | `/boot/firmware` when B is running | rw, same |
-| 4 | `ROOT-A` | ext4 | 3 GiB | the root filesystem | `/` when A is running | ro |
-| 5 | `ROOT-B` | ext4 | 3 GiB | the root filesystem | `/` when B is running | ro |
-| 6 | `STATE` | ext4 | 256 MiB | what survives (4.3) | `/state` | rw |
+| 4 | (extended) | | | the MBR container for 5 to 7: an MBR holds four primary partitions, so the roots and `STATE` are logical | | |
+| 5 | `ROOT-A` | ext4 | 3 GiB | the root filesystem | `/` when A is running | ro |
+| 6 | `ROOT-B` | ext4 | 3 GiB | the root filesystem | `/` when B is running | ro |
+| 7 | `STATE` | ext4 | 256 MiB | what survives (4.3) | `/state` | rw |
+
+*Corrected 2026-09-26 to what `tools/image-layout.sh` builds: the first
+draft numbered the roots 4 and 5 and `STATE` 6, which an MBR cannot do, and
+the updater's slot table was written from that draft. Found when the two
+branches were merged; the updater now names 2/5 and 3/6.*
 
 Why `SETUP` holds no firmware: fact 5. The bootloader only walks to a slot
 when the requested partition is *not bootable*, and "bootable" means
@@ -835,7 +841,7 @@ Three units and a timer, all in `device/`, installed by `pi-setup.sh
 |---|---|---|---|---|---|---|
 | `scoreboard-update.timer` | | | | | | |
 | `scoreboard-update.service` | root | `/var/lib/scoreboard-update` | `/state`, `/var/lib/scoreboard` | **none** (`PrivateNetwork=yes`) | none | none |
-| `scoreboard-update@a.service`, `@b` | root | `/var/lib/scoreboard-update` | `/state`, `/var/lib/scoreboard` | outbound `AF_INET`/`AF_INET6`, plus `AF_UNIX` for D-Bus and the journal | `/dev/mmcblk0p2` + `p4` for `@a`; `p3` + `p5` for `@b` | none |
+| `scoreboard-update@a.service`, `@b` | root | `/var/lib/scoreboard-update` | `/state`, `/var/lib/scoreboard` | outbound `AF_INET`/`AF_INET6`, plus `AF_UNIX` for D-Bus and the journal | `/dev/mmcblk0p2` + `p5` for `@a`; `p3` + `p6` for `@b` | none |
 | `scoreboard-health.service` | root | `/var/lib/scoreboard-update`, `/boot/setup` | `/state`, `/var/lib/scoreboard` | none | none | none |
 
 `scoreboard-update.service` is the planner: it reads

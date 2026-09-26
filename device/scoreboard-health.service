@@ -15,11 +15,14 @@
 
 [Unit]
 Description=Decide a scoreboard trial boot
-# The records and autoboot.txt are on STATE and SETUP, both fstab mounts
-# with nofail (design 4.3); local-fs.target is reached once they are mounted
-# or their ten-second device timeout has passed, and a missing one is then a
-# rollback here rather than a hang.
-After=local-fs.target
+# The records live on STATE (bound at /var/lib/scoreboard-update) and
+# autoboot.txt on SETUP, both nofail mounts (design 4.3). A nofail mount is
+# NOT ordered before local-fs.target (systemd.mount(5)), so waiting for that
+# target could run this unit against empty mount points during a slow fsck
+# and roll back a good trial. Wait for the mount jobs themselves instead, as
+# scoreboard.service does: After= waits for each job to end however it ends,
+# and a mount that failed is then a rollback here rather than a hang.
+After=boot-setup.mount state.mount var-lib-scoreboard\x2dupdate.mount
 
 [Service]
 Type=oneshot
