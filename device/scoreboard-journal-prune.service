@@ -1,0 +1,31 @@
+# Removes the journal directories of earlier boots from STATE before this
+# boot's is opened. The machine id is new every boot on the read-only root,
+# so journald opens a new /var/log/journal/<id>/ each time and its own
+# SystemMaxUse never touches the earlier ones; left alone they fill STATE in
+# about a month of nightly power cycles. The script says the rest.
+
+[Unit]
+Description=Prune the journal directories of earlier boots
+# Early boot: sysinit.target pulls this in (tools/pi-setup.sh links it
+# there), the bind mount from STATE has to be up, and it must finish before
+# systemd-journal-flush.service creates this boot's directory, so the
+# directories it sees are exactly the earlier boots.
+DefaultDependencies=no
+Conflicts=shutdown.target
+Before=shutdown.target
+RequiresMountsFor=/var/log/journal
+Before=systemd-journal-flush.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/scoreboard-journal-prune
+# It deletes as root, so everything else on the card is read-only to it: a
+# bug in the script can remove journals and nothing else.
+ProtectSystem=strict
+ReadWritePaths=/var/log/journal
+# A few rm -rf of directories holding a handful of files; anything longer
+# is a wedged card, and the boot must go on without the prune.
+TimeoutStartSec=30
+
+[Install]
+WantedBy=sysinit.target

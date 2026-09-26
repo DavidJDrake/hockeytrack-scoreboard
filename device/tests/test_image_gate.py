@@ -13,6 +13,7 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[2]
 GATE = REPO / "tools" / "image-gate.sh"
+LAYOUT = REPO / "tools" / "image-layout.sh"
 # Built at runtime so no PEM private-key header sits in the repository.
 FAKE_KEY = "-----BEGIN " + "PRIVATE KEY-----\nnot a key\n-----END " + "PRIVATE KEY-----\n"
 
@@ -22,30 +23,68 @@ def clean_image(tmp_path: Path) -> tuple[Path, Path]:
     (root / "etc").mkdir(parents=True)
     (root / "etc" / "passwd").write_text(
         "root:x:0:0:root:/root:/bin/bash\n"
-        "scoreboard:x:996:996::/var/lib/scoreboard:/usr/sbin/nologin\n"
+        "scoreboard:x:900:900::/var/lib/scoreboard:/usr/sbin/nologin\n"
         "pi:x:1000:1000:,,,:/home/pi:/bin/bash\n"
         "nobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin\n"
     )
     (root / "etc" / "shadow").write_text("root:*:20000:0:99999:7:::\nscoreboard:!:20000::::::\npi:!:20000:0:99999:7:::\nnobody:*:20000:0:99999:7:::\n")
+    (root / "etc" / "group").write_text("root:x:0:\nscoreboard:x:900:\npi:x:1000:\nvideo:x:44:scoreboard\n")
+    # The A/B layout (design 4.3): the fstab is what tools/image-layout.sh
+    # writes, the root's uid is pinned, and what the read-only root needs is
+    # in place -- the bind-mount targets, the resolv.conf symlink, the
+    # generator for the running slot's boot partition and the watchdog.
+    (root / "etc" / "fstab").write_text(layout_print("fstab"))
+    (root / "etc" / "resolv.conf").symlink_to("/run/NetworkManager/resolv.conf")
+    (root / "etc" / "fake-hwclock.data").write_text("")
+    (root / "var" / "lib" / "scoreboard-update").mkdir(parents=True)
+    (root / "var" / "lib" / "NetworkManager").mkdir(parents=True)
+    generators = root / "usr" / "lib" / "systemd" / "system-generators"
+    generators.mkdir(parents=True)
+    shutil.copy(REPO / "device" / "generators" / "scoreboard-bootfs", generators)
+    (generators / "scoreboard-bootfs").chmod(0o755)
+    conf_d = root / "etc" / "systemd" / "system.conf.d"
+    conf_d.mkdir(parents=True)
+    shutil.copy(REPO / "device" / "system.conf.d" / "10-scoreboard-watchdog.conf", conf_d)
     units = root / "etc" / "systemd" / "system"
     wants = units / "multi-user.target.wants"
     wants.mkdir(parents=True)
     for unit in ("scoreboard.service", "scoreboard-netcfg.service", "scoreboard-health.service"):
-        (units / unit).write_text("[Unit]\n")
         (wants / unit).symlink_to(f"/etc/systemd/system/{unit}")
+    # The real units, not stubs: the gate reads the network unit's sandbox
+    # lines, both units' After= ordering behind the nofail mounts, and the
+    # updater's ReadWritePaths=. scoreboard.service on the image is the
+    # appliance unit, as pi-setup.sh --appliance renders it.
+    shutil.copy(REPO / "device" / "scoreboard-appliance.service", units / "scoreboard.service")
+    shutil.copy(REPO / "device" / "scoreboard-netcfg.service", units / "scoreboard-netcfg.service")
     # The updater (design 7.1): the timer is enabled, the planner is started
-    # by it alone, and the write template's two instances carry their
-    # devices in drop-ins. The health unit above is enabled like the others.
+    # by it alone, the write template's two instances carry their devices in
+    # drop-ins, and the health unit is enabled like the others above.
+    for unit in ("scoreboard-update.timer", "scoreboard-update.service",
+                 "scoreboard-update@.service", "scoreboard-health.service"):
+        shutil.copy(REPO / "device" / unit, units / unit)
+    for slot in ("a", "b"):
+        dropin = units / f"scoreboard-update@{slot}.service.d"
+        dropin.mkdir()
+        shutil.copy(REPO / "device" / f"scoreboard-update@{slot}.service.d" / "slot.conf", dropin)
     timers = units / "timers.target.wants"
     timers.mkdir()
-    (units / "scoreboard-update.timer").write_text("[Timer]\nOnBootSec=20min\n")
     (timers / "scoreboard-update.timer").symlink_to("/etc/systemd/system/scoreboard-update.timer")
-    (units / "scoreboard-update.service").write_text("[Service]\nReadWritePaths=/var/lib/scoreboard-update\n")
-    (units / "scoreboard-update@.service").write_text("[Service]\nReadWritePaths=/var/lib/scoreboard-update\n")
-    for slot, devs in (("a", "2 rw\nDeviceAllow=/dev/mmcblk0p4"), ("b", "3 rw\nDeviceAllow=/dev/mmcblk0p5")):
-        (units / f"scoreboard-update@{slot}.service.d").mkdir()
-        (units / f"scoreboard-update@{slot}.service.d" / "slot.conf").write_text(
-            f"[Service]\nDeviceAllow=/dev/mmcblk0p{devs} rw\n")
+    nm_dropin = units / "NetworkManager.service.d"
+    nm_dropin.mkdir()
+    shutil.copy(REPO / "device" / "NetworkManager.service.d" / "10-scoreboard-state.conf", nm_dropin)
+    # pi-gen's stage2 enables rpi-resize.service; the scoreboard stage masks
+    # it and removes the enablement. The clean fixture carries the packaged
+    # unit (below) and the mask (MASKED_UNITS), and no wants link.
+    # The journal prune: a script under /usr/local/sbin, a unit, and its
+    # enablement under sysinit.target (it runs before the journal flush).
+    sbin = root / "usr" / "local" / "sbin"
+    sbin.mkdir(parents=True)
+    shutil.copy(REPO / "device" / "scoreboard-journal-prune", sbin)
+    (sbin / "scoreboard-journal-prune").chmod(0o755)
+    shutil.copy(REPO / "device" / "scoreboard-journal-prune.service", units)
+    sysinit = units / "sysinit.target.wants"
+    sysinit.mkdir()
+    (sysinit / "scoreboard-journal-prune.service").symlink_to("/etc/systemd/system/scoreboard-journal-prune.service")
     # Raspberry Pi OS (raspberrypi-sys-mods) ships this enabled on every
     # image, and raspberrypi-sys-mods stays -- so the enablement symlink is
     # still there on the hardened image. The scoreboard stage masks the unit
@@ -65,6 +104,8 @@ def clean_image(tmp_path: Path) -> tuple[Path, Path]:
     (units / "userconfig.service").symlink_to("/dev/null")
     (lib_units / "sshswitch.service").write_text(
         "[Unit]\nDescription=Turn on SSH if /boot/ssh is present\n[Install]\nWantedBy=multi-user.target\n")
+    (lib_units / "rpi-resize.service").write_text(
+        "[Unit]\nDescription=Grow and trim root filesystem on first boot\nConditionFirstBoot=yes\n[Install]\nWantedBy=sysinit.target\n")
     # A getty drop-in is not itself a finding: noclear.conf is the common one
     # and it logs nobody in. Only an autologin drop-in may fail the gate.
     (units / "getty@tty1.service.d").mkdir()
@@ -99,6 +140,9 @@ def clean_image(tmp_path: Path) -> tuple[Path, Path]:
     (venv / "pyvenv.cfg").write_text("home = /usr/bin\ninclude-system-site-packages = true\nversion = 3.13.5\n")
     (root / "opt" / "scoreboard" / "certs").mkdir()
     shutil.copy(REPO / "device" / "certs" / "AmazonRootCA1.pem", root / "opt" / "scoreboard" / "certs")
+    # The release-signing public keys, exactly as the repository holds them
+    # (today: only the README, until the owner exports the first key).
+    shutil.copytree(REPO / "device" / "certs" / "release-signing", root / "opt" / "scoreboard" / "certs" / "release-signing")
     (root / "usr" / "lib" / "python3" / "dist-packages" / "pygame").mkdir(parents=True)
     # paho-mqtt comes from Debian's signed archive, like pygame, and the venv
     # holds nothing but the pip that python3 -m venv bundles.
@@ -115,16 +159,28 @@ def clean_image(tmp_path: Path) -> tuple[Path, Path]:
     (root / "home" / "pi").mkdir(parents=True)
     (root / "root").mkdir()
     boot.mkdir()
+    # Slot A's boot partition as tools/image-layout.sh writes it: one set of
+    # files for both slots, each slot's cmdline naming its own root.
+    disk = layout_print("disk-id").strip()
     (boot / "config.txt").write_text(
-        "dtparam=audio=on\n\n[all]\n# Set by 05-no-listeners.\ndtoverlay=disable-bt\n")
-    (boot / "cmdline.txt").write_text(
-        "console=serial0,115200 console=tty1 root=PARTUUID=abc-02 rootfstype=ext4 rootwait\n")
+        layout_print("config-head") + "dtparam=audio=on\n\n[all]\n# Set by 05-no-listeners.\ndtoverlay=disable-bt\n")
+    (boot / "cmdline-a.txt").write_text(
+        f"console=serial0,115200 console=tty1 root=PARTUUID={disk}-05 rootfstype=ext4 rootwait ro\n")
+    (boot / "cmdline-b.txt").write_text(
+        f"console=serial0,115200 console=tty1 root=PARTUUID={disk}-06 rootfstype=ext4 rootwait ro\n")
+    (boot / "README.txt").write_text(layout_print("readme"))
+    (boot / "start4.elf").write_bytes(b"firmware")
     _display_path(root)
     _network_surface(root)
     return root, boot
 
 
 ARCH_LIB = "usr/lib/aarch64-linux-gnu"
+
+
+def layout_print(what: str) -> str:
+    return subprocess.run(["bash", str(LAYOUT), "--print", what], capture_output=True, text=True,
+                          check=True, timeout=10).stdout
 
 
 def _display_path(root: Path) -> None:
@@ -165,6 +221,9 @@ MASKED_UNITS = (
     # console, systemd-getty-generator puts a serial-getty on it, and the
     # instance name depends on what the firmware calls the port.
     "serial-getty@.service",
+    # Not network surface: the first-boot root resize, masked because the
+    # A/B card's partitions are fixed (06-fixed-layout).
+    "rpi-resize.service",
 )
 
 # The socket units a real trixie + Raspberry Pi OS image actually has enabled,
@@ -218,9 +277,11 @@ def _network_surface(root: Path) -> None:
         (wants / name).symlink_to(f"/usr/lib/systemd/system/{name}")
 
 
-def gate(root: Path, boot: Path):
-    return subprocess.run(["bash", str(GATE), str(root), str(boot), str(REPO)],
-                          capture_output=True, text=True, timeout=60)
+def gate(root: Path, boot: Path, image: Path | None = None):
+    args = ["bash", str(GATE), str(root), str(boot), str(REPO)]
+    if image is not None:
+        args += ["--image", str(image)]
+    return subprocess.run(args, capture_output=True, text=True, timeout=600)
 
 
 def test_a_clean_image_passes(tmp_path):
@@ -299,7 +360,8 @@ BREAKS = {
         lambda r, b: _write(r / "opt/scoreboard/certs/release-signing/notes.txt", "x\n"),
         "not a .pem public key"),
     "the release-signing directory as a symlink": (
-        lambda r, b: (r / "opt/scoreboard/certs/release-signing").symlink_to("/tmp"),
+        lambda r, b: (shutil.rmtree(r / "opt/scoreboard/certs/release-signing"),
+                      (r / "opt/scoreboard/certs/release-signing").symlink_to("/tmp")),
         "release-signing is a symlink"),
     "the health unit not enabled": (
         lambda r, b: (r / "etc/systemd/system/multi-user.target.wants/scoreboard-health.service").unlink(),
@@ -755,8 +817,8 @@ BREAKS = {
         lambda r, b: (r / "var/lib/systemd/rfkill/platform-fe215040.serial:bluetooth").write_text("0\n"),
         "un-blocks the Bluetooth radio"),
     "an sshd socket armed from the kernel command line": (
-        lambda r, b: (b / "cmdline.txt").write_text(
-            (b / "cmdline.txt").read_text().rstrip("\n") + " systemd.ssh_listen=0.0.0.0:22\n"),
+        lambda r, b: (b / "cmdline-b.txt").write_text(
+            (b / "cmdline-b.txt").read_text().rstrip("\n") + " systemd.ssh_listen=0.0.0.0:22\n"),
         "systemd.ssh_listen"),
     # The general socket rule. None of these names a daemon, which is the
     # point: it is the one rule here that would catch a listener nobody
@@ -776,6 +838,115 @@ BREAKS = {
     "a drop-in adding a network listener to a stock socket": (
         lambda r, b: _write(r / "etc/systemd/system/dbus.socket.d/50-extra.conf",
                             "[Socket]\nListenStream=1234\n"), "is not a local address"),
+    # --- The A/B layout (design 4.3, 4.4) ---
+    "a root entry in fstab, which would mount the root writable": (
+        lambda r, b: _write(r / "etc/fstab", "PARTUUID=x-05 / ext4 defaults 0 1\n" + layout_print("fstab")), "fstab differs"),
+    "STATE mounted without nofail": (
+        lambda r, b: _write(r / "etc/fstab", layout_print("fstab").replace("noexec,nofail,x-systemd.device-timeout=10s   0 2", "noexec   0 2", 1)), "fstab differs"),
+    "a sixth thing persisting by bind mount": (
+        lambda r, b: _write(r / "etc/fstab", layout_print("fstab") + "/state/etc /etc none bind,nofail 0 0\n"), "fstab differs"),
+    "an overlay in fstab": (
+        lambda r, b: _write(r / "etc/fstab", layout_print("fstab") + "overlay /etc overlay lowerdir=/etc,upperdir=/state/etc 0 0\n"), "fstab differs"),
+    "a floating scoreboard uid": (
+        lambda r, b: (r / "etc/passwd").write_text((r / "etc/passwd").read_text().replace(":900:900:", ":996:996:")), "pinned 900"),
+    "a scoreboard gid that differs from the uid": (
+        lambda r, b: (r / "etc/passwd").write_text((r / "etc/passwd").read_text().replace(":900:900:", ":900:901:")), "pinned 900"),
+    "a scoreboard group with another gid": (
+        lambda r, b: (r / "etc/group").write_text((r / "etc/group").read_text().replace("scoreboard:x:900:", "scoreboard:x:996:")), "gid 900"),
+    "a missing updater mount point": (
+        lambda r, b: (r / "var/lib/scoreboard-update").rmdir(), "bind-mount target"),
+    "a channel file shipped in the image": (
+        lambda r, b: _write(r / "var/lib/scoreboard-update/channel", "test\n"), "channel file"),
+    "a resolv.conf that is a regular file": (
+        lambda r, b: ((r / "etc/resolv.conf").unlink(), _write(r / "etc/resolv.conf", "nameserver 1.1.1.1\n")), "resolv.conf"),
+    "a missing fake-hwclock bind target": (
+        lambda r, b: (r / "etc/fake-hwclock.data").unlink(), "fake-hwclock"),
+    "a missing bootfs generator": (
+        lambda r, b: (r / "usr/lib/systemd/system-generators/scoreboard-bootfs").unlink(), "scoreboard-bootfs"),
+    "a bootfs generator that is not executable": (
+        lambda r, b: (r / "usr/lib/systemd/system-generators/scoreboard-bootfs").chmod(0o644), "scoreboard-bootfs"),
+    "a bootfs generator that differs from the repository": (
+        lambda r, b: _write(r / "usr/lib/systemd/system-generators/scoreboard-bootfs", "#!/bin/sh\nexit 0\n"), "differs from device/generators"),
+    "no watchdog": (
+        lambda r, b: (r / "etc/systemd/system.conf.d/10-scoreboard-watchdog.conf").unlink(), "watchdog"),
+    "a watchdog drop-in that differs from the repository": (
+        lambda r, b: _write(r / "etc/systemd/system.conf.d/10-scoreboard-watchdog.conf", "[Manager]\nRuntimeWatchdogSec=0\n"), "watchdog"),
+    "a unit that writes the running slot's boot partition": (
+        lambda r, b: _write(r / "etc/systemd/system/helper.service", "[Service]\nProtectSystem=strict\nReadWritePaths=/var/lib/x /boot/firmware\n"), "ReadWritePaths"),
+    "the health unit opening more than SETUP and its records": (
+        lambda r, b: _write(r / "etc/systemd/system/scoreboard-health.service",
+                            (r / "etc/systemd/system/scoreboard-health.service").read_text().replace(
+                                "ReadWritePaths=/boot/setup /var/lib/scoreboard-update", "ReadWritePaths=/boot/setup /var/lib/scoreboard-update /var/lib/scoreboard")),
+        "scoreboard-health.service does not open exactly"),
+    "a unit that declares itself a SETUP writer without ProtectSystem=strict": (
+        lambda r, b: _write(r / "etc/systemd/system/helper.service", "[Service]\nReadWritePaths=/boot/setup\n"), "without ProtectSystem=strict"),
+    "a unit that writes the running slot's boot partition as its first path": (
+        lambda r, b: _write(r / "etc/systemd/system/helper.service", "[Service]\nProtectSystem=strict\nReadWritePaths=/boot/firmware\n"), "ReadWritePaths"),
+    "the panel unit not ordered after STATE": (
+        lambda r, b: _write(r / "etc/systemd/system/scoreboard.service",
+                            (r / "etc/systemd/system/scoreboard.service").read_text().replace(" state.mount", "")), "scoreboard.service is not After=state.mount"),
+    "the panel unit not ordered after the updater's bind": (
+        lambda r, b: _write(r / "etc/systemd/system/scoreboard.service",
+                            (r / "etc/systemd/system/scoreboard.service").read_text().replace(" var-lib-scoreboard\\x2dupdate.mount", "")), "var-lib-scoreboard\\x2dupdate.mount"),
+    "the network unit not ordered after SETUP": (
+        lambda r, b: _write(r / "etc/systemd/system/scoreboard-netcfg.service",
+                            (r / "etc/systemd/system/scoreboard-netcfg.service").read_text().replace(" boot-setup.mount", "")), "scoreboard-netcfg.service is not After=boot-setup.mount"),
+    "no NetworkManager ordering drop-in": (
+        lambda r, b: (r / "etc/systemd/system/NetworkManager.service.d/10-scoreboard-state.conf").unlink(), "10-scoreboard-state.conf is missing"),
+    "a NetworkManager drop-in that differs from the repository": (
+        lambda r, b: _write(r / "etc/systemd/system/NetworkManager.service.d/10-scoreboard-state.conf", "[Unit]\nAfter=var-lib-NetworkManager.mount\n"), "differs from device/NetworkManager.service.d"),
+    "the first-boot resize not masked": (
+        lambda r, b: (r / "etc/systemd/system/rpi-resize.service").unlink(), "the first-boot root resize is not masked"),
+    "the first-boot resize still enabled": (
+        lambda r, b: (r / "etc/systemd/system/sysinit.target.wants").mkdir(exist_ok=True) or
+        (r / "etc/systemd/system/sysinit.target.wants/rpi-resize.service").symlink_to("/usr/lib/systemd/system/rpi-resize.service"),
+        "rpi-resize.service is still enabled"),
+    "the network unit without ProtectSystem=strict": (
+        lambda r, b: _write(r / "etc/systemd/system/scoreboard-netcfg.service",
+                            (r / "etc/systemd/system/scoreboard-netcfg.service").read_text().replace("ProtectSystem=strict\n", "")), "ProtectSystem=strict"),
+    "the network unit opening more of the card than it writes": (
+        lambda r, b: _write(r / "etc/systemd/system/scoreboard-netcfg.service",
+                            (r / "etc/systemd/system/scoreboard-netcfg.service").read_text().replace("ReadWritePaths=/boot/setup -/state/network\n", "ReadWritePaths=/boot/setup -/state\n")), "exactly /boot/setup and -/state/network"),
+    # Without the dash, a torn STATE (design 4.3) leaves /state/network
+    # absent, the namespace cannot be set up and the unit never starts.
+    "the network unit requiring its STATE path to exist": (
+        lambda r, b: _write(r / "etc/systemd/system/scoreboard-netcfg.service",
+                            (r / "etc/systemd/system/scoreboard-netcfg.service").read_text().replace("ReadWritePaths=/boot/setup -/state/network\n", "ReadWritePaths=/boot/setup /state/network\n")), "without the - prefix"),
+    "a unit requiring a STATE path to exist": (
+        lambda r, b: _write(r / "etc/systemd/system/helper.service", "[Service]\nProtectSystem=strict\nReadWritePaths=/var/lib/x /state/update\n"), "without the - prefix"),
+    "a unit requiring a STATE path to exist as its first path": (
+        lambda r, b: _write(r / "etc/systemd/system/helper.service", "[Service]\nProtectSystem=strict\nReadWritePaths=/state/update\n"), "without the - prefix"),
+    "no journal prune script": (
+        lambda r, b: (r / "usr/local/sbin/scoreboard-journal-prune").unlink(), "scoreboard-journal-prune"),
+    "a journal prune script that differs from the repository": (
+        lambda r, b: _write(r / "usr/local/sbin/scoreboard-journal-prune", "#!/bin/sh\nrm -rf /var/log/journal/*\n"), "differs from device/scoreboard-journal-prune"),
+    "no journal prune unit": (
+        lambda r, b: (r / "etc/systemd/system/scoreboard-journal-prune.service").unlink(), "scoreboard-journal-prune.service is not installed"),
+    "the journal prune unit not enabled": (
+        lambda r, b: (r / "etc/systemd/system/sysinit.target.wants/scoreboard-journal-prune.service").unlink(), "not enabled in sysinit.target.wants"),
+    "a config.txt without the boot_partition cmdline block": (
+        lambda r, b: _write(b / "config.txt", "dtparam=audio=on\n[all]\ndtoverlay=disable-bt\n"), "boot_partition"),
+    "a slot cmdline naming the other slot's root": (
+        lambda r, b: _write(b / "cmdline-b.txt", (b / "cmdline-a.txt").read_text()), "cmdline-b.txt does not carry"),
+    "a slot cmdline without ro": (
+        lambda r, b: _write(b / "cmdline-a.txt", (b / "cmdline-a.txt").read_text().replace(" ro\n", "\n")), "lacks ro"),
+    "a slot cmdline with the first-boot init=": (
+        lambda r, b: _write(b / "cmdline-a.txt", (b / "cmdline-a.txt").read_text().replace(" ro\n", " init=/usr/lib/raspberrypi-sys-mods/firstboot ro\n")), "init="),
+    "a slot cmdline with pi-gen's resize token": (
+        lambda r, b: _write(b / "cmdline-b.txt", (b / "cmdline-b.txt").read_text().replace(" ro\n", " resize ro\n")), "resize token"),
+    "a slot cmdline mounting the root writable": (
+        lambda r, b: _write(b / "cmdline-a.txt", (b / "cmdline-a.txt").read_text().replace(" ro\n", " ro rw\n")), "carries rw"),
+    "a leftover cmdline.txt": (
+        lambda r, b: _write(b / "cmdline.txt", "root=PARTUUID=abc-02 rw\n"), "cmdline.txt is still"),
+    "a missing boot README": (
+        lambda r, b: (b / "README.txt").unlink(), "README.txt"),
+    "a second release-signing key nobody committed": (
+        lambda r, b: _write(r / "opt/scoreboard/certs/release-signing/release-2099-9.pem",
+                            "-----BEGIN PUBLIC KEY-----\nMFkw\n-----END PUBLIC KEY-----\n"), "release-2099-9.pem"),
+    "a stray file among the release-signing keys": (
+        lambda r, b: _write(r / "opt/scoreboard/certs/release-signing/notes.txt", "x\n"), "release-signing"),
+    "no release-signing directory at all": (
+        lambda r, b: shutil.rmtree(r / "opt/scoreboard/certs/release-signing"), "release-signing"),
 }
 
 
@@ -1062,8 +1233,13 @@ def test_a_release_public_key_the_repository_names_passes_byte_for_byte(tmp_path
     # the real one carries no key until the owner exports it from KMS.
     root, boot = clean_image(tmp_path)
     repo = tmp_path / "repo"
-    for sub in ("certs", "polkit"):
+    # Everything else the gate compares an image against, copied unchanged.
+    for sub in ("certs", "polkit", "generators", "system.conf.d", "NetworkManager.service.d"):
         shutil.copytree(REPO / "device" / sub, repo / "device" / sub)
+    for name in ("scoreboard-journal-prune", "scoreboard-journal-prune.service"):
+        shutil.copy(REPO / "device" / name, repo / "device" / name)
+    (repo / "tools").mkdir()
+    shutil.copy(LAYOUT, repo / "tools" / "image-layout.sh")
     (repo / "device" / "certs" / "release-signing").mkdir(exist_ok=True)
     (repo / "device" / "certs" / "release-signing" / "release-2026-1.pem").write_text(PUBLIC_KEY)
 
@@ -1088,9 +1264,11 @@ def test_read_write_paths_naming_something_under_boot_firmware_is_caught(tmp_pat
 
 
 def test_read_write_paths_naming_boot_setup_is_not_boot_firmware(tmp_path):
+    # A SETUP writer must also carry ProtectSystem=strict, or the list it
+    # declares means nothing; the health unit does, and so does this stub.
     root, boot = clean_image(tmp_path)
     _write(root / "etc/systemd/system/scoreboard-health.service",
-           "[Service]\nReadWritePaths=/boot/setup /var/lib/scoreboard-update\n")
+           "[Service]\nProtectSystem=strict\nReadWritePaths=/boot/setup /var/lib/scoreboard-update\n")
     assert gate(root, boot).returncode == 0
 
 
@@ -1125,3 +1303,167 @@ def test_paths_that_only_look_like_boot_firmware_pass(tmp_path, line):
     root, boot = clean_image(tmp_path)
     _write(root / "etc/systemd/system/helper.service", f"[Service]\n{line}\n")
     assert gate(root, boot).returncode == 0
+
+
+# --- The assembled card (--image) -------------------------------------------
+#
+# A real six-partition image built by tools/image-layout.sh from the clean
+# fixture, once; each rule below corrupts a sparse copy of it. The tools are
+# the ones the gate itself needs, so a machine without them skips these and
+# the clean-image test above still runs.
+
+needs_layout_tools = pytest.mark.skipif(
+    any(shutil.which(t) is None for t in ("sfdisk", "mkfs.vfat", "mcopy", "mdir", "mkfs.ext4", "debugfs", "xz")),
+    reason="needs util-linux, dosfstools, mtools, e2fsprogs and xz on PATH (CI installs them)")
+
+MTOOLS_ENV = dict(os.environ, MTOOLS_SKIP_CHECK="1", MTOOLSRC="/dev/null")
+
+
+@pytest.fixture(scope="session")
+def assembled(tmp_path_factory):
+    base = tmp_path_factory.mktemp("assembled")
+    root, boot = clean_image(base)
+    # image-layout.sh takes pi-gen's boot partition, which has cmdline.txt
+    # and a config.txt without the block; it writes the slot files itself.
+    for name in ("cmdline-a.txt", "cmdline-b.txt", "README.txt"):
+        (boot / name).unlink()
+    (boot / "config.txt").write_text("dtparam=audio=on\n\n[all]\n# Set by 05-no-listeners.\ndtoverlay=disable-bt\n")
+    # The pinned pi-gen's line, verbatim: no ro, no init=, and `resize`.
+    (boot / "cmdline.txt").write_text(
+        "console=serial0,115200 console=tty1 root=PARTUUID=abc-02 rootfstype=ext4 fsck.repair=yes rootwait resize\n")
+    result = subprocess.run(["bash", str(LAYOUT), str(root), str(boot), "v0.0.1", str(base / "out")],
+                            capture_output=True, text=True, timeout=600)
+    assert result.returncode == 0, result.stderr + result.stdout
+    # The gate wants slot A's partitions as directories; the clean fixture's
+    # boot is rebuilt to what the layout wrote so the two agree.
+    (boot / "cmdline.txt").unlink()
+    image = base / "out" / "scoreboard-v0.0.1.img"
+    for name in ("config.txt", "cmdline-a.txt", "cmdline-b.txt", "README.txt"):
+        (boot / name).write_bytes(_fat_read(image, 2, name))
+    return root, boot, image
+
+
+def _part(image: Path, number: int) -> tuple[int, int]:
+    dump = subprocess.run(["sfdisk", "--dump", str(image)], capture_output=True, text=True, check=True).stdout
+    entries = [l for l in dump.splitlines() if " : start=" in l]
+    fields = entries[number - 1].split(":", 1)[1]
+    start = int(fields.split("start=")[1].split(",")[0])
+    size = int(fields.split("size=")[1].split(",")[0])
+    return start * 512, size * 512
+
+
+def _fat_read(image: Path, number: int, name: str) -> bytes:
+    start, _ = _part(image, number)
+    return subprocess.run(["mcopy", "-i", f"{image}@@{start}", f"::{name}", "-"],
+                          capture_output=True, check=True, env=MTOOLS_ENV).stdout
+
+
+def _fat_write(image: Path, number: int, name: str, data: bytes) -> None:
+    start, _ = _part(image, number)
+    src = image.parent / f"stage-{name.replace('/', '_')}"
+    src.write_bytes(data)
+    subprocess.run(["mcopy", "-o", "-i", f"{image}@@{start}", str(src), f"::{name}"],
+                   check=True, env=MTOOLS_ENV, capture_output=True)
+
+
+def _debugfs_state(image: Path, commands: str) -> None:
+    """Edit STATE (partition 7) in place: copy it out, change it, copy it back."""
+    start, size = _part(image, 7)
+    part = image.parent / "state-edit.img"
+    with image.open("rb") as f:
+        f.seek(start)
+        part.write_bytes(f.read(size))
+    result = subprocess.run(["debugfs", "-w", "-f", "-", str(part)], input=commands, capture_output=True, text=True)
+    assert "error" not in result.stdout.lower() and "error" not in result.stderr.lower(), result.stdout + result.stderr
+    with image.open("r+b") as f:
+        f.seek(start)
+        f.write(part.read_bytes())
+
+
+def _copy_sparse(src: Path, dst: Path) -> Path:
+    subprocess.run(["cp", "--sparse=always", str(src), str(dst)], check=True)
+    return dst
+
+
+@needs_layout_tools
+def test_a_clean_assembled_image_passes(assembled):
+    root, boot, image = assembled
+    result = gate(root, boot, image)
+    assert result.returncode == 0, result.stderr + result.stdout
+    for line in ("the partition table and disk identifier are the layout's",
+                 "slot B is byte-identical to slot A",
+                 "SETUP holds autoboot.txt for slot A and nothing bootable",
+                 "STATE holds the skeleton, owned as pinned, and nothing else"):
+        assert line in result.stdout
+
+
+def _poke(image: Path, number: int, offset: int, data: bytes) -> None:
+    start, _ = _part(image, number)
+    with image.open("r+b") as f:
+        f.seek(start + offset)
+        f.write(data)
+
+
+IMAGE_BREAKS = {
+    "another disk identifier": (
+        lambda img: subprocess.run(["sfdisk", "--disk-id", str(img), "0xdeadbeef"], check=True, capture_output=True),
+        "partition table differs"),
+    "a partition of another size": (
+        lambda img: subprocess.run(["sfdisk", "-N", "1", str(img)], input="start=8192, size=65536, type=c\n",
+                                   text=True, check=True, capture_output=True),
+        "partition table differs"),
+    "slot B's boot partition differing from slot A's": (
+        lambda img: _poke(img, 3, 1024 * 1024, b"\xff" * 512), "BOOT-B"),
+    "slot B's root differing from slot A's": (
+        lambda img: _poke(img, 6, 4096, b"\xff" * 512), "ROOT-B"),
+    "firmware on SETUP": (
+        lambda img: _fat_write(img, 1, "start4.elf", b"firmware"), "SETUP holds"),
+    "a config.txt on SETUP": (
+        lambda img: _fat_write(img, 1, "config.txt", b"[all]\n"), "SETUP holds"),
+    "an autoboot.txt that defaults to slot B": (
+        lambda img: _fat_write(img, 1, "autoboot.txt", b"[all]\ntryboot_a_b=1\nboot_partition=3\n[tryboot]\nboot_partition=2\n"),
+        "autoboot.txt is not the layout's"),
+    "an autoboot.txt without tryboot_a_b": (
+        lambda img: _fat_write(img, 1, "autoboot.txt", b"[all]\nboot_partition=2\n[tryboot]\nboot_partition=3\n"),
+        "autoboot.txt is not the layout's"),
+    "an identity on STATE": (
+        lambda img: _debugfs_state(img, "write /dev/null /scoreboard/device.json\n"), "beyond the skeleton, at any depth: scoreboard/device.json"),
+    "a channel file on STATE": (
+        lambda img: _debugfs_state(img, "write /dev/null /update/channel\n"), "beyond the skeleton, at any depth: update/channel"),
+    "a Wi-Fi profile on STATE": (
+        lambda img: _debugfs_state(img, "write /dev/null /network/connections/home.nmconnection\n"),
+        "beyond the skeleton, at any depth: network/connections/home.nmconnection"),
+    "a sixth directory on STATE": (
+        lambda img: _debugfs_state(img, "mkdir /etc\n"), "not the skeleton"),
+    "a skeleton directory missing from STATE": (
+        lambda img: _debugfs_state(img, "rmdir /network/lib\n"), "lacks skeleton paths: network/lib;"),
+    "a file deep inside STATE": (
+        lambda img: _debugfs_state(img, "mkdir /network/lib/x\nwrite /dev/null /network/lib/x/seen-bssids\n"), "network/lib/x/seen-bssids"),
+    "an earlier boot's journal on STATE": (
+        lambda img: _debugfs_state(img, "mkdir /journal/0123456789abcdef0123456789abcdef\n"), "journal/0123456789abcdef0123456789abcdef"),
+    "STATE's scoreboard directory owned by another uid": (
+        lambda img: _debugfs_state(img, "set_inode_field /scoreboard uid 996\n"), "not the skeleton"),
+    "STATE's scoreboard directory readable by others": (
+        lambda img: _debugfs_state(img, "set_inode_field /scoreboard mode 040755\n"), "not the skeleton"),
+}
+
+
+@needs_layout_tools
+@pytest.mark.parametrize("name", sorted(IMAGE_BREAKS))
+def test_each_image_assertion_can_fail(tmp_path, assembled, name):
+    root, boot, image = assembled
+    broken = _copy_sparse(image, tmp_path / "broken.img")
+    breaker, expected = IMAGE_BREAKS[name]
+    breaker(broken)
+    result = gate(root, boot, broken)
+    assert result.returncode == 1, f"{name}: gate passed a broken image\n{result.stdout}"
+    assert "image-gate: FAIL:" in result.stderr
+    assert expected in result.stderr, f"{name}: {result.stderr}"
+
+
+@needs_layout_tools
+def test_a_missing_image_file_fails_closed(assembled, tmp_path):
+    root, boot, _ = assembled
+    result = gate(root, boot, tmp_path / "nothing.img")
+    assert result.returncode == 1
+    assert "does not exist" in result.stderr

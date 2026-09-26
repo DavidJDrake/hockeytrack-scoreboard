@@ -88,6 +88,22 @@ func (g GitHub) LatestTag(ctx context.Context) (string, error) {
 	return out.Tag, nil
 }
 
+// Asset downloads one small release file, such as the signed manifest, so
+// the mirror's copy can be compared to the source of truth byte for byte.
+func (g GitHub) Asset(ctx context.Context, tag, file string) ([]byte, error) {
+	body, status, err := g.get(ctx, g.Web+"/"+g.Repo+"/releases/download/"+tag+"/"+file, maxManifest)
+	if err != nil {
+		return nil, err
+	}
+	if status == http.StatusNotFound {
+		return nil, ErrNoAsset
+	}
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("asset %s for %s: status %d", file, tag, status)
+	}
+	return body, nil
+}
+
 func (g GitHub) Checksum(ctx context.Context, tag, file string) (string, error) {
 	body, status, err := g.get(ctx, g.Web+"/"+g.Repo+"/releases/download/"+tag+"/"+file+".sha256", 4096)
 	if err != nil {

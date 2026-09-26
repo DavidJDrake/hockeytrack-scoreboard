@@ -71,12 +71,15 @@ def test_the_write_units_devices_come_only_from_the_per_slot_drop_ins():
     assert "DeviceAllow" not in directives(UNITS["planner"])
     a = directives(DEVICE / "scoreboard-update@a.service.d" / "slot.conf")
     b = directives(DEVICE / "scoreboard-update@b.service.d" / "slot.conf")
-    assert a["DeviceAllow"] == ["/dev/mmcblk0p2 rw", "/dev/mmcblk0p4 rw"]
-    assert b["DeviceAllow"] == ["/dev/mmcblk0p3 rw", "/dev/mmcblk0p5 rw"]
+    # The roots are 5 and 6: tools/image-layout.sh puts them inside the
+    # extended container at 4, so design 4.1's 4 and 5 would be the EBR and
+    # slot A's own root.
+    assert a["DeviceAllow"] == ["/dev/mmcblk0p2 rw", "/dev/mmcblk0p5 rw"]
+    assert b["DeviceAllow"] == ["/dev/mmcblk0p3 rw", "/dev/mmcblk0p6 rw"]
     # The slots the code names are the ones the sandbox allows.
     from scoreboard import update
-    assert [str(update.slot("a").boot_dev), str(update.slot("a").root_dev)] == ["/dev/mmcblk0p2", "/dev/mmcblk0p4"]
-    assert [str(update.slot("b").boot_dev), str(update.slot("b").root_dev)] == ["/dev/mmcblk0p3", "/dev/mmcblk0p5"]
+    assert [str(update.slot("a").boot_dev), str(update.slot("a").root_dev)] == ["/dev/mmcblk0p2", "/dev/mmcblk0p5"]
+    assert [str(update.slot("b").boot_dev), str(update.slot("b").root_dev)] == ["/dev/mmcblk0p3", "/dev/mmcblk0p6"]
 
 
 def test_nothing_of_ours_names_boot_firmware_writable():
@@ -118,7 +121,10 @@ def test_pi_setup_installs_and_enables_the_updater():
     for unit in ("scoreboard-update.timer", "scoreboard-update.service", "scoreboard-update@.service",
                  "scoreboard-health.service"):
         assert unit in text, unit
-    assert re.search(r'scoreboard-update@\$s\.service\.d/slot\.conf', text)
+    # One line per slot, not a loop over $s: test_pi_gen_recipe pairs each
+    # "$DEVICE/<top>" install_appliance names with build.sh's copy list.
+    for slot_ in ("a", "b"):
+        assert f'"$DEVICE/scoreboard-update@{slot_}.service.d/slot.conf"' in text, slot_
     assert "multi-user.target.wants/scoreboard-health.service" in text
     assert "timers.target.wants/scoreboard-update.timer" in text
     assert "multi-user.target.wants/scoreboard-update.service" not in text

@@ -121,7 +121,9 @@ this panel's identity and saved networks — it does not stop the old certificat
 working, so also remove the device from your account.
 
 If you cannot get a keyboard to it, write a file called `scoreboard-setup.txt`
-on the card's boot partition (the one Windows and macOS can see):
+on the card's drive called `SETUP` (the first FAT partition, the one Windows
+and macOS show; the card has other drives too, each with a note saying to use
+`SETUP`):
 
     ssid=YourNetworkName
     psk=YourWiFiPassword
@@ -130,7 +132,7 @@ on the card's boot partition (the one Windows and macOS can see):
     owner=you@example.com
 
 The panel reads it on every boot, connects, and then removes the password from
-the file — it is the one partition any computer mounts automatically. The owner
+the file — it is a partition any computer mounts automatically. The owner
 line stays, and is what makes the pairing code claimable by you and nobody
 else. Leave it out and any invited user can claim the panel.
 

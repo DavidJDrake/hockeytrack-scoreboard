@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 # Inspect a built scoreboard image before it is published.
 #
-#   tools/image-gate.sh <rootfs> <bootfs> [<repo>]
+#   tools/image-gate.sh <rootfs> <bootfs> [<repo>] [--image <flash image>]
+#
+# <rootfs> and <bootfs> are slot A's root and boot partitions, mounted
+# read-only. With --image, the assembled six-partition image
+# (tools/image-layout.sh) is inspected too: its partition table, that slot B
+# is byte-identical to slot A, SETUP and STATE. Those are read with sfdisk,
+# mtools and debugfs, never mounted.
 #
 # Anyone on the internet can flash this image, so anything baked into it is
 # shared by every panel that runs it: a private key, a password, an SSH key or
@@ -26,10 +32,21 @@
 # Exits 0 when every assertion holds, 1 on the first that does not.
 set -euo pipefail
 
-usage="usage: image-gate.sh <rootfs> <bootfs> [<repo>]"
+usage="usage: image-gate.sh <rootfs> <bootfs> [<repo>] [--image <flash image>]"
 ROOT="${1:?$usage}"
 BOOT="${2:?$usage}"
-REPO="${3:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+shift 2
+REPO=""
+IMAGE=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --image) IMAGE="${2:?$usage}"; shift 2 ;;
+    --*) echo "$usage" >&2; exit 2 ;;
+    *) [ -z "$REPO" ] || { echo "$usage" >&2; exit 2; }; REPO="$1"; shift ;;
+  esac
+done
+[ -n "$REPO" ] || REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LAYOUT="$REPO/tools/image-layout.sh"
 
 fail() { echo "image-gate: FAIL: $*" >&2; exit 1; }
 ok() { echo "image-gate: ok: $*"; }
@@ -690,11 +707,14 @@ fi
 # boot partition, with no package and no enablement symlink for the rules
 # above to see. Purging openssh-server is what actually defuses it (the
 # generator gives up when find_executable("sshd") fails), and this rule keeps
-# the boot partition itself honest.
-cmdline="$BOOT/cmdline.txt"
-if [ -f "$cmdline" ] && grep_or_fail -qE '(^|[[:space:]])systemd\.ssh_listen=' "$cmdline"; then
-  fail "/boot/firmware/cmdline.txt carries systemd.ssh_listen=, which makes systemd generate a listening sshd socket"
-fi
+# the boot partition itself honest. Every cmdline is read: the A/B layout
+# has one per slot (cmdline-a.txt, cmdline-b.txt), and a leftover cmdline.txt
+# is checked here too even though the layout rule below refuses it.
+for cmdline in "$BOOT/cmdline.txt" "$BOOT/cmdline-a.txt" "$BOOT/cmdline-b.txt"; do
+  if [ -f "$cmdline" ] && grep_or_fail -qE '(^|[[:space:]])systemd\.ssh_listen=' "$cmdline"; then
+    fail "/boot/firmware/${cmdline##*/} carries systemd.ssh_listen=, which makes systemd generate a listening sshd socket"
+  fi
+done
 ok "no mDNS responder, no Bluetooth stack, no SSH server, no USB-network gadget"
 
 # A rule that does not name a daemon, so that the next one to arrive is caught
@@ -922,11 +942,15 @@ fi
 ok "no private keys"
 
 # Everything under /opt/scoreboard other than the venv must be inert
-# application code and the one certificate. A file counts as a certificate or
-# key if its name has one of the usual extensions, matched case-insensitively
-# and against symlinks too (! -type d, not -type f, so a symlink standing in
-# for a certificate cannot dodge this), or if its content is plainly a
-# certificate regardless of its name.
+# application code, the one certificate, and exactly the release-signing
+# PUBLIC keys the repository names. A file counts as a certificate or key if
+# its name has one of the usual extensions, matched case-insensitively and
+# against symlinks too (! -type d, not -type f, so a symlink standing in for
+# a certificate cannot dodge this), or if its content is plainly a
+# certificate regardless of its name. A .pem under certs/release-signing/ is
+# allowed only when the repository holds a byte-identical file of that name:
+# these keys are the trust root every panel verifies a release against, so
+# an extra one is a second signer nobody approved.
 run_find "$ROOT/opt/scoreboard" -path "$ROOT/opt/scoreboard/.venv" -prune -o ! -type d -print
 while IFS= read -r entry; do
   [ -n "$entry" ] || continue
@@ -943,10 +967,12 @@ while IFS= read -r entry; do
   if [ "$suspect" -eq 1 ]; then
     case "$rel" in
       certs/AmazonRootCA1.pem) ;;
-      # The release public keys (design 6.3): checked below against the
-      # repository's copies, byte for byte. Anything else with a key name
-      # under that directory is a finding.
-      certs/release-signing/*.pem) ;;
+      # The release public keys (design 6.3): the repository's copies, byte
+      # for byte, here and again below against the whole directory.
+      certs/release-signing/*.pem)
+        [ -f "$REPO/device/$rel" ] || fail "release-signing key $rel is in the image but not in the repository"
+        [ -f "$path" ] && [ ! -L "$path" ] && cmp -s "$path" "$REPO/device/$rel" \
+          || fail "release-signing key $rel is not a regular file or differs from the repository's device/$rel" ;;
       *) fail "unexpected certificate or key file under /opt/scoreboard: $rel" ;;
     esac
   fi
@@ -962,41 +988,46 @@ ok "the only certificate shipped is Amazon's root CA"
 
 # The release public keys are the trust root every update is verified
 # against (design 6.3): the panel accepts a manifest that any key in
-# /opt/scoreboard/certs/release-signing/ verifies. So the directory must hold
-# exactly the files the repository names, each byte for byte the
-# repository's, each a public key and nothing else -- a key added to the
-# image that is not in the repository would let whoever holds its private
-# half sign a release for every panel, and a key missing from the image
-# strands the panel at the next rotation. The private halves live in AWS KMS
-# and never in either place; the "no private keys" scan above already covers
-# the directory.
+# /opt/scoreboard/certs/release-signing/ verifies. So the directory must
+# hold exactly the files the repository names, each byte for byte the
+# repository's: every .pem a public key (a key added to the image that is
+# not in the repository would let whoever holds its private half sign a
+# release for every panel), every repository key present (a panel with a
+# missing key cannot verify the next release and is stranded at the next
+# rotation), and the README beside the keys the one non-key file allowed.
+# The private halves live in AWS KMS and never in either place; the
+# "no private keys" scan above already covers the directory, and the
+# repository's copies are checked for one too, because this is where a
+# mistake would be worst.
 keydir="$ROOT/opt/scoreboard/certs/release-signing"
 repokeys="$REPO/device/certs/release-signing"
 reject_symlink "$keydir" "/opt/scoreboard/certs/release-signing"
-if [ -d "$keydir" ]; then
-  run_find "$keydir" -mindepth 1 -print
-  while IFS= read -r entry; do
-    [ -n "$entry" ] || continue
-    name="${entry#"$keydir/"}"
-    [ -f "$entry" ] && [ ! -L "$entry" ] || fail "release-signing/$name is not a regular file"
-    case "$name" in
-      *.pem) ;;
-      *) fail "release-signing/$name is not a .pem public key" ;;
-    esac
-    grep_or_fail -qa -- '-----BEGIN PUBLIC KEY-----' "$entry" \
-      || fail "release-signing/$name is not a SubjectPublicKeyInfo public key"
-    [ -f "$repokeys/$name" ] || fail "release-signing/$name is in the image but not in the repository"
-    cmp -s "$entry" "$repokeys/$name" || fail "release-signing/$name differs from the repository's copy"
-  done <<<"$(printf '%s\n' "$FOUND" | sort)"
-fi
-if [ -d "$repokeys" ]; then
-  for f in "$repokeys"/*.pem; do
-    [ -e "$f" ] || continue
-    [ -f "$keydir/$(basename "$f")" ] \
-      || fail "release-signing/$(basename "$f") is in the repository but not in the image; the panel could not verify a release signed by it"
-  done
-fi
-ok "the release public keys are exactly the repository's"
+[ -d "$keydir" ] || fail "/opt/scoreboard/certs/release-signing is missing; the panel would have no key to verify a release with"
+run_find "$keydir" -mindepth 1 -print
+while IFS= read -r entry; do
+  [ -n "$entry" ] || continue
+  name="${entry#"$keydir/"}"
+  [ -f "$entry" ] && [ ! -L "$entry" ] || fail "release-signing/$(sanitize_for_log "$name") is not a regular file"
+  case "$name" in
+    README.md) ;;
+    *.pem)
+      grep_or_fail -qa -- '-----BEGIN PUBLIC KEY-----' "$entry" \
+        || fail "release-signing/$name is not a SubjectPublicKeyInfo public key" ;;
+    *) fail "release-signing/$(sanitize_for_log "$name") is not a .pem public key or the README" ;;
+  esac
+  [ -f "$repokeys/$name" ] || fail "release-signing/$name is in the image but not in the repository"
+  cmp -s "$entry" "$repokeys/$name" || fail "release-signing/$name differs from the repository's copy"
+done <<<"$(printf '%s\n' "$FOUND" | sort)"
+run_find "$repokeys" -mindepth 1 -name '*.pem' -print
+while IFS= read -r entry; do
+  [ -n "$entry" ] || continue
+  name="${entry##*/}"
+  [ -f "$keydir/$name" ] \
+    || fail "release-signing/$name is in the repository but not in the image; the panel could not verify a release signed by it"
+  ! grep_or_fail -qaE -- '-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----' "$entry" \
+    || fail "device/certs/release-signing/$name is a private key; only the public half may ever be in the repository"
+done <<<"$FOUND"
+ok "the release-signing keys are exactly the repository's public keys"
 
 # The updater's health unit is what turns a trial boot into a commit or a
 # rollback (design 5.2). A root without it enabled would run a trial slot
@@ -1014,6 +1045,71 @@ for unit in scoreboard-update.service 'scoreboard-update@.service' \
 done
 ok "the updater's health unit and timer are enabled"
 
+# --- The A/B layout (added 2026-09-25) ---------------------------------------
+#
+# What follows asserts the decisions in
+# docs/superpowers/specs/2026-09-25-ota-update-design.md, section 4, against
+# slot A's root and boot partitions, and with --image against the assembled
+# card. The expected texts come from tools/image-layout.sh --print, so the
+# gate cannot drift from what the layout script writes.
+
+# The fstab, byte for byte. It is what makes the root read-only (no root
+# entry for systemd-remount-fs to act on), mounts STATE and SETUP nofail so a
+# torn shared partition boots to the help screen rather than emergency mode,
+# and names exactly the five things that persist. Any other line is a sixth
+# thing persisting, or a root that is writable again.
+[ -x "$LAYOUT" ] || fail "$LAYOUT is missing; the gate reads the expected layout from it"
+[ -f "$ROOT/etc/fstab" ] && [ ! -L "$ROOT/etc/fstab" ] || fail "/etc/fstab is missing or is a symlink"
+"$LAYOUT" --print fstab | cmp -s - "$ROOT/etc/fstab" \
+  || fail "/etc/fstab differs from what tools/image-layout.sh writes; the root's read-only mount, the nofail options or the list of what persists has changed"
+ok "the fstab is the layout's, byte for byte"
+
+# The pinned uid and gid. The identity on STATE is owned by this number, and
+# a root whose scoreboard user has any other number cannot read it: every
+# trial of that root would roll back and the fleet would be stranded. The
+# number is read from the layout script, which owns the STATE skeleton, so
+# the two cannot disagree; tools/pi-setup.sh's copy is asserted by
+# device/tests/test_pi_setup.py.
+SCOREBOARD_ID="$("$LAYOUT" --print scoreboard-id)"
+[ "$SCOREBOARD_ID" -gt 0 ] 2>/dev/null || fail "tools/image-layout.sh --print scoreboard-id did not print a number"
+scoreboard_uid="$(awk -F: '$1 == "scoreboard" { print $3 }' "$ROOT/etc/passwd")"
+scoreboard_gid="$(awk -F: '$1 == "scoreboard" { print $4 }' "$ROOT/etc/passwd")"
+[ "$scoreboard_uid" = "$SCOREBOARD_ID" ] && [ "$scoreboard_gid" = "$SCOREBOARD_ID" ] \
+  || fail "the scoreboard user is uid ${scoreboard_uid:-missing} gid ${scoreboard_gid:-missing} in /etc/passwd, not the pinned $SCOREBOARD_ID; the identity on STATE would be unreadable by this root"
+[ -f "$ROOT/etc/group" ] || fail "/etc/group is missing"
+[ "$(awk -F: '$1 == "scoreboard" { print $3 }' "$ROOT/etc/group")" = "$SCOREBOARD_ID" ] \
+  || fail "the scoreboard group is not gid $SCOREBOARD_ID in /etc/group"
+ok "the scoreboard uid and gid are pinned at $SCOREBOARD_ID"
+
+# The mount points the bind mounts need. A missing one makes that bind fail
+# (nofail: quietly), and the panel would run with its identity, or the
+# updater's records, on the read-only root instead of STATE.
+for dir in var/lib/scoreboard var/lib/scoreboard-update var/lib/NetworkManager etc/NetworkManager/system-connections var/log/journal; do
+  reject_symlink "$ROOT/$dir" "/$dir"
+  [ -d "$ROOT/$dir" ] || fail "/$dir is missing; it is a bind-mount target for STATE"
+done
+[ -f "$ROOT/etc/fake-hwclock.data" ] && [ ! -L "$ROOT/etc/fake-hwclock.data" ] \
+  || fail "/etc/fake-hwclock.data is missing; a bind mount needs a target file"
+run_find "$ROOT/var/lib/scoreboard-update" -mindepth 1 -print -quit
+[ -z "$FOUND" ] || fail "/var/lib/scoreboard-update is not empty (${FOUND#"$ROOT"}); the updater's records live on STATE, and a channel file in the image would put every panel on that channel"
+# NetworkManager keeps resolv.conf under /run only when /etc/resolv.conf
+# points there; a regular file here would be a write to a read-only /etc.
+[ -L "$ROOT/etc/resolv.conf" ] && [ "$(readlink "$ROOT/etc/resolv.conf")" = "/run/NetworkManager/resolv.conf" ] \
+  || fail "/etc/resolv.conf is not a symlink to /run/NetworkManager/resolv.conf; NetworkManager would write to the read-only root"
+ok "the bind-mount targets exist and resolv.conf lives under /run"
+
+# The generator that mounts the running slot's boot partition, and the
+# watchdog. Both are copied from the repository, so they are compared to it.
+generator="$ROOT/usr/lib/systemd/system-generators/scoreboard-bootfs"
+[ -f "$generator" ] && [ ! -L "$generator" ] && [ -x "$generator" ] \
+  || fail "/usr/lib/systemd/system-generators/scoreboard-bootfs is missing or not executable; /boot/firmware would never be mounted"
+cmp -s "$generator" "$REPO/device/generators/scoreboard-bootfs" \
+  || fail "the scoreboard-bootfs generator differs from device/generators/scoreboard-bootfs"
+watchdog="$ROOT/etc/systemd/system.conf.d/10-scoreboard-watchdog.conf"
+[ -f "$watchdog" ] && [ ! -L "$watchdog" ] || fail "/etc/systemd/system.conf.d/10-scoreboard-watchdog.conf is missing; a hung trial boot would wait for the plug"
+cmp -s "$watchdog" "$REPO/device/system.conf.d/10-scoreboard-watchdog.conf" \
+  || fail "the watchdog drop-in differs from device/system.conf.d/10-scoreboard-watchdog.conf"
+grep -qE '^RuntimeWatchdogSec=60$' "$watchdog" || fail "the watchdog drop-in does not set RuntimeWatchdogSec=60"
 # Nothing of ours may write /boot/firmware (design 4.3): the running slot's
 # boot partition is mounted read-write for rpi-eeprom-update alone, and a
 # unit that could write it could make the running slot unbootable. Every
@@ -1027,6 +1123,227 @@ out="$(grep -rlaE -- '^[[:space:]]*(ReadWritePaths|BindPaths)=(.*[[:space:]=+:-]
   "$ROOT/etc/systemd/system" 2>&1)" && status=0 || status=$?
 [ "$status" -le 1 ] || fail "could not scan /etc/systemd/system for ReadWritePaths: $(sanitize_for_log "$out")"
 [ -z "$out" ] || fail "a unit may write /boot/firmware (ReadWritePaths= or BindPaths= naming /boot or /boot/firmware): $(sanitize_for_log "${out#"$ROOT"}")"
-ok "no unit of ours may write /boot/firmware"
+ok "the bootfs generator and the 60 s watchdog are installed, and no unit writes /boot/firmware"
+
+# The rule above reads a unit's ReadWritePaths= and nothing else, which says
+# nothing about a root unit that has no ProtectSystem= at all: that process
+# can write the running slot's FAT, the root's remounted paths and all of
+# STATE whatever list it carries or omits. So a unit that declares itself a
+# SETUP writer (names /boot/setup in ReadWritePaths=) must also carry
+# ProtectSystem=strict, or the declaration is decoration; and
+# each of the two SETUP writers design 4.3 allows, scoreboard-netcfg and
+# the updater's health unit (which commits a trial by rewriting
+# autoboot.txt), must declare exactly the places it writes.
+run_find "$ROOT/etc/systemd/system" -type f \( -name '*.service' -o -name '*.conf' \) -print
+while IFS= read -r unit_path; do
+  [ -n "$unit_path" ] || continue
+  grep_or_fail -qE '^[[:space:]]*ReadWritePaths=(.*[[:space:]])?-?/boot/setup([[:space:]/]|$)' "$unit_path" || continue
+  grep_or_fail -qE '^[[:space:]]*ProtectSystem=strict[[:space:]]*$' "$unit_path" \
+    || fail "${unit_path#"$ROOT"} names /boot/setup in ReadWritePaths= without ProtectSystem=strict; a root unit with no ProtectSystem= can write the whole card, so the list means nothing"
+done <<<"$FOUND"
+netcfg_unit="$ROOT/etc/systemd/system/scoreboard-netcfg.service"
+grep_or_fail -qE '^[[:space:]]*ProtectSystem=strict[[:space:]]*$' "$netcfg_unit" \
+  || fail "scoreboard-netcfg.service has no ProtectSystem=strict; it runs as root and would have the whole card writable"
+# A path inside STATE has to carry the `-` prefix. STATE is nofail, and on
+# the torn-STATE boot design 4.3 promises to survive, /state is an empty
+# directory on the read-only root and nothing under it exists; systemd then
+# cannot set up the unit's namespace (226/NAMESPACE) and the unit never
+# runs at all, which for the SETUP writer kills the one repair path that
+# boot has. The mount points themselves (/state, /boot/setup, the bind
+# targets under /var and /etc) are directories on the root and are there
+# on every boot, so only a path beneath /state/ is caught here.
+run_find "$ROOT/etc/systemd/system" -type f \( -name '*.service' -o -name '*.conf' \) -print
+while IFS= read -r unit_path; do
+  [ -n "$unit_path" ] || continue
+  ! grep_or_fail -qE '^[[:space:]]*ReadWritePaths=(.*[[:space:]])?/state/' "$unit_path" \
+    || fail "${unit_path#"$ROOT"} names a path inside STATE in ReadWritePaths= without the - prefix; on a torn-STATE boot the path is absent, namespace setup fails and the unit never runs"
+done <<<"$FOUND"
+grep_or_fail -qE '^[[:space:]]*ReadWritePaths=/boot/setup -/state/network[[:space:]]*$' "$netcfg_unit" \
+  || fail "scoreboard-netcfg.service does not open exactly /boot/setup and -/state/network in ReadWritePaths=; the setup file and the country are the only things it writes"
+health_unit="$ROOT/etc/systemd/system/scoreboard-health.service"
+grep_or_fail -qE '^[[:space:]]*ReadWritePaths=/boot/setup /var/lib/scoreboard-update[[:space:]]*$' "$health_unit" \
+  || fail "scoreboard-health.service does not open exactly /boot/setup and /var/lib/scoreboard-update in ReadWritePaths=; autoboot.txt and its records are the only things it writes"
+ok "every unit that writes SETUP is sandboxed to what it writes, and no unit requires a STATE path to exist"
+
+# The journal prune. /etc/machine-id is empty on the read-only root, so
+# every boot gets a new id and journald opens a new /var/log/journal/<id>/
+# on STATE; SystemMaxUse bounds only the running id's directory, and the
+# others would fill STATE in about a month of nightly power cycles. The
+# script and its unit are copied from the repository, so they are compared
+# to it, and the unit must be pulled in by sysinit.target: it has
+# DefaultDependencies=no so it can run before systemd-journal-flush.
+prune="$ROOT/usr/local/sbin/scoreboard-journal-prune"
+[ -f "$prune" ] && [ ! -L "$prune" ] && [ -x "$prune" ] \
+  || fail "/usr/local/sbin/scoreboard-journal-prune is missing or not executable; one journal directory per boot would fill STATE"
+cmp -s "$prune" "$REPO/device/scoreboard-journal-prune" \
+  || fail "the journal prune script differs from device/scoreboard-journal-prune"
+prune_unit="$ROOT/etc/systemd/system/scoreboard-journal-prune.service"
+[ -f "$prune_unit" ] && [ ! -L "$prune_unit" ] || fail "scoreboard-journal-prune.service is not installed"
+cmp -s "$prune_unit" "$REPO/device/scoreboard-journal-prune.service" \
+  || fail "scoreboard-journal-prune.service differs from device/scoreboard-journal-prune.service"
+prune_link="$ROOT/etc/systemd/system/sysinit.target.wants/scoreboard-journal-prune.service"
+[ -L "$prune_link" ] || fail "scoreboard-journal-prune.service is not enabled in sysinit.target.wants"
+target="$(readlink "$prune_link")"
+case "$target" in
+  /*) candidate="$ROOT$target" ;;
+  *) candidate="$(dirname "$prune_link")/$target" ;;
+esac
+resolved="$(readlink -f -- "$candidate" 2>/dev/null || true)"
+[ -n "$resolved" ] && [ "$resolved" = "$(readlink -f -- "$prune_unit")" ] \
+  || fail "scoreboard-journal-prune.service's enable symlink does not resolve to the installed unit (points to $target)"
+ok "the journal prune is installed and runs before the journal is flushed"
+
+# Ordering after the nofail mounts. STATE, SETUP and every bind are nofail
+# so a torn partition boots to the help screen (design 4.3), but
+# systemd.mount(5) says a nofail mount is not ordered before local-fs.target,
+# so no default dependency makes anything wait for them. Each unit that
+# reads one names it in After=, which waits for the mount job to end however
+# it ends and nothing more; RequiresMountsFor= would defeat the help-screen
+# intent, so it is not what is asserted. A unit that has to be read for this
+# is a unit that must exist as a real file.
+unit_after() {
+  # $1 unit file (image path), $2 the unit's name for the message, then the
+  # mount units it must be After=. Every After= line is read, because a
+  # unit may carry several.
+  local file="$1" name="$2" want after
+  shift 2
+  [ -f "$file" ] && [ ! -L "$file" ] || fail "$name is missing from /etc/systemd/system or is a symlink"
+  after=" $(sed -nE 's/^[[:space:]]*After=[[:space:]]*(.*[^[:space:]])[[:space:]]*$/\1/p' "$file" | tr '\n' ' ') "
+  for want in "$@"; do
+    case "$after" in
+      *" $want "*) ;;
+      *) fail "$name is not After=$want; a slow fsck of that partition would start it against the empty mount point on the read-only root" ;;
+    esac
+  done
+}
+unit_after "$ROOT/etc/systemd/system/scoreboard.service" scoreboard.service \
+  state.mount var-lib-scoreboard.mount 'var-lib-scoreboard\x2dupdate.mount'
+unit_after "$ROOT/etc/systemd/system/scoreboard-netcfg.service" scoreboard-netcfg.service \
+  boot-setup.mount state.mount
+nm_dropin="$ROOT/etc/systemd/system/NetworkManager.service.d/10-scoreboard-state.conf"
+reject_symlink "$ROOT/etc/systemd/system/NetworkManager.service.d" "/etc/systemd/system/NetworkManager.service.d"
+cmp -s "$nm_dropin" "$REPO/device/NetworkManager.service.d/10-scoreboard-state.conf" 2>/dev/null \
+  || fail "/etc/systemd/system/NetworkManager.service.d/10-scoreboard-state.conf is missing or differs from device/NetworkManager.service.d/; NetworkManager would read an empty system-connections on a slow STATE"
+unit_after "$nm_dropin" "NetworkManager's drop-in" \
+  'etc-NetworkManager-system\x2dconnections.mount' var-lib-NetworkManager.mount
+ok "the units that read STATE and SETUP are ordered after their mounts"
+
+# The first-boot resize is disarmed in both its halves. The `resize` cmdline
+# token is checked with the boot files below; the unit stage2 enabled is
+# masked by tools/pi-gen/stage-scoreboard/06-fixed-layout, which says why a
+# mask and not a disable (ConditionFirstBoot=yes is true on every boot of a
+# root whose machine id is empty). Its enablement symlink must be gone too:
+# systemd ignores a wants link to a masked unit, but the link is what a
+# pi-gen bump that renames the unit would leave behind unnoticed.
+assert_masked rpi-resize.service "the first-boot root resize"
+run_find "$ROOT/etc/systemd/system" \( -path '*.wants/*' -o -path '*.requires/*' -o -path '*.upholds/*' \) \
+  -name 'rpi-resize.service' -print -quit
+[ -z "$FOUND" ] || fail "rpi-resize.service is still enabled (${FOUND#"$ROOT"}); the root must never resize"
+ok "the first-boot root resize is masked and not enabled"
+
+# Slot A's boot partition: one set of files serves both slots, so config.txt
+# must start with the block that picks a cmdline by the partition it was
+# loaded from, each cmdline must name its own root, say ro and not rw, and
+# carry neither a first-boot init= nor pi-gen's `resize` token (the root
+# must never resize; tools/image-layout.sh says where each comes from), and
+# the cmdline.txt that would name a root this card does not have must be
+# gone.
+DISK_ID="$("$LAYOUT" --print disk-id)"
+[ -f "$BOOT/config.txt" ] || fail "config.txt is missing from the boot partition"
+head_lines="$("$LAYOUT" --print config-head | awk 'END { print NR }')"
+head -n "$head_lines" -- "$BOOT/config.txt" | cmp -s - <("$LAYOUT" --print config-head) \
+  || fail "config.txt does not start with the [boot_partition=N] cmdline block; both slots would boot the same root"
+for slot in a b; do
+  cmd="$BOOT/cmdline-$slot.txt"
+  [ -f "$cmd" ] || fail "cmdline-$slot.txt is missing from the boot partition"
+  [ "$(awk 'END { print NR }' "$cmd")" -eq 1 ] || fail "cmdline-$slot.txt must be one line"
+  tokens=" $(tr -d '\n' <"$cmd") "
+  case "$slot" in a) want="root=PARTUUID=$DISK_ID-05" ;; b) want="root=PARTUUID=$DISK_ID-06" ;; esac
+  case "$tokens" in *" $want "*) ;; *) fail "cmdline-$slot.txt does not carry $want" ;; esac
+  case "$tokens" in *" ro "*) ;; *) fail "cmdline-$slot.txt lacks ro; the root would mount writable" ;; esac
+  case "$tokens" in *" rw "*) fail "cmdline-$slot.txt carries rw; the root would mount writable" ;; esac
+  case "$tokens" in *" init="*) fail "cmdline-$slot.txt carries an init=; the first-boot resize must never run" ;; esac
+  case "$tokens" in *" resize "*) fail "cmdline-$slot.txt carries pi-gen's resize token; the initramfs would grow the root partition on the first boot" ;; esac
+done
+[ ! -e "$BOOT/cmdline.txt" ] || fail "cmdline.txt is still on the boot partition; it names a root this card does not have"
+[ -f "$BOOT/README.txt" ] || fail "README.txt is missing from the boot partition; a person who finds this drive must be sent to SETUP"
+ok "slot A's boot files select the slot's own read-only root"
+
+# --- The assembled card, with --image -----------------------------------------
+if [ -n "$IMAGE" ]; then
+  [ -f "$IMAGE" ] || fail "$IMAGE does not exist"
+  for tool in sfdisk mcopy mdir debugfs sha256sum; do
+    command -v "$tool" >/dev/null || fail "$tool is not installed; the gate cannot read the assembled image without it"
+  done
+  export MTOOLS_SKIP_CHECK=1 MTOOLSRC=/dev/null
+  # The table, normalized to the script's own form: sfdisk --dump prefixes
+  # each entry with the device path, which is stripped, and pads the numbers.
+  actual_table="$(sfdisk --dump "$IMAGE" 2>/dev/null | grep -vE '^device:' | sed -E 's/^.* : (start=)/\1/; s/ +/ /g; s/= /=/g' | sed -E '/^$/d')"
+  expected_table="$("$LAYOUT" --print table | sed -E 's/ +/ /g; s/= /=/g' | sed -E '/^$/d')"
+  [ "$actual_table" = "$expected_table" ] \
+    || fail "the partition table differs from tools/image-layout.sh --print table: $(sanitize_for_log "$(printf '%s' "$actual_table" | tr '\n' ';')")"
+  ok "the partition table and disk identifier are the layout's"
+
+  # Offsets and sizes in bytes, from the table just verified: the Nth entry
+  # of sfdisk --dump is partition N.
+  part_field() {
+    sfdisk --dump "$IMAGE" 2>/dev/null | awk -v n="$1" -v f="$2" '
+      / : start=/ { i++; if (i == n) { match($0, f "= *[0-9]+"); v = substr($0, RSTART, RLENGTH); sub(/.*= */, "", v); print v * 512 } }'
+  }
+  part_start() { part_field "$1" start; }
+  part_size() { part_field "$1" size; }
+  part_sha() { dd if="$IMAGE" bs=1M iflag=skip_bytes,count_bytes skip="$(part_start "$1")" count="$(part_size "$1")" status=none | sha256sum | cut -d' ' -f1; }
+
+  # Slot B is slot A. A freshly flashed card has two identical, bootable
+  # slots, and the update payloads are these same bytes.
+  [ "$(part_sha 2)" = "$(part_sha 3)" ] || fail "BOOT-B (partition 3) is not byte-identical to BOOT-A (partition 2)"
+  [ "$(part_sha 5)" = "$(part_sha 6)" ] || fail "ROOT-B (partition 6) is not byte-identical to ROOT-A (partition 5)"
+  ok "slot B is byte-identical to slot A"
+
+  # SETUP: autoboot.txt as flashed, a README, and NOTHING that makes it
+  # bootable. With firmware on it, a lost autoboot.txt would boot from SETUP
+  # with no root to go with it; with none, the walk lands on a slot.
+  setup_offset="$(part_start 1)"
+  setup_files="$(mdir -i "$IMAGE@@$setup_offset" -b :: 2>/dev/null | sed -E 's|^::/||' | sort | tr '\n' ' ' | sed -E 's/ $//')"
+  [ "$setup_files" = "README.txt autoboot.txt" ] \
+    || fail "SETUP holds '$(sanitize_for_log "$setup_files")', not exactly README.txt and autoboot.txt; anything that makes it bootable is where a lost autoboot.txt would land"
+  mcopy -i "$IMAGE@@$setup_offset" ::autoboot.txt - 2>/dev/null | cmp -s - <("$LAYOUT" --print autoboot) \
+    || fail "SETUP's autoboot.txt is not the layout's (slot A default, slot B on tryboot)"
+  ok "SETUP holds autoboot.txt for slot A and nothing bootable"
+
+  # STATE: the skeleton and nothing else. An identity here would make every
+  # panel the same panel; a connection profile would be a Wi-Fi password
+  # handed to strangers; a channel file would put every panel on that
+  # channel. debugfs reads the partition copied out of the image, sparsely.
+  state_img="$(mktemp "${TMPDIR:-/tmp}/gate-state.XXXXXX")"
+  trap 'rm -f "$state_img"' EXIT
+  dd if="$IMAGE" of="$state_img" bs=1M iflag=skip_bytes,count_bytes skip="$(part_start 7)" count="$(part_size 7)" conv=sparse status=none
+  state_ls() { debugfs -R "ls -l $1" "$state_img" 2>/dev/null | awk 'NF >= 8 && $1 ~ /^[0-9]+$/ && $NF != "." && $NF != ".." { print $NF, $2, $4, $5 }'; }
+  state_entries="$(state_ls / | grep -v '^lost+found ' | sort)"
+  expected_entries="$("$LAYOUT" --print state-skeleton | awk '$1 !~ /\// { mode = ($2 == "d") ? "4" $3 : "10" $3; print $1, mode, $4, $4 }' | sort)"
+  [ "$state_entries" = "$expected_entries" ] \
+    || fail "STATE's top level is not the skeleton (name mode uid gid):
+$(sanitize_for_log "$state_entries")
+expected:
+$expected_entries"
+  # Then the whole tree at any depth, as one listing against the skeleton's
+  # paths, rather than a hand-kept loop over the directories that are known
+  # to exist today (a directory added to the skeleton and forgotten in such
+  # a loop would ship whatever was under it). rdump copies the tree out;
+  # ownership is not applied when the gate is not root, which is why the
+  # modes and owners were read with ls -l above. Every extra path is named,
+  # so the reason is in the log and not in a second run.
+  state_dump="$(mktemp -d "${TMPDIR:-/tmp}/gate-state-tree.XXXXXX")"
+  trap 'rm -rf "$state_img" "$state_dump"' EXIT
+  debugfs -R "rdump / $state_dump" "$state_img" >/dev/null 2>&1 || fail "debugfs could not dump STATE's tree"
+  run_find "$state_dump" -mindepth 1 ! -path "$state_dump/lost+found" ! -path "$state_dump/lost+found/*" -printf '%P\n'
+  state_tree="$(printf '%s\n' "$FOUND" | sed '/^$/d' | sort)"
+  expected_tree="$("$LAYOUT" --print state-skeleton | awk '{ print $1 }' | sort)"
+  extra="$(comm -23 <(printf '%s\n' "$state_tree") <(printf '%s\n' "$expected_tree") | tr '\n' ' ' | sed 's/ $//')"
+  missing="$(comm -13 <(printf '%s\n' "$state_tree") <(printf '%s\n' "$expected_tree") | tr '\n' ' ' | sed 's/ $//')"
+  [ -z "$extra" ] || fail "STATE holds paths beyond the skeleton, at any depth: $(sanitize_for_log "$extra"); no identity, record, profile or journal may ship"
+  [ -z "$missing" ] || fail "STATE lacks skeleton paths: $missing; a bind mount with no source directory fails quietly (nofail)"
+  ok "STATE holds the skeleton, owned as pinned, and nothing else at any depth"
+fi
 
 echo "image-gate: all checks passed"

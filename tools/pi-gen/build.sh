@@ -3,9 +3,10 @@
 #
 #   tools/pi-gen/build.sh <version> <workdir>
 #
-# Leaves one <workdir>/deploy/*-scoreboard.img.xz. Needs Docker with
-# --privileged and about 25 GB free. CI runs this; see
-# .github/workflows/image.yml.
+# Leaves one <workdir>/deploy/*-scoreboard.img.xz: pi-gen's two-partition
+# image, which tools/image-layout.sh then turns into the six-partition A/B
+# card image and the update payloads. Needs Docker with --privileged and
+# about 25 GB free. CI runs this; see .github/workflows/image.yml.
 set -euo pipefail
 
 VERSION="${1:?usage: build.sh <version> <workdir>}"
@@ -42,8 +43,12 @@ touch "$WORK/stage2/04-cloud-init/SKIP"
 files="$WORK/stage-scoreboard/01-install/files"
 mkdir -p "$files/device"
 cp -a "$REPO/device/scoreboard" "$REPO/device/requirements.txt" "$REPO/device/certs" \
-  "$REPO/device/polkit" "$REPO/device/scoreboard-appliance.service" \
+  "$REPO/device/polkit" "$REPO/device/generators" "$REPO/device/system.conf.d" \
+  "$REPO/device/NetworkManager.service.d" \
+  "$REPO/device/scoreboard-appliance.service" \
   "$REPO/device/scoreboard-netcfg.service" \
+  "$REPO/device/scoreboard-journal-prune" \
+  "$REPO/device/scoreboard-journal-prune.service" \
   "$REPO/device/scoreboard-update.timer" "$REPO/device/scoreboard-update.service" \
   "$REPO/device/scoreboard-update@.service" "$REPO/device/scoreboard-update@a.service.d" \
   "$REPO/device/scoreboard-update@b.service.d" "$REPO/device/scoreboard-health.service" \

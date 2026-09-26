@@ -68,11 +68,23 @@ test("a separate, unprivileged job attests the image only after re-checking its 
   assert.match(attest, /\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    [a-z]/);
   assert.doesNotMatch(attest, /actions\/checkout|--privileged|docker /, "the attest job runs no build code");
   assert.match(attest, /EXPECTED_SHA256: \$\{\{ needs\.build\.outputs\.sha256 \}\}/);
+  assert.match(attest, /EXPECTED_BOOT_SHA256: \$\{\{ needs\.build\.outputs\.boot_sha256 \}\}/);
+  assert.match(attest, /EXPECTED_ROOT_SHA256: \$\{\{ needs\.build\.outputs\.root_sha256 \}\}/);
   const fetch = attest.indexOf("actions/download-artifact");
-  const compare = attest.search(/\[ "\$actual" = "\$EXPECTED_SHA256" \] \|\|/);
+  const compare = attest.search(/\[ "\$actual" = "\$2" \] \|\|/);
   const sign = attest.indexOf("actions/attest-build-provenance");
   assert.ok(fetch > 0 && compare > fetch && sign > compare, "download, then compare the sha256, then attest");
-  assert.match(attest, /sha256sum "out\/scoreboard-\$VERSION\.img\.xz"/);
+  for (const file of ["img.xz", "boot.img.xz", "root.img.xz"]) {
+    assert.match(attest, new RegExp(`check "scoreboard-\\$VERSION\\.${file.replace(".", "\\.")}" "\\$EXPECTED_`),
+      `${file} is not checked against the build job's output before attestation`);
+  }
+});
+
+test("the attestation covers the flash image and both update payloads", () => {
+  // gh attestation verify must cover what a panel installs, not only what a
+  // person flashes.
+  const attest = step(job("attest"), "Attest build provenance");
+  assert.match(attest, /subject-path: \|\n\s+out\/scoreboard-\$\{\{ needs\.build\.outputs\.version \}\}\.img\.xz\n\s+out\/scoreboard-\$\{\{ needs\.build\.outputs\.version \}\}\.boot\.img\.xz\n\s+out\/scoreboard-\$\{\{ needs\.build\.outputs\.version \}\}\.root\.img\.xz/);
 });
 
 test("publishing waits for a tagged, attested, approved release", () => {
@@ -88,8 +100,15 @@ test("AWS is reached through OIDC, never a stored key", () => {
   assert.doesNotMatch(wf, /aws-access-key-id|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY/);
 });
 
-test("only a strict version tag publishes", () => {
-  assert.match(job("build"), /\^v\[0-9\]\+\\\.\[0-9\]\+\\\.\[0-9\]\+\$/);
+test("only a strict version tag publishes, and the channel comes from the tag", () => {
+  const build = job("build");
+  assert.match(build, /\^v\[0-9\]\+\\\.\[0-9\]\+\\\.\[0-9\]\+\$/);
+  assert.match(build, /\^v\[0-9\]\+\\\.\[0-9\]\+\\\.\[0-9\]\+-test\$/, "a vX.Y.Z-test tag publishes the test channel");
+  assert.match(build, /echo "channel=stable"/);
+  assert.match(build, /echo "channel=test"/);
+  assert.match(build, /echo "version=\$\{REF_NAME%-test\}"/, "a test tag's version is vX.Y.Z, not the tag");
+  // Anything else builds only.
+  assert.match(build, /else\n\s+echo "version=v0\.0\.0-dev\.\$RUN"[\s\S]*?echo "publish=false"/);
 });
 
 test("the publish job re-checks the checksum before releasing", () => {
@@ -122,7 +141,7 @@ test("the publish job checks the downloaded image against what the build job att
   assert.match(job("build"), /sha256: \$\{\{ steps\.checksum\.outputs\.sha256 \}\}/);
   const publish = job("publish");
   assert.match(publish, /EXPECTED_SHA256: \$\{\{ needs\.build\.outputs\.sha256 \}\}/);
-  assert.match(publish, /\[ "\$actual" = "\$EXPECTED_SHA256" \]/);
+  assert.match(step(publish, "Re-check the checksum"), /check "scoreboard-\$VERSION\.img\.xz" "\$EXPECTED_SHA256"/);
 });
 
 test("the tag is re-resolved against the built commit before the release is created", () => {
@@ -147,16 +166,60 @@ test("latest.json is looked up by listing, not a plain read, before it can be ov
   // prefix), not a read wrapped in error-text sniffing.
   const publish = job("publish");
   const mirror = publish.slice(publish.indexOf("Mirror to the image CDN"));
-  assert.match(mirror, /aws s3api list-objects-v2 --bucket "\$BUCKET" --prefix latest\.json --max-keys 1/);
-  assert.match(mirror, /--query 'length\(Contents\[\?Key==`latest\.json`\] \|\| `\[\]`\)'/);
+  assert.match(mirror, /aws s3api list-objects-v2 --bucket "\$BUCKET" --prefix "\$pointer" --max-keys 1/);
+  assert.match(mirror, /--query "length\(Contents\[\?Key=='\$pointer'\] \|\| \\`\[\]\\`\)"/);
   const list = mirror.indexOf("list-objects-v2");
-  const read = mirror.indexOf('aws s3 cp "s3://$BUCKET/latest.json" -');
+  const read = mirror.indexOf('aws s3 cp "s3://$BUCKET/$pointer" -');
   assert.ok(read > list, "the object must be listed before it is read");
-  const write = mirror.indexOf("aws s3 cp latest.json");
-  assert.ok(write > read, "latest.json must be read before it can be overwritten");
+  const write = mirror.indexOf('aws s3 cp "$pointer"');
+  assert.ok(write > read, "the pointer must be read before it can be overwritten");
   assert.match(mirror, /should_write/);
   assert.match(mirror, /::notice::/, "skipping an older release must still be visible in the run's log");
-  assert.match(mirror, /unexpected object count for latest\.json/, "anything other than 0 or 1 objects must fail the job");
+  assert.match(mirror, /unexpected object count for \$pointer/, "anything other than 0 or 1 objects must fail the job");
+});
+
+test("each channel has its own pointer file, and a test release never touches latest.json", () => {
+  const mirror = step(job("publish"), "Mirror to the image CDN");
+  assert.match(mirror, /stable\) pointer=latest\.json ;;/);
+  assert.match(mirror, /\*\) pointer="latest-\$CHANNEL\.json" ;;/);
+  assert.doesNotMatch(mirror, /s3:\/\/\$BUCKET\/latest\.json/, "the stable pointer is only ever named through $pointer");
+  // The six release files are mirrored under images/<version>/.
+  for (const name of ["boot.img.xz", "root.img.xz", "manifest.json", "manifest.sig"]) {
+    assert.match(mirror, new RegExp(`put "scoreboard-\\$VERSION\\.${name.replace(".", "\\.")}"`), `${name} is not mirrored`);
+  }
+});
+
+test("the manifest is signed in KMS and checked against the repository's public key before anything is released", () => {
+  const publish = job("publish");
+  const assume = publish.indexOf("Assume the publisher role");
+  const look = publish.indexOf("- name: Look for an existing GitHub Release");
+  const sign = publish.indexOf("- name: Sign the release manifest");
+  const release = publish.indexOf("- name: Create the GitHub Release");
+  const mirror = publish.indexOf("- name: Mirror to the image CDN");
+  assert.ok(assume > 0 && look > assume && sign > look && release > sign && mirror > release,
+    "assume the role, look for the release, sign, then create the release, then mirror");
+  const signing = step(publish, "Sign the release manifest");
+  assert.match(signing, /aws kms sign --region us-east-1 --key-id alias\/scoreboard-release-signing/);
+  assert.match(signing, /--signing-algorithm ECDSA_SHA_256 --message-type RAW/);
+  assert.match(signing, /aws kms get-public-key --region us-east-1 --key-id alias\/scoreboard-release-signing/,
+    "the key id is derived from which repository file carries KMS's public key");
+  assert.match(signing, /openssl dgst -sha256 -verify "release-signing\/\$key_id\.pem"/,
+    "KMS's signature must verify against the public key carried in the build artifact");
+  assert.match(signing, /\[ -n "\$key_id" \] \|\| \{/, "no matching public key in the repository must fail the release");
+  assert.match(signing, /release-manifest\.py make [^\n]*\\\n\s+[^\n]*--channel "\$CHANNEL"/);
+  assert.doesNotMatch(signing, /openssl (ec|genpkey|genrsa)|PRIVATE KEY/, "no private key is ever generated or read here");
+  // The publish job checks out nothing, so both come from the artifact.
+  const build = job("build");
+  assert.match(build, /cp tools\/release-manifest\.py out\//);
+  assert.match(build, /cp -r device\/certs\/release-signing out\/release-signing/);
+});
+
+test("the publisher role is assumed only after the tag is verified and the checksums re-checked", () => {
+  const publish = job("publish");
+  const recheck = publish.indexOf("- name: Re-check the checksum");
+  const tag = publish.indexOf("- name: Verify the tag has not moved");
+  const assume = publish.indexOf("- name: Assume the publisher role");
+  assert.ok(recheck > 0 && tag > recheck && assume > tag);
 });
 
 test("a malformed existing version fails the publish instead of being silently overwritten", () => {
@@ -174,19 +237,68 @@ test("the write token is scoped to the steps that need it, not the whole publish
 
 test("a re-run trusts an existing release only if it is published, complete and this build", () => {
   const publish = job("publish");
-  const release = publish.slice(publish.indexOf("Create the GitHub Release"), publish.indexOf("Assume the publisher role"));
-  assert.match(release, /gh release view "\$VERSION" --json isDraft,assets/, "the existing release's draft state and assets must be fetched");
+  const release = step(publish, "Look for an existing GitHub Release");
+  assert.match(release, /gh release view "\$TAG" --json isDraft,assets/, "the existing release's draft state and assets must be fetched");
   assert.match(release, /jq -r '\.isDraft'[^\n]*= false \] \|\| refuse/, "a draft release must be refused");
-  assert.match(release, /for name in "\$file" "\$file\.sha256"; do/, "both assets must be checked");
+  assert.match(release, /assets=\("\$file" "\$file\.sha256" "scoreboard-\$VERSION\.boot\.img\.xz" "scoreboard-\$VERSION\.root\.img\.xz" \\\n\s+"scoreboard-\$VERSION\.manifest\.json" "scoreboard-\$VERSION\.manifest\.sig"\)/,
+    "all six release files are named once");
+  assert.match(release, /for name in "\$\{assets\[@\]\}"; do/, "every asset must be checked");
   assert.match(release, /\[ "\$state" = uploaded \] \|\| refuse/, "a missing or partly uploaded asset must be refused");
-  assert.match(release, /local_size="\$\(stat -c %s "out\/\$file"\)"/);
-  assert.match(release, /\[ "\$remote_size" = "\$local_size" \] \|\| refuse/, "the image asset's size must match this build");
+  assert.match(release, /local_size="\$\(stat -c %s "out\/\$name"\)"/);
+  assert.match(release, /\[ "\$remote_size" = "\$local_size" \] \|\| refuse/, "the image and payload sizes must match this build");
   assert.match(release, /\[ "\$digest" = "sha256:\$EXPECTED_SHA256" \] \|\| refuse/, "a reported digest must match this build");
-  assert.match(release, /gh release download "\$VERSION"/);
+  assert.match(release, /gh release download "\$TAG"/);
   assert.match(release, /"\$existing_sha" != "\$EXPECTED_SHA256"/);
-  assert.match(release, /::error::GitHub Release \$VERSION already exists but .*Fix or delete the Release by hand/);
-  assert.doesNotMatch(release, /gh release (upload|edit|delete)/, "a bad release is never repaired automatically");
-  assert.match(release, /gh release create "\$VERSION"/, "a release that does not exist yet must still be created");
+  assert.match(release, /::error::GitHub Release \$TAG already exists but .*Fix or delete the Release by hand/);
+  assert.doesNotMatch(release, /gh release (upload|edit|delete|create)/, "a bad release is never repaired automatically, and this step creates nothing");
+  assert.match(release, /echo "exists=(true|false)" >>"\$GITHUB_OUTPUT"/);
+  assert.match(step(publish, "Create the GitHub Release"), /gh release create "\$TAG"/, "a release that does not exist yet must still be created");
+});
+
+test("a re-run mirrors the existing Release's manifest and signs nothing again", () => {
+  // The manifest carries `released` and `expires`, so every signing
+  // differs. Signing again on a re-run and mirroring that would leave the
+  // mirror disagreeing with the Release for good (imagecheck compares them
+  // twice a day) and would be a KMS Sign no release explains.
+  const publish = job("publish");
+  const look = step(publish, "Look for an existing GitHub Release");
+  assert.match(look, /gh release download "\$TAG" --pattern "scoreboard-\$VERSION\.manifest\.json" \\\n\s+--pattern "scoreboard-\$VERSION\.manifest\.sig"/,
+    "the Release's own manifest and signature are fetched");
+  assert.match(look, /for pem in out\/release-signing\/\*\.pem; do/, "every repository key is tried, as the panel does");
+  assert.match(look, /openssl dgst -sha256 -verify "\$pem" -signature "\$work\/manifest\.sig\.der"/);
+  assert.match(look, /\[ -n "\$key_id" \] \|\| refuse "its manifest signature does not verify/);
+  for (const field of ["version", "channel", "keyId", "layout"]) {
+    assert.match(look, new RegExp(`\\("${field}", `), `the existing manifest's ${field} is compared to this build`);
+  }
+  assert.match(look, /for k in \("file", "size", "sha256", "rawSize", "rawSha256"\)/, "both payloads are compared field by field");
+  assert.match(look, /cp "\$work\/scoreboard-\$VERSION\.manifest\.json" "\$work\/scoreboard-\$VERSION\.manifest\.sig" out\//,
+    "the verified bytes replace this run's, so the mirror step puts them");
+  assert.doesNotMatch(look, /aws kms/);
+  // Signing and creating happen only when there is no Release yet.
+  const sign = step(publish, "Sign the release manifest");
+  const create = step(publish, "Create the GitHub Release");
+  assert.match(sign, /\n        if: steps\.existing\.outputs\.exists == 'false'\n/);
+  assert.match(create, /\n        if: steps\.existing\.outputs\.exists == 'false'\n/);
+  const mirror = step(publish, "Mirror to the image CDN");
+  assert.doesNotMatch(mirror, /\n        if:/, "the mirror runs on both paths");
+});
+
+test("a version number already on the mirror is refused before anything is signed or created", () => {
+  // vX.Y.Z and vX.Y.Z-test are different Releases but the same images/<v>/
+  // prefix, cached as immutable for a year; the second publish would
+  // overwrite the first channel's payloads and signed manifest in place.
+  const publish = job("publish");
+  const look = publish.indexOf("- name: Look for an existing GitHub Release");
+  const refuse = publish.indexOf("- name: Refuse a version number the mirror already holds");
+  const sign = publish.indexOf("- name: Sign the release manifest");
+  assert.ok(look > 0 && refuse > look && sign > refuse, "look, refuse, then sign");
+  const check = step(publish, "Refuse a version number the mirror already holds");
+  assert.match(check, /\n        if: steps\.existing\.outputs\.exists == 'false'\n/, "a re-run of an existing Release owns its prefix");
+  assert.match(check, /aws s3api list-objects-v2 --bucket "\$BUCKET" --prefix "images\/\$VERSION\/" --max-keys 1/);
+  assert.match(check, /0\) echo "images\/\$VERSION\/ is free" ;;/);
+  assert.match(check, /\[1-9\]\*\)\n\s+echo "::error::images\/\$VERSION\/ already holds objects/);
+  assert.match(check, /unexpected object count for images\/\$VERSION\//, "anything but a number fails the job");
+  assert.doesNotMatch(check, /aws s3 cp|s3api get-object/, "names are listed; nothing is read");
 });
 
 test("the gate step cannot be softened into a warning", () => {
@@ -197,16 +309,35 @@ test("the gate step cannot be softened into a warning", () => {
   assert.doesNotMatch(gate, /set \+e/);
   const calls = gate.split("\n").filter((l) => l.includes("image-gate.sh"));
   assert.deepEqual(calls.map((l) => l.trim()),
-    ['sudo tools/image-gate.sh "$RUNNER_TEMP/rootfs" "$RUNNER_TEMP/bootfs" "$GITHUB_WORKSPACE"'],
-    "the gate is called exactly once, on its own line, with nothing that swallows its exit status");
+    ['sudo tools/image-gate.sh "$RUNNER_TEMP/rootfs" "$RUNNER_TEMP/bootfs" "$GITHUB_WORKSPACE" --image "$image"'],
+    "the gate is called exactly once, on its own line, with the assembled image, and nothing that swallows its exit status");
   assert.doesNotMatch(gate, /image-gate\.sh[^\n]*\|\|/);
   assert.doesNotMatch(gate, /\|\|\s*(true|:)\s*\n[^\n]*image-gate/);
 });
 
 test("the rootfs is mounted without replaying its journal, the boot partition read-only", () => {
+  // Slot A of the six-partition card: ROOT-A is partition 5, BOOT-A is 2.
   const gate = step(job("build"), "Gate the image");
-  assert.match(gate, /sudo mount -o ro,noload "\$\{loop\}p2" "\$RUNNER_TEMP\/rootfs"/);
-  assert.match(gate, /sudo mount -o ro "\$\{loop\}p1" "\$RUNNER_TEMP\/bootfs"/);
+  assert.match(gate, /sudo mount -o ro,noload "\$\{loop\}p5" "\$RUNNER_TEMP\/rootfs"/);
+  assert.match(gate, /sudo mount -o ro "\$\{loop\}p2" "\$RUNNER_TEMP\/bootfs"/);
+  // pi-gen's own image is mounted the same way for the layout step.
+  const layout = step(job("build"), "Lay out the A/B card");
+  assert.match(layout, /sudo mount -o ro,noload "\$\{loop\}p2" "\$RUNNER_TEMP\/pigen-rootfs"/);
+  assert.match(layout, /sudo mount -o ro "\$\{loop\}p1" "\$RUNNER_TEMP\/pigen-bootfs"/);
+  assert.match(layout, /trap cleanup EXIT/);
+});
+
+test("the layout is built, gated and checked against the payloads before anything is uploaded", () => {
+  const build = job("build");
+  const layout = build.indexOf("- name: Lay out the A/B card");
+  const gate = build.indexOf("- name: Gate the image");
+  const slot = build.indexOf("- name: Check slot A equals the payloads");
+  const upload = build.indexOf("actions/upload-artifact");
+  assert.ok(layout > 0 && gate > layout && slot > gate && upload > slot);
+  const check = step(build, "Check slot A equals the payloads");
+  assert.match(check, /\[ "\$\(slot_sha 2\)" = "\$boot_raw" \] \|\|/);
+  assert.match(check, /\[ "\$\(slot_sha 5\)" = "\$root_raw" \] \|\|/);
+  assert.doesNotMatch(check, /continue-on-error/);
 });
 
 test("the gated image outlives the longest approval wait", () => {
@@ -220,11 +351,13 @@ test("an older release approved late is not marked GitHub's Latest", () => {
   // every twelve hours.
   const release = step(job("publish"), "Create the GitHub Release");
   const read = release.indexOf('gh api "repos/$GH_REPO/releases/latest" --jq .tag_name');
-  const create = release.indexOf('gh release create "$VERSION"');
+  const create = release.indexOf('gh release create "$TAG"');
   assert.ok(read > 0 && create > read, "GitHub's latest release must be read before creating this one");
   assert.match(release, /grep -q 'HTTP 404'/, "only a 404 means there is no latest release yet");
   assert.match(release, /could not read GitHub's latest release/, "any other error fails the job");
   assert.match(release, /\[\[ ! "\$current_latest" =~ \^v\[0-9\]\+\\\.\[0-9\]\+\\\.\[0-9\]\+\$ \]\]/, "the latest tag is validated before it is compared");
   assert.match(release, /make_latest=false/);
   assert.match(release, /--latest="\$make_latest"/);
+  // A test-channel release is never GitHub's Latest and is a prerelease.
+  assert.match(release, /if \[ "\$CHANNEL" = test \]; then\n\s+make_latest=false\n\s+prerelease=\(--prerelease\)/);
 });

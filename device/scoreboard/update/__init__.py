@@ -133,15 +133,22 @@ class Slot:
 
 
 def slot(name: str, devices: Path = Path("/dev")) -> Slot:
-    """The two partitions of a slot, by design 4.1: A is 2 and 4, B is 3 and
-    5. The device names are the one place this package depends on the
-    kernel calling the card mmcblk0 (design 7.1); the unit's DeviceAllow
+    """The two partitions of a slot as tools/image-layout.sh builds the card:
+    A is 2 and 5, B is 3 and 6. Design 4.1 wrote the roots as 4 and 5, but
+    MBR holds four primary partitions, so the layout puts the roots and
+    STATE inside an extended container that takes number 4, and they become
+    logical partitions 5, 6 and 7. The boot slots keep 2 and 3, which is
+    what autoboot.txt and bootloader/partition name. The layout is what
+    ships, so these numbers follow it and not the design text; a slot
+    numbered by the design would open partition 4, the container's EBR,
+    from slot B. The device names are the one place this package depends on
+    the kernel calling the card mmcblk0 (design 7.1); the unit's DeviceAllow
     depends on the same names, and a card that appears under another name
     gets no device at all, which fails closed."""
     if name == "a":
-        return Slot("a", 2, 4, devices / "mmcblk0p2", devices / "mmcblk0p4")
+        return Slot("a", 2, 5, devices / "mmcblk0p2", devices / "mmcblk0p5")
     if name == "b":
-        return Slot("b", 3, 5, devices / "mmcblk0p3", devices / "mmcblk0p5")
+        return Slot("b", 3, 6, devices / "mmcblk0p3", devices / "mmcblk0p6")
     raise Refused("malformed", f"no such slot {name!r}")
 
 

@@ -119,9 +119,9 @@ class FakeCard:
         devices = tmp_path / "dev"
         devices.mkdir()
         (devices / "mmcblk0p3").write_bytes(payload_bytes(b"old boot", layout.boot_size))
-        (devices / "mmcblk0p5").write_bytes(payload_bytes(b"old root", layout.root_size))
+        (devices / "mmcblk0p6").write_bytes(payload_bytes(b"old root", layout.root_size))
         (devices / "mmcblk0p2").write_bytes(payload_bytes(b"running boot", layout.boot_size))
-        (devices / "mmcblk0p4").write_bytes(payload_bytes(b"running root", layout.root_size))
+        (devices / "mmcblk0p5").write_bytes(payload_bytes(b"running root", layout.root_size))
         self.devices = devices
 
     def slot(self, name="b"):
@@ -332,25 +332,27 @@ def test_slot_arithmetic_from_device_tree_bytes(tmp_path):
 
 def test_the_root_partition_is_read_from_the_cmdlines_partuuid(tmp_path):
     f = tmp_path / "cmdline"
-    f.write_text("console=tty1 root=PARTUUID=deadbeef-04 rootfstype=ext4 ro rootwait\n")
-    assert update.cmdline_root_partition(f) == 4
+    f.write_text("console=tty1 root=PARTUUID=deadbeef-05 rootfstype=ext4 ro rootwait\n")
+    assert update.cmdline_root_partition(f) == 5
     f.write_text("console=tty1 root=/dev/mmcblk0p2 ro\n")
     assert update.cmdline_root_partition(f) is None
 
 
 def test_the_write_unit_refuses_both_halves_of_the_running_slot(tmp_path):
     a, b = update.slot("a", tmp_path), update.slot("b", tmp_path)
-    update.refuse_running(b, 2, 4)
-    refusal(lambda: update.refuse_running(a, 2, 4), "running")
-    refusal(lambda: update.refuse_running(a, 3, 4), "running")   # the root half alone
-    refusal(lambda: update.refuse_running(a, 2, 5), "running")   # the boot half alone
-    refusal(lambda: update.refuse_running(b, None, 4), "running")
+    update.refuse_running(b, 2, 5)
+    refusal(lambda: update.refuse_running(a, 2, 5), "running")
+    refusal(lambda: update.refuse_running(a, 3, 5), "running")   # the root half alone
+    refusal(lambda: update.refuse_running(a, 2, 6), "running")   # the boot half alone
+    refusal(lambda: update.refuse_running(b, None, 5), "running")
     refusal(lambda: update.refuse_running(b, 2, None), "running")
 
 
 def test_the_device_names_are_the_ones_the_unit_drop_ins_allow():
-    assert (update.slot("a").boot_dev, update.slot("a").root_dev) == (Path("/dev/mmcblk0p2"), Path("/dev/mmcblk0p4"))
-    assert (update.slot("b").boot_dev, update.slot("b").root_dev) == (Path("/dev/mmcblk0p3"), Path("/dev/mmcblk0p5"))
+    # The roots are logical partitions 5 and 6 (tools/image-layout.sh), not
+    # design 4.1's 4 and 5: partition 4 is the extended container.
+    assert (update.slot("a").boot_dev, update.slot("a").root_dev) == (Path("/dev/mmcblk0p2"), Path("/dev/mmcblk0p5"))
+    assert (update.slot("b").boot_dev, update.slot("b").root_dev) == (Path("/dev/mmcblk0p3"), Path("/dev/mmcblk0p6"))
 
 
 # --- records -----------------------------------------------------------------
@@ -403,7 +405,7 @@ def test_status_topics_carry_the_version_the_last_failure_and_a_key_refusal(reco
 
 # --- the write unit --------------------------------------------------------------
 def write_unit(card: FakeCard, records: Records, key: Key, release: Release, *, quiet=True, files=None,
-               booted=2, root=4, reboots=None, now=NOW, channel="stable"):
+               booted=2, root=5, reboots=None, now=NOW, channel="stable"):
     transport = FakeTransport(release.files() if files is None else files)
     reboots = [] if reboots is None else reboots
     unit = writer.WriteUnit(card.slot("b"), records, transport=transport, keys=key.ring(), running=RUNNING,
@@ -796,7 +798,7 @@ def test_the_write_unit_verifies_the_manifest_again_itself(tmp_path, records, ke
 def test_the_write_unit_refuses_a_request_for_the_running_slot(tmp_path, records, key):
     card, r = FakeCard(tmp_path), Release(key)
     request(records, "stage", release=r)
-    refusal(write_unit(card, records, key, r, booted=3, root=5).run, "running")
+    refusal(write_unit(card, records, key, r, booted=3, root=6).run, "running")
     assert card.head() != bytes(LAYOUT.head), "nothing was touched"
 
 

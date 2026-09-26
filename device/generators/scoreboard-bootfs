@@ -1,0 +1,89 @@
+#!/bin/sh
+# systemd generator: mount the RUNNING slot's boot partition at /boot/firmware.
+#
+# A static fstab cannot name a partition that differs by slot, and on the A/B
+# card the boot partition is 2 when slot A is running and 3 when slot B is.
+# The firmware says which in /proc/device-tree/chosen/bootloader/partition (a
+# raw 32-bit big-endian integer), so this writes the mount unit at boot from
+# that value. Installed by tools/pi-setup.sh --appliance to
+# /usr/lib/systemd/system-generators/; the gate asserts it matches this file.
+#
+# The disk identifier is not repeated here: it is taken from the root=
+# PARTUUID the kernel booted with, which tools/image-layout.sh fixed, so the
+# boot partition is that identifier with the firmware's partition number.
+#
+# Mounted read-write, the one exception to "everything is read-only":
+# rpi-eeprom-update.service places pieeprom.upd, its signature and
+# recovery.bin here, and the EEPROM bootloader's self-update applies them on
+# the next boot from the slot it selected (design 4.3, fact 17). Nothing of
+# ours writes here; the gate asserts no unit names /boot/firmware in a
+# ReadWritePaths=.
+#
+# The wait for the device is bounded the way systemd-fstab-generator bounds
+# it: a drop-in on the .device unit with JobRunningTimeoutSec=10s. It is
+# NOT done with nofail or x-systemd.device-timeout in Options=, because
+# systemd.mount(5) says both are read only from /etc/fstab and ignored in a
+# unit file's Options= -- a mount unit that carried them would wait the
+# default 90 s while claiming 10. The partition is the one the firmware just
+# booted from, so in practice it is there; the bound is for a card that is
+# not, and H10 records the timeout drop-in the generator wrote.
+#
+# On a card that is not this layout (partition 1, the two-partition pi-gen
+# image, or no device tree entry at all) nothing is written and fstab stands.
+set -eu
+
+normal_dir="${1:-}"
+[ -n "$normal_dir" ] || exit 0
+partition_file=/proc/device-tree/chosen/bootloader/partition
+[ -r "$partition_file" ] || exit 0
+
+hex="$(od -An -tx1 "$partition_file" | tr -d ' \n')"
+[ -n "$hex" ] || exit 0
+partition=$((0x$hex))
+case "$partition" in
+  2 | 3) ;;
+  *) exit 0 ;;
+esac
+
+disk=""
+for token in $(cat /proc/cmdline); do
+  case "$token" in
+    root=PARTUUID=*-0[0-9])
+      disk="${token#root=PARTUUID=}"
+      disk="${disk%-*}" ;;
+  esac
+done
+[ -n "$disk" ] || exit 0
+
+cat >"$normal_dir/boot-firmware.mount" <<EOF
+# Written at boot by /usr/lib/systemd/system-generators/scoreboard-bootfs:
+# the boot partition of the slot the firmware booted (partition $partition).
+[Unit]
+Description=The running slot's boot partition
+DefaultDependencies=no
+Before=local-fs.target
+After=local-fs-pre.target
+Conflicts=umount.target
+Before=umount.target
+
+[Mount]
+What=/dev/disk/by-partuuid/$disk-0$partition
+Where=/boot/firmware
+Type=vfat
+Options=rw,nodev,nosuid,noexec,umask=022
+EOF
+# Wanted, not required, by local-fs.target: a missing partition delays the
+# boot by the device timeout below and then lets it go on.
+mkdir -p "$normal_dir/local-fs.target.wants"
+ln -sf ../boot-firmware.mount "$normal_dir/local-fs.target.wants/boot-firmware.mount"
+# The device unit's name is the escaped path: '/' becomes '-', '-' becomes
+# '\x2d', and the identifier and partition number are hex and digits, which
+# need no escaping. One level of backslash survives the double quotes.
+device_unit="dev-disk-by\\x2dpartuuid-${disk}\\x2d0${partition}.device"
+mkdir -p "$normal_dir/$device_unit.d"
+cat >"$normal_dir/$device_unit.d/50-device-timeout.conf" <<EOF
+# Written at boot by /usr/lib/systemd/system-generators/scoreboard-bootfs,
+# the way systemd-fstab-generator writes x-systemd.device-timeout.
+[Unit]
+JobRunningTimeoutSec=10s
+EOF

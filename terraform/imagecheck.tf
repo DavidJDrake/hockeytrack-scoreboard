@@ -66,13 +66,19 @@ resource "aws_lambda_function" "imagecheck" {
   # enough throughput to comfortably clear a several-GB image well inside
   # 300s, so the timeout itself is left unchanged rather than papering over
   # a throughput problem with more wall-clock time.
-  timeout     = 300
+  #
+  # Since the update path (OTA design 6.5) it also hashes both update
+  # payloads, about 0.7 GB more, and verifies the signed manifest against
+  # the KMS key; the timeout grows to fit two more objects. In-region reads
+  # still cost nothing.
+  timeout     = 600
   memory_size = 1024
   environment {
     variables = {
-      IMAGES_BUCKET = aws_s3_bucket.images.bucket
-      TOPIC_ARN     = data.aws_sns_topic.security_alerts.arn
-      GITHUB_REPO   = "DavidJDrake/hockeytrack-scoreboard"
+      IMAGES_BUCKET  = aws_s3_bucket.images.bucket
+      TOPIC_ARN      = data.aws_sns_topic.security_alerts.arn
+      GITHUB_REPO    = "DavidJDrake/hockeytrack-scoreboard"
+      SIGNING_KEY_ID = aws_kms_alias.release_signing.name
     }
   }
   depends_on = [aws_cloudwatch_log_group.imagecheck]

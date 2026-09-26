@@ -1,5 +1,6 @@
 # The write unit, one instance per slot: scoreboard-update@a.service writes
-# slot A (partitions 2 and 4), @b writes slot B (3 and 5). The drop-in under
+# slot A (partitions 2 and 5), @b writes slot B (3 and 6; the roots are
+# logical partitions, see tools/image-layout.sh). The drop-in under
 # scoreboard-update@<slot>.service.d/slot.conf carries the DeviceAllow
 # lines, and they are the whole point of the template (design 7.1): the unit
 # that has network access can only open the two partitions of the slot
