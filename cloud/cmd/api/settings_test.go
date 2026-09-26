@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -262,5 +263,61 @@ func TestTheListStillAnswersWhenDefaultsCannotBeRead(t *testing.T) {
 	// It says less rather than something untrue: no resolved settings.
 	if strings.Contains(res.Body, `"resolved"`) {
 		t.Errorf("the list claims resolved settings it could not work out: %s", res.Body)
+	}
+}
+
+// --- orientation (SCO-34): a panel's own, sent in the same document
+
+func TestOrientationIsSavedSentAndClearedOnRelease(t *testing.T) {
+	h, st, pub, _ := settingsHandler(t)
+	ctx := context.Background()
+	_, _ = h.Handle(ctx, req("PUT", "PUT /api/devices/{thing}/game", "sub-a", `{"gameId":2026020001}`, thing("scoreboard-7qf2")))
+	stamp := clock.UnixMilli()
+	clock = clock.Add(60 * 1e9)
+	defer func() { clock = clock.Add(-60 * 1e9) }()
+
+	res, _ := h.Handle(ctx, req("PUT", "PUT /api/devices/{thing}/display", "sub-a", `{"rotate":270}`, thing("scoreboard-7qf2")))
+	if res.StatusCode != 200 || !strings.Contains(res.Body, `"overrides":{"rotate":270}`) || !strings.Contains(res.Body, `"finalHoldMin":180,"rotate":270}`) {
+		t.Fatalf("status %d: %s", res.StatusCode, res.Body)
+	}
+	got := string(pub.Messages[len(pub.Messages)-1].Payload)
+	// Turning a panel is not choosing a game: the stamp is re-sent unchanged.
+	if !strings.Contains(got, `"rotate":270`) || !strings.Contains(got, `"chosenAt":`+strconv.FormatInt(stamp, 10)) {
+		t.Errorf("document = %s", got)
+	}
+	// "auto" is stored as nothing, and the document then says nothing, so
+	// the panel goes back to deciding for itself.
+	_, _ = h.Handle(ctx, req("PUT", "PUT /api/devices/{thing}/display", "sub-a", `{"rotate":"auto"}`, thing("scoreboard-7qf2")))
+	if got := string(pub.Messages[len(pub.Messages)-1].Payload); strings.Contains(got, "rotate") {
+		t.Errorf("auto reached the wire: %s", got)
+	}
+	// Released, the panel forgets it along with the rest of its settings;
+	// the next owner's glass may hang the other way.
+	_, _ = h.Handle(ctx, req("PUT", "PUT /api/devices/{thing}/display", "sub-a", `{"rotate":180}`, thing("scoreboard-7qf2")))
+	if res, _ := h.Handle(ctx, req("DELETE", "DELETE /api/devices/{thing}", "sub-a", "", thing("scoreboard-7qf2"))); res.StatusCode != 200 {
+		t.Fatalf("release: status %d", res.StatusCode)
+	}
+	if d, _, _ := st.Get(ctx, "scoreboard-7qf2"); d.Display.Rotate != nil {
+		t.Errorf("released, the panel still carries rotate %d", *d.Display.Rotate)
+	}
+}
+
+func TestOrientationIsOneOfFiveWordsAndNeverAnAccountDefault(t *testing.T) {
+	h, _, pub, _ := settingsHandler(t)
+	ctx := context.Background()
+	for _, body := range []string{`{"rotate":45}`, `{"rotate":"270"}`, `{"rotate":true}`, `{"rotate":"upside down"}`, `{"rotate":90.5}`} {
+		if res, _ := h.Handle(ctx, req("PUT", "PUT /api/devices/{thing}/display", "sub-a", body, thing("scoreboard-7qf2"))); res.StatusCode != 400 {
+			t.Errorf("%s: status %d", body, res.StatusCode)
+		}
+	}
+	// Which way up a panel hangs is a fact about one piece of glass, not a
+	// default; the account route refuses even a good value, and "auto".
+	for _, body := range []string{`{"rotate":270}`, `{"rotate":"auto"}`, `{"finalHoldMin":30,"rotate":0}`} {
+		if res, _ := h.Handle(ctx, req("PUT", "PUT /api/settings", "sub-a", body, nil)); res.StatusCode != 400 {
+			t.Errorf("account route took %s: status %d", body, res.StatusCode)
+		}
+	}
+	if len(pub.Messages) != 0 {
+		t.Errorf("a refused request published %d messages", len(pub.Messages))
 	}
 }

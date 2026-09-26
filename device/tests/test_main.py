@@ -2465,6 +2465,114 @@ def test_the_card_is_not_read_when_something_else_has_already_decided():
     assert looked == [True]
 
 
+# --- the site says which way up (SCO-34) -----------------------------------
+
+def a_turning_loop(monkeypatch, tmp_path, script, rotate_in_device_json=None, env=None, card=None):
+    """a_loop_that_receives, with the orientation sources set and every call
+    to placement recorded: the boot's, and one more each time the site turns
+    the panel. No restart is involved: it is the same main() run throughout."""
+    from scoreboard import netcfg
+
+    boot = tmp_path / "scoreboard-setup.txt"
+    boot.write_text(f"rotate={card}\n" if card is not None else "")
+    monkeypatch.setattr(netcfg, "BOOT_FILE", boot)
+    monkeypatch.setattr(netcfg, "LEGACY_BOOT_FILE", tmp_path / "nothing.txt")
+    monkeypatch.setenv("SCOREBOARD_WINDOW", "400x1280")  # a bar panel's own shape
+    if env is None:
+        monkeypatch.delenv("SCOREBOARD_ROTATE", raising=False)
+    else:
+        monkeypatch.setenv("SCOREBOARD_ROTATE", env)
+    seen = []
+    real_placement = main_module.placement
+    monkeypatch.setattr(main_module, "placement",
+                        lambda frame, display, rotate: seen.append(rotate)
+                        or real_placement(frame, display, rotate))
+    real_load = main_module.Config.load
+
+    def load_with_rotate(config_dir=None):
+        d = json.loads((tmp_path / "device.json").read_text())
+        if rotate_in_device_json is not None and "rotate" not in d:
+            d["rotate"] = rotate_in_device_json
+            (tmp_path / "device.json").write_text(json.dumps(d))
+        return real_load(config_dir)
+
+    monkeypatch.setattr(main_module.Config, "load", staticmethod(load_with_rotate))
+    passes = a_loop_that_receives(monkeypatch, tmp_path, script, passes=4)
+    stored = json.loads((tmp_path / "device.json").read_text()).get("rotate")
+    return seen, stored, passes
+
+
+def turn(rotate):
+    display = {"v": 1} if rotate is None else {"v": 1, "rotate": rotate}
+    return json.dumps({"gameId": 2026020001, "chosenAt": 1, "display": display}).encode()
+
+
+def test_the_site_turns_the_panel_without_a_restart(tmp_path, monkeypatch):
+    seen, stored, passes = a_turning_loop(monkeypatch, tmp_path, {2: [("on_config", (turn(270), False))]})
+    assert seen == [None, 270], "the frame was not re-placed for the new orientation"
+    assert stored == 270, "the next boot would come up the old way"
+    assert len(passes) == 4, "the loop did not go on drawing after the turn"
+    assert passes[3]["display"].rotate == 270
+
+
+def test_the_same_orientation_again_is_not_a_turn(tmp_path, monkeypatch):
+    # The retained document is replayed on every reconnect.
+    seen, stored, _ = a_turning_loop(monkeypatch, tmp_path,
+                                     {1: [("on_config", (turn(270), True))], 2: [("on_config", (turn(270), True))]})
+    assert seen == [None, 270]
+    assert stored == 270
+
+
+def test_the_document_beats_device_json_and_the_card(tmp_path, monkeypatch):
+    seen, stored, _ = a_turning_loop(monkeypatch, tmp_path, {1: [("on_config", (turn(180), False))]},
+                                     rotate_in_device_json=90, card=270)
+    assert seen == [90, 180]
+    assert stored == 180
+
+
+def test_the_environment_beats_the_document(tmp_path, monkeypatch):
+    # The desktop preview's knob: somebody typed it a moment ago. The card
+    # is still brought up to date, because it is the panel's own record.
+    seen, stored, _ = a_turning_loop(monkeypatch, tmp_path, {1: [("on_config", (turn(180), False))]}, env="90")
+    assert seen == [90]
+    assert stored == 180
+
+
+def test_a_document_that_says_nothing_hands_the_decision_back_to_the_card(tmp_path, monkeypatch):
+    # "Automatic" on the site: the panel's own card, then the display's
+    # shape, decide -- and device.json says so, so the next boot agrees.
+    seen, stored, _ = a_turning_loop(monkeypatch, tmp_path, {1: [("on_config", (turn(None), False))]},
+                                     rotate_in_device_json=90, card=270)
+    assert seen == [90, 270]
+    assert stored == "auto"
+
+
+def test_a_document_that_says_nothing_to_a_panel_never_told_anything_writes_nothing(tmp_path, monkeypatch):
+    seen, stored, _ = a_turning_loop(monkeypatch, tmp_path, {1: [("on_config", (turn(None), True))]}, card=270)
+    assert seen == [270]
+    assert stored is None
+
+
+def test_a_bad_orientation_in_the_document_is_nothing_said_and_never_raises(tmp_path, monkeypatch):
+    # placement raises on 45. The rule for a setting the panel cannot read
+    # is the rule for every other one: that setting falls back, here to
+    # "nothing said", and the card and the shape decide. What matters is
+    # that the value never reaches placement and the loop keeps drawing.
+    bad = json.dumps({"gameId": 2026020001, "chosenAt": 1, "display": {"v": 1, "rotate": 45}}).encode()
+    seen, stored, passes = a_turning_loop(monkeypatch, tmp_path, {1: [("on_config", (bad, False))]},
+                                          rotate_in_device_json=90)
+    assert 45 not in seen and seen == [90, None]
+    assert stored == "auto"
+    assert len(passes) == 4, "the loop stopped drawing"
+
+
+def test_garbage_on_the_topic_leaves_the_orientation_alone(tmp_path, monkeypatch):
+    seen, stored, _ = a_turning_loop(monkeypatch, tmp_path, {1: [("on_config", (b"not json", False))]},
+                                     rotate_in_device_json=90)
+    assert seen == [90]
+    assert stored == 90
+
+
 # --- a final is timed from the end of the game (SCO-53) --------------------
 
 def ended_final(ended: datetime) -> GameState:

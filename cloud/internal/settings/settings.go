@@ -45,19 +45,56 @@ type Sleep struct {
 	Zone    string `json:"zone,omitempty"`
 }
 
+// Rotate is which way up a panel hangs: a quarter turn clockwise, one of 0,
+// 90, 180 or 270, or RotateAuto, which is how a request says "auto" and is
+// stored as nothing at all (Normalize). The panel then decides from the
+// shape of its display, or from what its own card says. The set is closed
+// because the panel's placement raises on anything else, and a value that
+// could raise there must never reach the wire.
+type Rotate int
+
+const RotateAuto Rotate = -1
+
+var rotations = map[Rotate]bool{0: true, 90: true, 180: true, 270: true}
+
+func (r *Rotate) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err == nil {
+		if s != "auto" {
+			return invalid(`rotate must be 0, 90, 180, 270 or "auto"`)
+		}
+		*r = RotateAuto
+		return nil
+	}
+	var n int
+	if err := json.Unmarshal(b, &n); err != nil || !rotations[Rotate(n)] {
+		return invalid(`rotate must be 0, 90, 180, 270 or "auto"`)
+	}
+	*r = Rotate(n)
+	return nil
+}
+
 // Settings is one layer: an account's defaults or a panel's overrides. A nil
 // field says nothing, and the layer beneath shows through.
 type Settings struct {
 	CountdownLeadMin *int   `json:"countdownLeadMin,omitempty"`
 	FinalHoldMin     *int   `json:"finalHoldMin,omitempty"`
 	Sleep            *Sleep `json:"sleep,omitempty"`
+	// Rotate is a panel's alone: which way up it hangs is a fact about one
+	// piece of glass, not a default an account could have. DecodeAccount
+	// refuses it, and Resolve reads it from the panel layer only, so a value
+	// stored on an account by some other path would still never reach a
+	// panel.
+	Rotate *Rotate `json:"rotate,omitempty"`
 }
 
-// Resolved is what a panel actually runs on. Sleep nil means none.
+// Resolved is what a panel actually runs on. Sleep nil means none; Rotate
+// nil means the panel decides.
 type Resolved struct {
 	CountdownLeadMin int
 	FinalHoldMin     int
 	Sleep            *Sleep
+	Rotate           *Rotate
 }
 
 // Source names the layer a resolved field came from, for the site to say so.
@@ -99,6 +136,16 @@ func Normalize(s Settings) (Settings, error) {
 	}
 	if s.FinalHoldMin != nil && (*s.FinalHoldMin < 0 || *s.FinalHoldMin > FinalHoldMaxMin) {
 		return Settings{}, invalid("finalHoldMin must be 0 to %d", FinalHoldMaxMin)
+	}
+	if s.Rotate != nil {
+		// A stored row is decoded through UnmarshalJSON too, so this is only
+		// reached with one of the five; "auto" is stored as nothing.
+		if !rotations[*s.Rotate] && *s.Rotate != RotateAuto {
+			return Settings{}, invalid(`rotate must be 0, 90, 180, 270 or "auto"`)
+		}
+		if *s.Rotate == RotateAuto {
+			s.Rotate = nil
+		}
 	}
 	if s.Sleep == nil {
 		return s, nil
@@ -156,6 +203,12 @@ func Resolve(account, panel Settings) (Resolved, Sources) {
 				r.Sleep = nil
 			}
 		}
+		// Orientation is the panel's own (see Settings.Rotate): an account
+		// layer that somehow carries one is not looked at.
+		if layer.from == FromPanel && layer.s.Rotate != nil {
+			rot := *layer.s.Rotate
+			r.Rotate = &rot
+		}
 	}
 	return r, src
 }
@@ -176,10 +229,14 @@ type Wire struct {
 	// Wake is the owner's hand on the switch, while it lasts. Not part of
 	// Resolved: it is not a setting, and panelconfig adds it.
 	Wake *Wake `json:"wake,omitempty"`
+	// Rotate is carried only when the owner set one. Absent, the panel
+	// decides for itself, as it did before this key existed, so a document
+	// from this build turns no panel that nobody asked to be turned.
+	Rotate *Rotate `json:"rotate,omitempty"`
 }
 
 func (r Resolved) Wire() Wire {
-	w := Wire{V: wireFormat, CountdownLeadMin: r.CountdownLeadMin, FinalHoldMin: r.FinalHoldMin}
+	w := Wire{V: wireFormat, CountdownLeadMin: r.CountdownLeadMin, FinalHoldMin: r.FinalHoldMin, Rotate: r.Rotate}
 	if r.Sleep != nil {
 		w.Sleep = &wireSleep{r.Sleep.Start, r.Sleep.End, r.Sleep.Zone}
 	}
@@ -202,6 +259,29 @@ func ViewOf(account, panel Settings) View {
 // Decode reads one layer from a request body, strictly: an unknown key is an
 // error, so a typo cannot be stored as "nothing was set".
 func Decode(body []byte) (Settings, error) {
+	s, err := decode(body)
+	if err != nil {
+		return Settings{}, err
+	}
+	return Normalize(s)
+}
+
+// DecodeAccount is Decode for an account's defaults, where orientation has
+// no meaning: which way up a panel hangs is a fact about one piece of
+// glass. The key is refused before Normalize turns "auto" into nothing, so
+// the account route cannot be used to say it at all.
+func DecodeAccount(body []byte) (Settings, error) {
+	s, err := decode(body)
+	if err != nil {
+		return Settings{}, err
+	}
+	if s.Rotate != nil {
+		return Settings{}, invalid("rotate is set on a panel, not an account")
+	}
+	return Normalize(s)
+}
+
+func decode(body []byte) (Settings, error) {
 	var s Settings
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
@@ -211,7 +291,7 @@ func Decode(body []byte) (Settings, error) {
 	if dec.More() {
 		return Settings{}, invalid("not a settings document")
 	}
-	return Normalize(s)
+	return s, nil
 }
 
 // Stored encodes a layer for a table attribute, and Load reads it back. An

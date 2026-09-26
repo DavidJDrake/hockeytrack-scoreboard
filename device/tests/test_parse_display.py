@@ -108,6 +108,38 @@ def test_it_never_raises():
         assert isinstance(parse_display(payload), Display)
 
 
+# --- which way up (SCO-34): four values, checked again here
+
+@pytest.mark.parametrize("value", [0, 90, 180, 270])
+def test_a_quarter_turn_is_read(value):
+    got = parse_display(doc({"v": 1, "countdownLeadMin": 60, "rotate": value}))
+    assert got.rotate == value
+    assert got.countdown_lead_s == 3600
+
+
+@pytest.mark.parametrize("bad", [45, -90, 360, "270", "auto", True, False, 90.0, 1.5, [90], {"deg": 90}, ""])
+def test_anything_but_a_quarter_turn_is_no_orientation(bad):
+    # display.placement raises on anything outside ROTATIONS. The API
+    # refuses the same values, but the document came over the network and
+    # the panel does not take its word for it: the value that could raise
+    # in placement is stopped here, and the settings next to it are kept.
+    got = parse_display(doc({"v": 1, "countdownLeadMin": 60, "rotate": bad}))
+    assert got.rotate is None
+    assert got.countdown_lead_s == 3600
+
+
+def test_no_rotate_key_means_the_panel_decides():
+    assert parse_display(doc({"v": 1})).rotate is None
+    assert parse_display(doc({"v": 1, "rotate": None})).rotate is None
+
+
+def test_the_orientation_never_reaches_placement_unchecked():
+    from scoreboard.display import placement
+    for bad in (45, "270", True):
+        got = parse_display(doc({"v": 1, "rotate": bad}))
+        placement((1920, 480), (480, 1920), got.rotate)  # must not raise
+
+
 # --- the site saving settings must not look like the owner pressing a button
 
 def test_a_live_publish_carrying_a_stamp_already_acted_on_is_not_a_press():

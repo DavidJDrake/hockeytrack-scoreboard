@@ -45,6 +45,8 @@ test("each call uses the documented method, path and body", async () => {
     [(api) => api.getSettings(), "GET", "/api/settings", undefined],
     [(api) => api.saveSettings({ finalHoldMin: 30 }), "PUT", "/api/settings", { finalHoldMin: 30 }],
     [(api) => api.setDisplay("t1", { sleep: { enabled: false } }), "PUT", "/api/devices/t1/display", { sleep: { enabled: false } }],
+    // Orientation rides in the same layer on the same route: no new route.
+    [(api) => api.setDisplay("t1", { rotate: 270 }), "PUT", "/api/devices/t1/display", { rotate: 270 }],
   ];
   for (const [call, method, path, body] of cases) {
     const { api, calls } = harness({ status: 200, body: {} });

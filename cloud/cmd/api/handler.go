@@ -349,7 +349,10 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 		if len(rawBody) > maxSettingsBody {
 			return fail(400, "invalid settings")
 		}
-		a, err := settings.Decode(rawBody)
+		// DecodeAccount, not Decode: an account has no orientation, and a
+		// rotate key on this route is refused rather than stored where
+		// Resolve would never read it.
+		a, err := settings.DecodeAccount(rawBody)
 		if err != nil {
 			return fail(400, "invalid settings")
 		}

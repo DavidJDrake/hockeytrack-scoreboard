@@ -1,15 +1,18 @@
 // The settings form, built out of a document. Used twice: for an account's
-// defaults and for one panel's overrides. The two differ in one thing -- what
-// a field left alone means -- and that arrives as `inheritWord`.
+// defaults and for one panel's overrides. The two differ in what a field
+// left alone means, which arrives as `inheritWord`, and in one field: a
+// panel's form asks which way up it hangs (`orientation`), an account's does
+// not, because an account has no such default and the API refuses one.
 //
 // createElement and text nodes only, through panel.js's `el`, which refuses
 // the markup properties. What happens when the form is saved belongs to the
 // caller: this module knows the shape of the form, not what the API is.
 import {
-  HOLD_CHOICES, HOLD_ZERO, LEAD_CHOICES, LEAD_ZERO, OLDER_PANELS_NOTE, SettingsError, choicesWith, durationLabel, formFrom, layerFrom, sleepLabel,
+  HOLD_CHOICES, HOLD_ZERO, LEAD_CHOICES, LEAD_ZERO, OLDER_PANELS_NOTE, ROTATE_AUTO, ROTATE_CHOICES, ROTATE_NOTE, SettingsError, choicesWith, durationLabel,
+  formFrom, layerFrom, rotateLabel, sleepLabel,
 } from "./settings.js";
 
-export function settingsForm(el, { idPrefix, layer, shownThrough, inheritWord, zones, guessedZone, busy, onSave, onError }) {
+export function settingsForm(el, { idPrefix, layer, shownThrough, inheritWord, zones, guessedZone, busy, onSave, onError, orientation = false }) {
   const form = formFrom(layer, { guessedZone });
   const id = (name) => `${idPrefix}-${name}`;
 
@@ -42,6 +45,12 @@ export function settingsForm(el, { idPrefix, layer, shownThrough, inheritWord, z
     window.hidden = mode.value !== "on";
   });
 
+  const rotate = orientation
+    ? el("select", { id: id("rotate") },
+      option(ROTATE_AUTO, rotateLabel(ROTATE_AUTO), form.rotate),
+      ...ROTATE_CHOICES.map((deg) => option(String(deg), rotateLabel(deg), form.rotate)))
+    : null;
+
   const save = el("button", { class: "btn primary", type: "submit" }, "Save");
   save.dataset.focusKey = `${idPrefix}:save`;
 
@@ -53,7 +62,10 @@ export function settingsForm(el, { idPrefix, layer, shownThrough, inheritWord, z
       if (busy()) return;
       let next;
       try {
-        next = layerFrom({ lead: lead.value, hold: hold.value, sleepMode: mode.value, start: start.value, end: end.value, zone: zone.value }, { zones: zoneOptions });
+        next = layerFrom({
+          lead: lead.value, hold: hold.value, sleepMode: mode.value, start: start.value, end: end.value, zone: zone.value,
+          rotate: rotate ? rotate.value : undefined,
+        }, { zones: zoneOptions });
       } catch (err) {
         if (!(err instanceof SettingsError)) throw err;
         onError(err.message);
@@ -68,5 +80,9 @@ export function settingsForm(el, { idPrefix, layer, shownThrough, inheritWord, z
   window,
   el("p", { class: "hint" }, "A live game is always shown, sleep hours or not. Everything else (a countdown, a final score) waits until the sleep hours end. Times are the panel's local time in the zone you choose: check it is where the panel hangs."),
   el("p", { class: "hint notice" }, OLDER_PANELS_NOTE),
+  ...(rotate ? [
+    el("div", { class: "row" }, el("label", { for: id("rotate") }, "Which way up"), rotate),
+    el("p", { class: "hint" }, ROTATE_NOTE),
+  ] : []),
   el("div", { class: "row" }, save));
 }

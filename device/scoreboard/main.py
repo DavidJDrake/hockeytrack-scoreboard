@@ -20,8 +20,8 @@ from . import buttons
 from . import enroll
 from . import screens
 from .assets import Assets
-from .config import Config, NotProvisioned, default_config_dir, parse_rotate
-from .display import Canvas, display_failure, frame_size, parse_size, placement, present
+from .config import ROTATIONS, Config, NotProvisioned, default_config_dir, parse_rotate
+from .display import Canvas, Placement, display_failure, frame_size, parse_size, placement, present
 from .link import Link
 from .model import GameState, parse_chosen_at, parse_today, parse_config
 from .netcfg import Network, NetworkError, NetworkManager, Status, owner_hint, rotate_hint
@@ -299,6 +299,11 @@ class Display:
     final_hold_s: int = 3 * 60 * 60
     sleep: Sleep | None = None
     wake: Wake | None = None
+    # Which way up the owner says this panel hangs, from the site. None is
+    # "nothing said": the panel's own card, or the shape of its display,
+    # decides, exactly as before the site could say. Not a timing, but it
+    # rides in the same document and is read at the same edge.
+    rotate: int | None = None
 
 
 # The bounds the site is held to, held again here (see parse_display).
@@ -368,6 +373,15 @@ def _sleep_from(value) -> Sleep | None:
     return Sleep(start, end, zone)
 
 
+def _rotate_from(value) -> int | None:
+    # The four quarter turns and nothing else: display.placement raises on
+    # anything else, and a document must never be able to make it. bool is
+    # an int in Python, and True is not a number of degrees.
+    if isinstance(value, bool) or not isinstance(value, int) or value not in ROTATIONS:
+        return None
+    return value
+
+
 def parse_display(payload) -> Display:
     """The owner's display settings out of a config message. Never raises.
 
@@ -420,11 +434,17 @@ def parse_display(payload) -> Display:
         wake = _wake_from(block["wake"])
         if wake is None:
             _complain_once("display:wake", "the sleep switch is not awake or asleep until a moment; following sleep hours")
+    rotate = None
+    if block.get("rotate") is not None:
+        rotate = _rotate_from(block["rotate"])
+        if rotate is None:
+            _complain_once("display:rotate", "rotate is not 0, 90, 180 or 270; deciding the orientation here")
     return Display(
         countdown_lead_s=default.countdown_lead_s if lead is None else lead * 60,
         final_hold_s=default.final_hold_s if hold is None else hold * 60,
         sleep=sleep,
         wake=wake,
+        rotate=rotate,
     )
 
 
@@ -438,11 +458,17 @@ def display_after(payload, current: Display) -> Display:
     -- the same rule the game half follows, for the same reason: garbage on
     the topic must not change what the panel is doing.
     """
+    return parse_display(payload) if readable_document(payload) else current
+
+
+def readable_document(payload) -> bool:
+    """Whether a config message is a JSON object at all: the line between a
+    document that decides things (even by saying nothing) and garbage on
+    the topic, which decides nothing."""
     try:
-        readable = isinstance(json.loads(payload), dict)
+        return isinstance(json.loads(payload), dict)
     except (ValueError, TypeError):
-        readable = False
-    return parse_display(payload) if readable else current
+        return False
 
 
 class Presentation(NamedTuple):
@@ -721,6 +747,16 @@ def chosen_rotation(device_json: int | None, setup_file, env: str | None) -> int
     if device_json is not None:
         return device_json
     return setup_file()
+
+
+def turned(screen_size: tuple[int, int], rotate: int | None) -> tuple[Canvas, Placement]:
+    """The frame to draw and where it lands on this display, for this
+    orientation. Called once at boot and again whenever the site says the
+    panel hangs the other way: the frame is sized for the turn and the next
+    frame drawn on it comes out the right way up, with no restart, no black
+    screen, and nothing else in the loop having to know."""
+    canvas = Canvas(frame_size(screen_size, rotate))
+    return canvas, placement(canvas.frame.get_size(), screen_size, rotate)
 
 
 # How far ahead of this panel's clock a game's end may claim to be and still
@@ -1211,8 +1247,8 @@ def main() -> None:
     # pairing code an unregistered panel draws is the one screen its owner
     # must be able to read. rotate_hint() opens the boot-partition file and
     # leaves it exactly as it was, the same way owner_hint() below does.
-    rotate = chosen_rotation(cfg.rotate if cfg else None, rotate_hint,
-                             os.environ.get("SCOREBOARD_ROTATE"))
+    rotate_env = os.environ.get("SCOREBOARD_ROTATE")
+    rotate = chosen_rotation(cfg.rotate if cfg else None, rotate_hint, rotate_env)
     pygame.init()
     # Open the display before anything else touches it. pygame.init() swallows
     # a display failure, and a call such as mouse.set_visible would then fail
@@ -1248,9 +1284,8 @@ def main() -> None:
         owner = owner_hint()
         log.info("no identity yet; enrolling%s", " for a named owner" if owner else "")
         enrollment_thread(default_config_dir(), owner, events, enroll_stop)
-    canvas = Canvas(frame_size(screen.get_size(), rotate))
+    canvas, place = turned(screen.get_size(), rotate)
     frame, layout = canvas.frame, canvas.layout
-    place = placement(frame.get_size(), screen.get_size(), rotate)
     log.info("pygame %s, SDL %s, %s driver, display %dx%d; frame turned %d° and drawn at %dx%d",
              pygame.version.ver, pygame.version.SDL, pygame.display.get_driver(),
              *screen.get_size(), place.rotation, *place.size)
@@ -1457,9 +1492,44 @@ def main() -> None:
                     # choice and must still be obeyed as settings.
                     new_display = display_after(item[1], display)
                     if new_display != display:
-                        log.info("display settings changed: lead %ss, hold %ss, sleep %s",
-                                 new_display.countdown_lead_s, new_display.final_hold_s, new_display.sleep)
+                        log.info("display settings changed: lead %ss, hold %ss, sleep %s, rotate %s",
+                                 new_display.countdown_lead_s, new_display.final_hold_s, new_display.sleep,
+                                 new_display.rotate)
                         display = new_display
+                    # Which way up, now that the site can say. The document's
+                    # value takes device.json's place in chosen_rotation's
+                    # order -- the file is rewritten to say the same, so the
+                    # next boot is right from its first frame -- and a
+                    # document that says nothing hands the decision back to
+                    # the card and the display's shape, as "auto" always has.
+                    # The environment still wins: it is the desktop preview's
+                    # knob, and somebody typed it a moment ago. Only for a
+                    # message that is a document: garbage on the topic
+                    # decides nothing, and the boot's own choice (which the
+                    # boot Display() knows nothing of) stays as it is. No
+                    # restart and no black frame: the next pass draws on the
+                    # new frame. chosen_rotation reads the card again for
+                    # every document (a retained replay, a settings save)
+                    # when the document says nothing and the environment is
+                    # unset: one small file open on the boot partition, and
+                    # rotate_hint swallows a failure. The consequence is
+                    # deliberate -- an owner who edits rotate= on a running
+                    # panel sees it on the next document, not the next boot.
+                    if readable_document(item[1]):
+                        if cfg:
+                            # A card that cannot be written, or an identity
+                            # damaged since boot, costs the next boot's first
+                            # frame, not this one: the turn below still happens.
+                            try:
+                                cfg.save_rotate(display.rotate)
+                            except (OSError, ValueError) as e:
+                                log.warning("could not remember the orientation on the card: %s", e)
+                        wanted = chosen_rotation(display.rotate, rotate_hint, rotate_env)
+                        if wanted != rotate:
+                            rotate = wanted
+                            canvas, place = turned(screen.get_size(), rotate)
+                            frame, layout = canvas.frame, canvas.layout
+                            log.info("frame turned %d° and drawn at %dx%d", place.rotation, *place.size)
                     gid = parse_config(item[1])
                     chosen_at = parse_chosen_at(item[1])
                     action = config_action(gid, following, retain=item[2],
