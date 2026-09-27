@@ -25,6 +25,6 @@ both, sign the next with the new key, then drop the old file. The publish job
 checks KMS's signature against the copy of this directory carried in the
 build artifact, so a swapped file here fails the release, never the fleet.
 
-Until the first key is exported this directory holds only this file, and the
-publish job refuses to release: a manifest no panel could verify is not a
-release.
+`release-2026-1.pem` was exported on 2026-09-26, the day the key was made.
+Before it existed the publish job refused to release: a manifest no panel
+could verify is not a release.

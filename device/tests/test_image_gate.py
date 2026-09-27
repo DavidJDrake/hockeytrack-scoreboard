@@ -1229,9 +1229,14 @@ def test_an_unreadable_directory_fails_closed(tmp_path):
 def test_a_release_public_key_the_repository_names_passes_byte_for_byte(tmp_path):
     # With a repository that carries release-2026-1.pem, the image must carry
     # the same bytes under /opt/scoreboard/certs/release-signing/ -- and only
-    # then. The gate is pointed at a copy of the repository for this, because
-    # the real one carries no key until the owner exports it from KMS.
+    # then. The gate is pointed at a copy of the repository with a key of its
+    # own, so the test does not depend on which keys the real one holds.
     root, boot = clean_image(tmp_path)
+    # clean_image installs the repository's real keys; this test stands in a
+    # repository of its own with a key of its own, so the image starts with
+    # none, and the first run below must say so.
+    for real in (root / "opt/scoreboard/certs/release-signing").glob("*.pem"):
+        real.unlink()
     repo = tmp_path / "repo"
     # Everything else the gate compares an image against, copied unchanged.
     for sub in ("certs", "polkit", "generators", "system.conf.d", "NetworkManager.service.d"):
