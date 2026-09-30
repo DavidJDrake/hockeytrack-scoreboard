@@ -55,9 +55,9 @@ way to ask "was this code ever valid" from the response.
 
 ## Routes
 
-All bodies and responses are JSON. All timestamps are absent — there are
-none; the API has no notion of last-seen or history (see the design doc's
-"out of scope for v1").
+All bodies and responses are JSON. The API keeps no history of its own; the
+one "last seen" it reports, on the device list, is read from AWS's fleet
+index (SCO-33), not from anything this stack recorded.
 
 ### `GET /api/devices`
 
@@ -67,11 +67,23 @@ The caller's own devices.
   ```json
   [{"thingName": "scoreboard-01", "name": "Living room", "gameId": 2026020001,
     "chosenAt": 1789871240471,
+    "lastSeen": "2026-09-30T02:11:05Z", "connected": true,
     "game": {"state": "LIVE", "start": "2026-10-01T23:00:00Z",
              "away": {"abbrev": "MTL", "score": 2}, "home": {"abbrev": "TOR", "score": 3},
              "period": {"label": "2"}, "lastSeenAt": 1789930443000}}]
   ```
   An owner with no devices gets `[]`, not an error.
+
+  `lastSeen` is when the broker last saw the panel connect or disconnect,
+  RFC 3339 in UTC, and `connected` is whether it is on the broker now. Both
+  come from AWS's fleet index (`terraform/iot.tf`; `cloud/internal/presence`)
+  and appear on this route only. `lastSeen` is **absent** when the index has
+  no record of the panel (it has never connected since indexing was turned
+  on) or the index could not be read; `connected` is always present, and
+  is `false` then. A
+  connected panel's `lastSeen` is its connect time, which can be long ago for
+  one that has simply stayed up: read `connected` first. The API's role may
+  `iot:SearchIndex` the index and nothing else about it.
 
   `chosenAt` is when the owner last chose the game, in milliseconds on the
   server's clock: the same stamp that was sent to the panel. `game` is the

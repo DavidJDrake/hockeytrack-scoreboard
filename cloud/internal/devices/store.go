@@ -68,6 +68,13 @@ type Device struct {
 	// chose the game by hand since, and the director stands aside until it
 	// is over.
 	Sent int64
+	// ReleasedBy is the owner who let this panel go through the Released
+	// list, SCO-32's everyday retirement path. Nothing writes it yet: SCO-32
+	// will, and until then it is empty on every row. The sweep
+	// (internal/sweep) reads it now so that its rule is already the final
+	// one: a panel somebody released is that path's to handle, never the
+	// backstop's.
+	ReleasedBy string
 }
 
 // Store persists Devices. Claim is the only operation that may bind an owner,
@@ -105,6 +112,10 @@ type Store interface {
 	// publishes before it records, so the panel may still receive that one
 	// document (internal/director/run.go says so where it happens).
 	MarkSent(ctx context.Context, thingName, owner string, gameID, chosenAt int64) error
+	// ListUnowned returns every device with no owner: the sweep's work list
+	// (internal/sweep, SCO-33). Claimed panels never come back from it, so
+	// the sweep's rule is enforced by the read before it is enforced in Go.
+	ListUnowned(ctx context.Context) ([]Device, error)
 }
 
 // Fake is an in-memory Store for tests.
@@ -186,6 +197,18 @@ func (f *Fake) ListScheduled(_ context.Context) ([]Device, error) {
 	var out []Device
 	for _, d := range f.items {
 		if d.Owner != "" && !d.Schedule.IsZero() {
+			out = append(out, d)
+		}
+	}
+	return out, nil
+}
+
+func (f *Fake) ListUnowned(_ context.Context) ([]Device, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []Device
+	for _, d := range f.items {
+		if d.Owner == "" {
 			out = append(out, d)
 		}
 	}

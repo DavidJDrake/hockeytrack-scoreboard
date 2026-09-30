@@ -289,6 +289,47 @@ func TestListScheduledIsTheClaimedPanelsWithSomethingAskedFor(t *testing.T) {
 	}
 }
 
+func TestListUnownedIsThePanelsNobodyHolds(t *testing.T) {
+	f, ctx := NewFake(), context.Background()
+	_ = f.Register(ctx, "scoreboard-01")
+	_ = f.Register(ctx, "scoreboard-02")
+	_ = f.Register(ctx, "scoreboard-03")
+	_ = f.Claim(ctx, "scoreboard-02", "sub-a")
+	_ = f.Claim(ctx, "scoreboard-03", "sub-b")
+	_ = f.Unbind(ctx, "scoreboard-03", "sub-b") // let go: unowned again
+	got, err := f.ListUnowned(ctx)
+	if err != nil || len(got) != 2 {
+		t.Fatalf("%+v %v", got, err)
+	}
+	for _, d := range got {
+		if d.Owner != "" {
+			t.Errorf("a claimed panel came back: %+v", d)
+		}
+	}
+}
+
+func TestWhoReleasedAPanelRoundTripsAndIsAbsentUntilWritten(t *testing.T) {
+	item, err := marshalDevice(Device{ThingName: "scoreboard-7qf2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := item["releasedBy"]; ok {
+		t.Error("a panel nobody released wrote a releasedBy attribute")
+	}
+	if got, err := unmarshalDevice(item); err != nil || got.ReleasedBy != "" {
+		t.Fatalf("no attribute: %+v %v", got, err)
+	}
+	item, _ = marshalDevice(Device{ThingName: "scoreboard-7qf2", ReleasedBy: "sub-a"})
+	if got, err := unmarshalDevice(item); err != nil || got.ReleasedBy != "sub-a" {
+		t.Fatalf("round trip: %+v %v", got, err)
+	}
+	// Anything unreadable is "not released", the stricter reading.
+	item["releasedBy"] = &types.AttributeValueMemberN{Value: "1"}
+	if got, err := unmarshalDevice(item); err != nil || got.ReleasedBy != "" {
+		t.Fatalf("damaged: %+v %v", got, err)
+	}
+}
+
 func TestMarkSentChangesTheGameTheStampAndTheMarkerAndNothingElse(t *testing.T) {
 	f, ctx := NewFake(), context.Background()
 	_ = f.Register(ctx, "scoreboard-7qf2")
