@@ -2,7 +2,8 @@
 
 4:1 bar panels report themselves over HDMI as *portrait*, taller than they
 are wide -- the first one this ran on came up as 400x1280, not the 480x1920
-these were written against, so nothing here assumes a particular size. Under
+these were written against, and the second as 440x1980 (4.5:1, longer than
+the layout rather than taller), so nothing here assumes a particular size. Under
 KMS neither the firmware's display_rotate nor SDL's kmsdrm backend will turn
 the picture for us, so it is turned here. The same arithmetic letterboxes the
 frame on an ordinary 16:9 TV, which is how the device gets bench-tested."""
@@ -44,11 +45,22 @@ MAX_FRAME_H = 600
 # half a strip is worse than none.
 STRIP_H = 120
 
+# How wide the frame may grow: the mirror of MAX_FRAME_H, for a panel LONGER
+# than 4:1. The second real panel is 440x1980 (4.5:1), which at the layout's
+# height is 2160 columns: 120 px of spare glass at each end. 2400 (5:1) is
+# where this stops. Past that the ends would be wider than a whole side
+# column of the layout, which is not a margin any more but a region with no
+# design (docs/mockups, E and F are the candidates for the 120 px case and
+# neither has been chosen), and a frame that is mostly nothing is the same
+# fault the height cap exists to avoid. Past the cap placement() letterboxes
+# the ends the way it always did.
+MAX_FRAME_W = 2400
+
 
 class Regions(NamedTuple):
     layout: tuple[int, int, int, int]  # where the 1920x480 layout is drawn
     strip: tuple[int, int, int, int] | None  # the strip under it, if there is one
-    margins: tuple[tuple[int, int, int, int], ...]  # frame rows that belong to neither
+    margins: tuple[tuple[int, int, int, int], ...]  # frame rows or columns that belong to neither
 
 
 def _turned(display: tuple[int, int], rotate: int | None) -> bool:
@@ -60,25 +72,31 @@ def _turned(display: tuple[int, int], rotate: int | None) -> bool:
 
 
 def frame_size(display: tuple[int, int], rotate: int | None) -> tuple[int, int]:
-    """The frame to draw for this display: the layout's width, and as many
-    rows as the display's own shape gives it, between the layout's 480 and
-    ``MAX_FRAME_H``.
+    """The frame to draw for this display: the layout's size, grown along
+    ONE axis to the display's own shape. A panel taller than 4:1 gets more
+    rows, up to ``MAX_FRAME_H``; a panel longer than 4:1 gets more columns,
+    up to ``MAX_FRAME_W``; a 4:1 panel gets the layout exactly. Never both,
+    because a display has one shape.
 
     The display's size is whatever the hardware reported, so it is treated as
     a claim: a zero or negative side gets the plain 4:1 frame rather than a
     division by zero or a surface pygame will not allocate. Rounded down to
-    an even number so the layout can be centred on whole rows.
+    an even number so the layout can be centred on whole rows or columns.
     """
     across, down = (display[1], display[0]) if _turned(display, rotate) else display
     if across <= 0 or down <= 0:
         return LAYOUT_W, LAYOUT_H
     rows = LAYOUT_W * down // across
-    rows = max(LAYOUT_H, min(MAX_FRAME_H, rows))
+    if rows < LAYOUT_H:
+        # Longer than 4:1: the layout's height, and the width the shape gives.
+        cols = min(MAX_FRAME_W, LAYOUT_H * across // down)
+        return cols - cols % 2, LAYOUT_H
+    rows = min(MAX_FRAME_H, rows)
     return LAYOUT_W, rows - rows % 2
 
 
-def regions(frame_h: int, strip: bool = False) -> Regions:
-    """Where things go in a frame ``frame_h`` rows tall.
+def regions(frame_h: int, strip: bool = False, frame_w: int = LAYOUT_W) -> Regions:
+    """Where things go in a frame ``frame_w`` columns by ``frame_h`` rows.
 
     Without a strip the layout sits in the middle, which on the 400x1280
     panel is exactly where the letterboxed 4:1 frame used to land. With one
@@ -86,18 +104,39 @@ def regions(frame_h: int, strip: bool = False) -> Regions:
     moves to the top and the strip takes the rows under it. A 4:1 panel gets
     the layout and nothing else, whatever is asked for: the strip is what a
     taller panel gains, never something a panel is assumed to have.
+
+    A frame wider than the layout (the 440x1980 panel: 2160 columns) keeps
+    the layout in the middle and the spare columns at each end are margins,
+    painted in the background and nothing else. That is deliberate and it is
+    not the finished design: docs/mockups has two candidates for what those
+    120 px could carry, and until the owner chooses one, plain dark ends are
+    what a longer panel shows. Nothing is drawn there that would later have
+    to be un-drawn.
     """
     if frame_h < LAYOUT_H:
         raise ValueError(f"a frame cannot be shorter than the layout, got {frame_h}")
+    if frame_w < LAYOUT_W:
+        raise ValueError(f"a frame cannot be narrower than the layout, got {frame_w}")
+    left = (frame_w - LAYOUT_W) // 2
     spare = frame_h - LAYOUT_H
     if strip and spare >= STRIP_H:
         below = LAYOUT_H + STRIP_H
-        rest = ((0, below, LAYOUT_W, frame_h - below),) if frame_h > below else ()
-        return Regions((0, 0, LAYOUT_W, LAYOUT_H), (0, LAYOUT_H, LAYOUT_W, STRIP_H), rest)
+        rest = ((0, below, frame_w, frame_h - below),) if frame_h > below else ()
+        ends = _end_columns(frame_w, 0, LAYOUT_H)
+        return Regions((left, 0, LAYOUT_W, LAYOUT_H), (0, LAYOUT_H, frame_w, STRIP_H), ends + rest)
     top = spare // 2
-    margins = tuple(r for r in ((0, 0, LAYOUT_W, top),
-                                (0, top + LAYOUT_H, LAYOUT_W, spare - top)) if r[3])
-    return Regions((0, top, LAYOUT_W, LAYOUT_H), None, margins)
+    bands = tuple(r for r in ((0, 0, frame_w, top),
+                              (0, top + LAYOUT_H, frame_w, spare - top)) if r[3])
+    return Regions((left, top, LAYOUT_W, LAYOUT_H), None, bands + _end_columns(frame_w, top, LAYOUT_H))
+
+
+def _end_columns(frame_w: int, top: int, rows: int) -> tuple[tuple[int, int, int, int], ...]:
+    """The columns at each end of the layout's rows that the layout does not
+    cover: none on a 4:1 panel, 120 each on the 440x1980 one."""
+    left = (frame_w - LAYOUT_W) // 2
+    right = frame_w - LAYOUT_W - left
+    return tuple(r for r in ((0, top, left, rows),
+                             (left + LAYOUT_W, top, right, rows)) if r[2])
 
 
 class Canvas:
@@ -112,13 +151,14 @@ class Canvas:
 
     def __init__(self, size: tuple[int, int], strip: bool = False):
         self.frame = pygame.Surface(size)
-        self.area = regions(size[1], strip)
+        self.area = regions(size[1], strip, size[0])
         self.layout = self.frame.subsurface(self.area.layout)
 
     def clear_margins(self, color) -> None:
-        """Repaint the rows that nothing draws on. Every frame, because the
-        burn-in shift scrolls the WHOLE frame and leaves up to four rows of
-        the layout in the margin, where no draw call would ever cover them."""
+        """Repaint the rows and columns that nothing draws on. Every frame,
+        because the burn-in shift scrolls the WHOLE frame and leaves up to
+        four rows or columns of the layout in a margin, where no draw call
+        would ever cover them."""
         for rect in self.area.margins:
             self.frame.fill(color, rect)
 

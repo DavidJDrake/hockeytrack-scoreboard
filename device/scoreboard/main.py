@@ -138,6 +138,13 @@ GRACE_S = 5 * 60
 # the paragraph above, and the strip that will take those rows runs to the
 # frame's bottom edge the same way the penalty bars do.
 #
+# On a panel longer than 4:1 (440x1980) the frame is wider than the layout
+# instead, with 120 columns of margin at each end. The ring's +-4 px across
+# is inside the layout's own 60 px side margins, so it never needed the
+# frame's, and it stays inside the frame on every panel: a step's reach is
+# bounded by the pattern below and by nothing the display reports.
+# test_canvas.py holds it to both.
+#
 # Schedule. Seven minutes a step: minutes rather than seconds, because at
 # 10 Hz anything faster reads as jitter from across the room, and a full
 # circuit still comes in under an hour (8 x 7 min = 56 min), so a pairing
@@ -1708,7 +1715,7 @@ def main() -> None:
                     # whose start it cannot read.
                     draw(layout, None if now_showing.show == NO_GAME else current,
                          now_ms, assets, link_ok, clock_ok=now_utc is not None,
-                         stale_s=state_age)
+                         stale_s=state_age, display=screen.get_size())
             except Exception as e:
                 # Once per distinct failure, not once per frame: at 10 Hz
                 # the second kind fills the journal in an afternoon, and the

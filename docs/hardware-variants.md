@@ -16,6 +16,24 @@ hardware's documentation and from how the image is built, and is marked so.
 Card size: 8 GB or larger. The written image is about 3.4 GB and the panel
 writes almost nothing afterwards (the journal is capped at 50 MB).
 
+## Panels
+
+The layout is drawn at 1920x480 (4:1). Bar panels report themselves over
+HDMI as portrait, and none so far has been 4:1. The frame follows the
+panel's shape along one axis (`device/scoreboard/display.py`, `frame_size`)
+and the layout is drawn unchanged in the middle of it.
+
+| Panel | Reports | Shape | Frame | The spare glass |
+|---|---|---|---|---|
+| First (2026-09-19) | 400x1280 | 3.2:1 | 1920x600 | 60 rows above and below the layout; the information strip (mock-up C, chosen) goes there |
+| Second (2026-09-25) | 440x1980 | 4.5:1 | 2160x480 | 120 columns at each end; drawn as plain margins until the owner chooses mock-up E or F (SCO-70) |
+
+A panel's own resolution is printed on the waiting-for-a-game screen, so the
+next one can be read off the glass rather than out of the journal. The frame
+is capped at 1920x600 and 2400x480: past either the frame is letterboxed on
+the display as it always was. Neither panel has been checked on the image
+that carries the wider frame yet; that check is the owner's.
+
 ## Compute Module 4
 
 **Why it should work.** Same SoC, kernel and graphics stack as the Pi 4B. The
