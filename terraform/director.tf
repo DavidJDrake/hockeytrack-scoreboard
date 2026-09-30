@@ -33,6 +33,14 @@ resource "aws_cloudwatch_log_group" "director" {
   retention_in_days = 30
 }
 
+# This role reads and writes the devices table, and HockeyTrack's
+# scoreboard-state security rule (its terraform/security-alarms.tf, section
+# 14) pages on any data event against that table by a role it does not name.
+# The director went live on 2026-09-24 without being named there and the
+# rule paged on every one of its scans, about 1,440 alerts a day, for six
+# days. Any new role that touches scoreboard-devices or
+# scoreboard-enrollments is added to that rule's allow list IN THE SAME
+# CHANGE that creates the role, in the other repository, before the apply.
 resource "aws_iam_role" "director" {
   name               = "scoreboard-director"
   assume_role_policy = data.aws_iam_policy_document.lambda_trust.json
