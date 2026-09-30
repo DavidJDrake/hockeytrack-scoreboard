@@ -457,11 +457,50 @@ DynamoDB by hand, and rate-limiting on claim attempts — called for in the
 design doc — doesn't exist, because with one hand-registered device and
 invite-only sign-up it isn't yet load-bearing.
 
-This API also has no alarms of its own. Nothing pages on a spike of 401s
-(someone hammering `POST /api/devices/claim` with guessed codes, say) or of
-5XXs (the store or the IoT publish failing under normal use). That's a real
-gap, not a deliberate one — the IoT surface of this same project has six
-alarms (see `terraform/iot-alarms.tf`), and this API has none. It's a
-reasonable next addition once this route sees real traffic; until then, the
-access log (`aws_cloudwatch_log_group.api_access`) is the only record of what
-this API has been asked to do.
+## What pages, and what still does not
+
+The API has alarms of its own (`terraform/api-alarms.tf`, SCO-21), split the
+way `terraform/iot-alarms.tf` splits them: anything that looks like somebody
+trying to get in goes to the `hockeytrack-security-alerts` topic; anything
+that means the API is broken for its owners goes to the ops topic and also
+reports recovery. Each alarm's comment states its threshold and why.
+
+To the security topic:
+
+- **A burst of 4xx across the stage** (more than 100 in five minutes): a
+  scanner walking the API, including 404s for paths that are not routes, which
+  never reach a Lambda, and 429s once the stage throttle engages.
+- **401 from the authorizer** (twenty or more in five minutes), read from the
+  access log: tokens the pool did not issue, or a dead one replayed.
+- **Refused pairing codes** (five or more in five minutes): the claim handler
+  logs one `claim refused` line per refusal with a reason — unknown, expired,
+  owner mismatch, already claimed — and never the code or the caller. The
+  route-level 4xx alarm in `terraform/enroll.tf` still stands, at a higher
+  threshold, alongside the enrollment flood and claim 5xx alarms there.
+
+To the ops topic, with recovery:
+
+- **Any 5xx across the stage**: the store refusing a read, the IoT publish
+  failing, or API Gateway unable to invoke either function. The handlers
+  answer their own failures as 500s with a nil Lambda error, so this is the
+  only metric that sees a `"lookup failed"`.
+- **Lambda `Errors` and `Throttles` on `scoreboard-api`**: a panic, a timeout,
+  or the account's shared concurrency exhausted.
+
+What still does not page, plainly: there is no WAF and no per-IP or
+per-account rate limit, so an abuser is capped only by the stage throttle
+every caller shares, and the alarms name the source address rather than block
+it. Nothing counts requests that succeed, so a stolen, still-valid token
+reading the owner's panels is invisible. And a metric filter or log group
+deleted from under an alarm is invisible to that alarm: missing data is
+`notBreaching`, so it goes quiet rather than into ALARM. The deletion itself
+is not invisible — HockeyTrack's `hockeytrack-sec-scoreboard-support` rule
+(its `security-alarms.tf`, section 13) pages on any logs write that names a
+scoreboard log group, `DeleteMetricFilter`, `PutMetricFilter`,
+`DeleteLogGroup` and `PutRetentionPolicy` included, and its section 9 pages
+when a `scoreboard-` alarm is rewritten. What nobody would see is a filter
+left in place with its pattern edited to match nothing, and only if that edit
+came through a call section 13 does not name; `PutMetricFilter` is named, so
+today even that pages. The access log (`aws_cloudwatch_log_group.api_access`)
+remains the record of what this API has been asked to do, and the first place
+every alarm's runbook sends the reader.

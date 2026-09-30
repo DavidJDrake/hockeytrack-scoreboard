@@ -291,6 +291,68 @@ func TestClaimingAnUnknownCodeIs404(t *testing.T) {
 	}
 }
 
+// Every refusal is the same 404 to the caller, so the log line is the only
+// place a run of guessed codes shows up; the scoreboard-claim-refused alarm
+// (terraform/api-alarms.tf) counts the phrase. The line must say why and
+// must not carry the code or the caller.
+func TestARefusedClaimIsLoggedByReasonWithoutTheCodeOrTheCaller(t *testing.T) {
+	h, _ := newHandler()
+	code, _ := submitFor(t, h, "owner-1@example.com")
+	// A second code minted already expired, the way the expiry tests below
+	// do it, so the "expired" reason is proved alongside the other three.
+	h.CodeTTL = -1 * time.Minute
+	stale, _ := submitFor(t, h, "owner-1@example.com")
+	h.CodeTTL = 15 * time.Minute
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	cases := []struct {
+		name   string
+		code   string
+		sub    string
+		reason string
+	}{
+		{"an unknown code", "ZZZZ2222", "owner-1", "unknown code"},
+		{"a code past its expiry", stale, "owner-1", "expired"},
+		{"somebody else's pre-bound panel", code, "owner-2", "owner mismatch"},
+	}
+	for _, c := range cases {
+		buf.Reset()
+		if got := claim(h, c.code, c.sub).StatusCode; got != 404 {
+			t.Errorf("%s: got %d, want 404", c.name, got)
+		}
+		line := buf.String()
+		if !strings.Contains(line, "claim refused") || !strings.Contains(line, c.reason) {
+			t.Errorf("%s: no refusal line with reason %q, got: %s", c.name, c.reason, line)
+		}
+		for _, secret := range []string{c.code, c.sub, "example.com"} {
+			if strings.Contains(line, secret) {
+				t.Errorf("%s: the refusal line carries %q: %s", c.name, secret, line)
+			}
+		}
+	}
+
+	// A claim that succeeds writes no refusal line, or the alarm would count
+	// legitimate pairings.
+	buf.Reset()
+	if got := claim(h, code, "owner-1").StatusCode; got != 200 {
+		t.Fatalf("the owner's claim returned %d, want 200", got)
+	}
+	if strings.Contains(buf.String(), "claim refused") {
+		t.Errorf("a successful claim logged a refusal: %s", buf.String())
+	}
+	// And replaying the consumed code is refused for its own reason.
+	buf.Reset()
+	if got := claim(h, code, "owner-1").StatusCode; got != 404 {
+		t.Errorf("replaying a claimed code returned %d, want 404", got)
+	}
+	if !strings.Contains(buf.String(), "already claimed") {
+		t.Errorf("no 'already claimed' refusal logged: %s", buf.String())
+	}
+}
+
 func TestAPreBoundPanelRefusesEverybodyElse(t *testing.T) {
 	// The shoulder-surfing case, and the reason the owner hint exists. Somebody
 	// who reads the code off the screen has an invited account of their own --
