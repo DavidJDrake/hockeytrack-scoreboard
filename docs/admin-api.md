@@ -297,7 +297,7 @@ then the rules.
 |---|---|
 | `200` | Stored. The body is the schedule with `next` (the coming kept games) and `undecided`. |
 | `400` | Malformed; a game id that is not in the season and was not already on the panel; or a resolution that keeps nothing, keeps a game from outside its conflict, or keeps two games that overlap. |
-| `404` | Not the caller's panel, or a template id (the caller has none yet; not-yours and not-there are one answer). |
+| `404` | Not the caller's panel, or a template id that is not in the caller's own list (not-yours and not-there are one answer; see Templates below). |
 | `409` | **A conflict among these games was left unanswered.** Body: `{"error","unresolved":[[ids]]}`. Nothing is stored. The owner is present, so nothing is decided for them; the default rule exists only for conflicts nobody caused. |
 | `502` | The season could not be read. Nothing is stored on a guess. |
 
@@ -307,9 +307,110 @@ is dropped. Resolutions are stored against their exact sequence and are never
 stretched to fit a different one. Releasing a panel clears its schedule with
 everything else: the next owner does not learn what the last one watched.
 
+`templates` is the panel's templates in priority order, at most five (see
+below). The conflicts checked are among every candidate game, the templates'
+included: attaching a template is the owner doing something, so an overlap
+it creates on this panel is theirs to answer before the save is stored. A
+game the panel holds itself outranks the same game from a template, and any
+template game it overlaps, while a conflict is unanswered.
+
 `GET /api/devices` carries each panel's `schedule`: `games`, `templates`,
-`resolutions`, and, when the season could be read (`known: true`), `next` and
-`undecided`. With the season down the panels are still listed.
+`resolutions`, and, when the season and the owner's templates could both be
+read (`known: true`), `next` and `undecided`. With either down the panels
+are still listed, with `known: false`: a kept set built without the template
+games in it would be untrue, so none is shown.
+
+### Templates
+
+A template is a name and a set of game ids, owned by one account, that any
+number of that account's panels may use (`cloud/internal/templates`, design
+section 4, SCO-40). A template carries no overlap resolutions of its own:
+the same template can sit beside different games on different panels, so the
+resolution that counts is the panel's.
+
+**Every read is keyed by the caller's subject.** The table's hash key is the
+owner and its range key the template id; the store's only read is a Query
+under the owner, and there is no `Get` by id in the code and no `GetItem`
+grant in the API's role (`terraform/admin.tf`). A template id from the
+client, in the path or in a panel's `templates` list, is only ever compared
+against the list the store returned for the caller. So there is no fetch by
+id on which an ownership check could be forgotten, and a template that is
+not the caller's is one that, for them, does not exist: **not-yours is a
+404, never a 403.** Two accounts holding the same id are two rows.
+
+**The server is the only judge of a game id.** Every id is checked against
+the season when the template is saved. An id that is not in the season is
+refused with a 400, never dropped quietly. On an edit, a game the template
+already held that has since left the season is over and is dropped without
+complaint, as on a panel.
+
+**Bounds**, stated in `internal/templates` and checked in this order: body
+64 KB; strict keys (an `id` in the body is an unknown key: ids are the
+server's, 24 hex characters from 12 random bytes); at most 1,500 distinct
+positive ids; a name of 1 to 40 characters, every one printable and not all
+spaces; 20 templates an account. A body over the bound is a 400 before
+anything is parsed.
+
+Templates are a record of what the owner asked for, not anything a panel
+knows about: a panel is sent one `gameId` by the director, whose kept set is
+the panel's own games and its templates' games together
+(`schedule.Candidates`). The director's role holds `Query` on the table and
+nothing else there.
+
+#### `GET /api/templates`
+
+- **200** `[{"id":"…","name":"Habs at home","games":[ids]}]`, by name then
+  id. An owner with none gets `[]`.
+
+#### `POST /api/templates`
+
+Body: `{"name":"Habs at home","games":[ids]}`.
+
+- **201** the template, with its new `id`.
+- **400** `invalid template` (shape, size, an id in the body, a duplicate or
+  non-positive game id), `invalid name`, or `unknown game` (an id not in the
+  season; nothing is stored).
+- **409** `{"error":"too many templates","max":20}`. The bound is
+  read-then-write, not a condition on the table, so two creates racing could
+  leave an account one over it; a runaway client is what the bound is for,
+  and it stops one.
+- **502** the season could not be read. Nothing is stored on a guess.
+
+#### `PUT /api/templates/{id}`
+
+Body as for `POST`; replaces the name and the games.
+
+- **200** the template, plus `panels`: every one of the caller's panels that
+  uses it, as it stands after the edit:
+  ```json
+  {"id":"…","name":"…","games":[…],
+   "panels":[{"thingName":"scoreboard-01","name":"Den","needsDecision":true,
+              "undecided":[[2026020001,2026020002]]}]}
+  ```
+  Editing a template changes what those panels show. Nothing is refused for
+  a conflict it creates: the owner is told which panels now need a decision
+  (the site takes them through those; SCO-43), and until they answer the
+  panel's own games win and it is flagged. The director is asked to run for
+  each affected panel, so the change is felt now.
+- **400**, **502** as for `POST`. **404** `no such template`: not the
+  caller's, or no such id.
+
+#### `DELETE /api/templates/{id}`
+
+- **200** `{"id":"…"}`.
+- **404** `no such template`, as above.
+- **409** `{"error":"template in use","panels":2,"thingNames":[…]}`. A
+  template a panel uses is not deleted: the panel would silently show less.
+  Detach it from every panel first. Only the caller's panels can use it,
+  since attaching one is done under the caller, so their list is the whole
+  count. No silent fallback. Like the bound on `POST`, this check is
+  read-then-write: a schedule save that attaches the template between the
+  list and the delete leaves a panel naming a template that is gone. Such a
+  panel shows less, never more (an id with no template behind it contributes
+  no games), and only the owner's own two requests can race each other.
+
+What is not here: the site pages that make and edit templates (SCO-43), and
+saved-filter templates (SCO-35). The API is what those will call.
 
 ### `PATCH /api/devices/{thing}`
 

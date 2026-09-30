@@ -6,7 +6,7 @@
 # config document; until it, exactly one could (scoreboard-api, admin.tf).
 # Its own function and its own role, so that what it may do is written down
 # here and is as little as the job needs:
-#   - read the devices, accounts and games tables;
+#   - read the devices, accounts, templates and games tables;
 #   - ONE write: the game it sent, the stamp and its own marker, on a panel's
 #     row (devices.MarkSent), and IAM below lists those attributes by name;
 #   - publish, retained, to scoreboard/*/config and no other topic.
@@ -14,10 +14,6 @@
 # the wire format still has one author. It publishes only when a panel's game
 # changes, a retry converges, and MaxPublishes (internal/director) caps one
 # run, with the alarm at the bottom of this file on reaching the cap.
-#
-# The ticket names a templates table among its reads. There is no such table
-# yet (templates are SCO-40, and the API refuses one on a schedule today), so
-# there is no grant for it here; add one when the table exists, read-only.
 
 data "archive_file" "director" {
   type             = "zip"
@@ -78,6 +74,15 @@ data "aws_iam_policy_document" "director" {
     actions   = ["dynamodb:GetItem"]
     resources = [aws_dynamodb_table.accounts.arn]
   }
+  # An owner's templates, read only (SCO-40): a panel's kept set is its own
+  # games and its templates' games together, worked out here the same way
+  # the API shows it to the owner. Query, because the table is read under
+  # the panel's owner as the hash key and no other way. The API's role is the
+  # only one that writes this table.
+  statement {
+    actions   = ["dynamodb:Query"]
+    resources = [aws_dynamodb_table.templates.arn]
+  }
   # One game's state at a time, read only: whether a kept game is live or
   # final, and when it ended. The reducer remains the only writer.
   statement {
@@ -117,11 +122,12 @@ resource "aws_lambda_function" "director" {
   reserved_concurrent_executions = 1
   environment {
     variables = {
-      DEVICES_TABLE  = aws_dynamodb_table.devices.name
-      ACCOUNTS_TABLE = aws_dynamodb_table.accounts.name
-      GAMES_TABLE    = aws_dynamodb_table.games.name
-      IOT_ENDPOINT   = "https://${data.aws_iot_endpoint.data.endpoint_address}"
-      SCHEDULE_URL   = var.schedule_url
+      DEVICES_TABLE   = aws_dynamodb_table.devices.name
+      ACCOUNTS_TABLE  = aws_dynamodb_table.accounts.name
+      TEMPLATES_TABLE = aws_dynamodb_table.templates.name
+      GAMES_TABLE     = aws_dynamodb_table.games.name
+      IOT_ENDPOINT    = "https://${data.aws_iot_endpoint.data.endpoint_address}"
+      SCHEDULE_URL    = var.schedule_url
     }
   }
   depends_on = [aws_cloudwatch_log_group.director]

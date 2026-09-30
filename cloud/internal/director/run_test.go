@@ -18,6 +18,7 @@ import (
 	"hockeytrack-scoreboard/internal/schedule"
 	"hockeytrack-scoreboard/internal/season"
 	"hockeytrack-scoreboard/internal/settings"
+	"hockeytrack-scoreboard/internal/templates"
 )
 
 // The season the run tests share: early and late tonight (they do not
@@ -381,6 +382,84 @@ func TestNothingIsSentOnAGuess(t *testing.T) {
 	h.Games = failingGames{h.games, early}
 	err := h.Run(context.Background(), "")
 	if err == nil || !strings.Contains(err.Error(), "scoreboard-01") {
+		t.Errorf("err %v", err)
+	}
+	if len(h.pub.Messages) != 1 || h.pub.Messages[0].Topic != panelconfig.Topic("scoreboard-02") {
+		t.Errorf("messages %+v", h.pub.Messages)
+	}
+}
+
+func TestAPanelsKeptSetIncludesItsTemplatesGames(t *testing.T) {
+	h := newHarness(t)
+	tp := templates.NewFake()
+	h.Templates = tp
+	ctx := context.Background()
+	// A template holding the late game and tomorrow's, attached to a panel
+	// with no games of its own: the panel is sent the template's game, the
+	// same one the API shows its owner as next.
+	_ = tp.Create(ctx, "sub-a", templates.Template{ID: "t-1", Name: "Habs", Games: []int64{late, tomorrow}})
+	h.panel(t, "scoreboard-01", "sub-a")
+	_ = h.devices.Update(ctx, devices.Device{ThingName: "scoreboard-01", Owner: "sub-a",
+		Schedule: schedule.Panel{Templates: []string{"t-1"}}})
+	if err := h.Run(ctx, ""); err != nil || len(h.pub.Messages) != 1 {
+		t.Fatalf("published %d, err %v", len(h.pub.Messages), err)
+	}
+	if got := decode(t, h.pub.Messages[0]); *got.GameID != late {
+		t.Errorf("sent %d, want the template's %d", *got.GameID, late)
+	}
+	// The stranger's slot overlaps the early game's, and neither has been
+	// seen by the reducer. From a template, the stranger loses to the early
+	// game set on the panel itself while the conflict is unanswered: the
+	// kept set is the API's, panel games winning, so the director sends the
+	// early game and never the stranger.
+	h = newHarness(t)
+	h.Templates = tp
+	_ = tp.Create(ctx, "sub-a", templates.Template{ID: "t-2", Name: "Strangers", Games: []int64{stranger}})
+	h.panel(t, "scoreboard-01", "sub-a", early)
+	_ = h.devices.Update(ctx, devices.Device{ThingName: "scoreboard-01", Owner: "sub-a",
+		Schedule: schedule.Panel{Games: []int64{early}, Templates: []string{"t-2"}}})
+	if err := h.Run(ctx, ""); err != nil || len(h.pub.Messages) != 1 {
+		t.Fatalf("published %d, err %v", len(h.pub.Messages), err)
+	}
+	if got := decode(t, h.pub.Messages[0]); *got.GameID != early {
+		t.Errorf("sent %d, want the panel's own %d", *got.GameID, early)
+	}
+	// Answered the other way, the template's game is what is sent.
+	_ = h.devices.Update(ctx, devices.Device{ThingName: "scoreboard-01", Owner: "sub-a",
+		Schedule: schedule.Panel{Games: []int64{early}, Templates: []string{"t-2"},
+			Resolutions: []schedule.Resolution{{Sequence: []int64{early, stranger}, Keep: []int64{stranger}}}}})
+	if err := h.Run(ctx, ""); err != nil || len(h.pub.Messages) != 2 {
+		t.Fatalf("published %d, err %v", len(h.pub.Messages), err)
+	}
+	if got := decode(t, h.pub.Messages[1]); *got.GameID != stranger {
+		t.Errorf("sent %d, want the answer's %d", *got.GameID, stranger)
+	}
+	// The templates table down: a panel with a template is skipped and
+	// reported, not directed from its own games as if it had none; a panel
+	// without one is still directed.
+	h = newHarness(t)
+	h.Templates = &templates.Fake{Err: errors.New("table down")}
+	h.panel(t, "scoreboard-01", "sub-a", early)
+	_ = h.devices.Update(ctx, devices.Device{ThingName: "scoreboard-01", Owner: "sub-a",
+		Schedule: schedule.Panel{Games: []int64{early}, Templates: []string{"t-1"}}})
+	h.panel(t, "scoreboard-02", "sub-a", late)
+	err := h.Run(ctx, "")
+	if err == nil || !strings.Contains(err.Error(), "scoreboard-01") || !strings.Contains(err.Error(), "templates") {
+		t.Errorf("err %v", err)
+	}
+	if len(h.pub.Messages) != 1 || h.pub.Messages[0].Topic != panelconfig.Topic("scoreboard-02") {
+		t.Errorf("messages %+v", h.pub.Messages)
+	}
+	// No templates store wired at all is the same: the panel naming one is
+	// skipped and reported, never directed from its own games alone.
+	h = newHarness(t)
+	h.Templates = nil
+	h.panel(t, "scoreboard-01", "sub-a", early)
+	_ = h.devices.Update(ctx, devices.Device{ThingName: "scoreboard-01", Owner: "sub-a",
+		Schedule: schedule.Panel{Games: []int64{early}, Templates: []string{"t-1"}}})
+	h.panel(t, "scoreboard-02", "sub-a", late)
+	err = h.Run(ctx, "")
+	if err == nil || !strings.Contains(err.Error(), "scoreboard-01") || !strings.Contains(err.Error(), "templates") {
 		t.Errorf("err %v", err)
 	}
 	if len(h.pub.Messages) != 1 || h.pub.Messages[0].Topic != panelconfig.Topic("scoreboard-02") {

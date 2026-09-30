@@ -29,6 +29,7 @@ import (
 	"hockeytrack-scoreboard/internal/idtoken"
 	"hockeytrack-scoreboard/internal/iotpub"
 	"hockeytrack-scoreboard/internal/season"
+	"hockeytrack-scoreboard/internal/templates"
 	"hockeytrack-scoreboard/internal/today"
 )
 
@@ -153,6 +154,13 @@ func main() {
 	// would save them says so.
 	if accountsTable := os.Getenv("ACCOUNTS_TABLE"); accountsTable != "" {
 		h.Accounts = accounts.NewDynamo(db, accountsTable)
+	}
+	// Optional in the same way: without it nobody has templates, the
+	// template routes say so, and a schedule that names one is not found.
+	// This role may Query, PutItem and DeleteItem on that table (admin.tf),
+	// and every call the store makes is under the caller's subject.
+	if templatesTable := os.Getenv("TEMPLATES_TABLE"); templatesTable != "" {
+		h.Templates = templates.NewDynamo(db, templatesTable)
 	}
 	// Optional too: without it a saved schedule is acted on within the
 	// minute. Asynchronous, so a slow director never holds a save; this role
