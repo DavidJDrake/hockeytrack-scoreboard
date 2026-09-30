@@ -1,6 +1,6 @@
 # Layout mock-ups for the real panel
 
-**Chosen by the owner, 2026-09-21: C, the information strip.** The rest are kept as the record of what was considered. What C needs before it can be built is at the end.
+**Chosen by the owner, 2026-09-21: C, the information strip.** The rest are kept as the record of what was considered. What C needed before it could be built is at the end, with what has since been built against it.
 
 The panel is 400x1280: **3.2:1**. The scoreboard frame is drawn at 1920x480,
 which is 4:1, so turned and scaled it lands as 1280x320 with **40 px of unused
@@ -48,3 +48,25 @@ And two things that are not data:
 
 An empty slot must look deliberate: between games, or with no other game on,
 the strip says less, never "undefined" and never yesterday's goal.
+
+## What has been built
+
+The strip is production code now: `device/scoreboard/render.py`
+(`draw_strip`, `strip_lines`) draws it on a panel whose frame is taller than
+the layout (SCO-55's `display.regions`), and `main.strip_for` decides what it
+says. This file's `render_mockups.py` is still only a picture.
+
+| Slot | Data | Panel |
+|---|---|---|
+| **Last goal** | `lastGoal.period` and `.time` in the state document (SCO-56, PR #52) | Kept per game and cleared when the game changes. A goal that arrives late is compared by period and time before it replaces the one on the strip, so an earlier goal cannot overwrite a later one; the flash follows the reducer's order and is unchanged. |
+| **Another game** | the retained `hockeytrack/games/summary` (SCO-56), under the `hockeytrack/games/*` filter the device policy already allowed | Today's other live games take turns of twenty seconds each, the panel's own skipped; finals once no live game remains; empty otherwise. The turn is stepped on the frame's clock, which the stale band freezes, so the strip freezes with it. The summary carries no `start` and only LIVE and FINAL rows; games not started are not this slot's business. |
+| **Next game** | `next: {gameId, away, home, start}` in the config document, once the director composes it (SCO-56, item 3; not yet) | Read strictly (`model.parse_next`) and drawn only when a document carries it, in the sleep-hours zone; without a zone the time is left off. Until the director writes one the slot is empty. |
+
+Every string comes off the network and is read to the cloud's own spelling
+(`model.parse_summary` holds the summary to 32 rows, two-to-four-letter
+abbreviations, scores 0-99 and a fixed set of states); a document the panel
+cannot read changes nothing and cannot stop the render loop. Each slot's text
+is fitted to its width and then drawn on the slot's own clipped surface, so
+nothing runs into the next slot or off the panel whatever it says. A 4:1
+panel has no strip and its frame is byte for byte what it was
+(`device/tests/test_canvas.py`).

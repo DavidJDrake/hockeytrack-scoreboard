@@ -23,9 +23,11 @@ from .assets import Assets
 from .config import ROTATIONS, Config, NotProvisioned, default_config_dir, parse_rotate
 from .display import Canvas, Placement, display_failure, frame_size, parse_size, placement, present
 from .link import Link
-from .model import GameState, parse_chosen_at, parse_today, parse_config
+from .model import (GameState, NextGame, StripGoal, SummaryGame, keep_goal, other_game,
+                    parse_chosen_at, parse_next, parse_summary, parse_today, parse_config)
 from .netcfg import Network, NetworkError, NetworkManager, Status, owner_hint, rotate_hint
-from .render import BG, H, STALE_FRAME_S, W, draw, shift_frame
+from .render import (BG, H, STALE_FRAME_S, W, Strip, draw, draw_strip, shift_frame,
+                     stale_frame, strip_lines)
 from .reset import factory_reset
 from .settings import Settings
 
@@ -754,9 +756,42 @@ def turned(screen_size: tuple[int, int], rotate: int | None) -> tuple[Canvas, Pl
     orientation. Called once at boot and again whenever the site says the
     panel hangs the other way: the frame is sized for the turn and the next
     frame drawn on it comes out the right way up, with no restart, no black
-    screen, and nothing else in the loop having to know."""
-    canvas = Canvas(frame_size(screen_size, rotate))
+    screen, and nothing else in the loop having to know.
+
+    The strip is asked for, and a panel with the rows for it gets one
+    (display.regions): the 3.2:1 panel this was built for. A 4:1 panel has
+    none, and its frame is byte for byte what it was (test_canvas)."""
+    canvas = Canvas(frame_size(screen_size, rotate), strip=True)
     return canvas, placement(canvas.frame.get_size(), screen_size, rotate)
+
+
+def strip_for(now_ms: int, current: GameState | None, state_age: float | None,
+              kept_goal: StripGoal | None, summary: tuple[SummaryGame, ...],
+              following: int | None, next_game: NextGame | None, display: Display) -> Strip:
+    """What the information strip says on this frame (SCO-57).
+
+    The strip obeys what the rest of the frame obeys. Off with sleep hours
+    and shifted with the burn-in shift for free: OFF is a black frame and
+    the shift moves the whole frame, strip included (main, below). Frozen
+    with the stale band by this function: the one thing on the strip that is
+    derived from the passage of time is which other game has its turn, and
+    it is stepped on the same clock draw() freezes -- the document's own
+    asOf once the band is up -- so a frame that says NO UPDATES stops
+    rotating too. A summary that does arrive while the band is up is still
+    shown, because it is true; what freezes is what the clock would have
+    changed on its own.
+
+    The last goal is only ever the game on screen's. ``kept_goal`` names
+    its game, and a goal from any other game -- including the one this
+    panel followed a moment ago -- is not shown. The next game is drawn
+    only when the config document carries one; nothing composes one yet
+    (SCO-56, item 3), so until then the third slot is empty by design.
+    """
+    at_ms = current.as_of_ms if stale_frame(current, state_age) else now_ms
+    goal = kept_goal if current is not None and kept_goal is not None \
+        and kept_goal.game_id == current.game_id else None
+    zone = display.sleep.zone if display.sleep is not None else None
+    return strip_lines(goal, other_game(summary, following, at_ms), next_game, zone)
 
 
 # How far ahead of this panel's clock a game's end may claim to be and still
@@ -1242,7 +1277,8 @@ def main() -> None:
                     on_today=lambda b: events.put(("today", b)),
                     on_link=lambda ok: events.put(("link", ok)),
                     on_config=lambda b, r: events.put(("config", b, r)),
-                    status_topics=version_topics(cfg.client_id))
+                    status_topics=version_topics(cfg.client_id),
+                    on_summary=lambda b: events.put(("summary", b)))
     # Read before the display is opened, because placement() needs it and the
     # pairing code an unregistered panel draws is the one screen its owner
     # must be able to read. rotate_hint() opens the boot-partition file and
@@ -1319,6 +1355,13 @@ def main() -> None:
     # Display, and docs/hardware-checks.md for what carrying them will touch.
     display = Display()
     today = []
+    # The strip's three sources (strip_for). The summary is the last one
+    # this panel could read, () until one arrives; the next game is None
+    # until a config document carries one; the kept goal belongs to one
+    # game, named in it, and select() clears it.
+    summary: tuple[SummaryGame, ...] = ()
+    next_game: NextGame | None = None
+    kept_goal: StripGoal | None = None
     following = cfg.load_game_id() if cfg else None
     link_ok = bool(fixture)
     # A registered panel starts with its link down -- it has not connected
@@ -1357,13 +1400,15 @@ def main() -> None:
         state_received_at = time.monotonic()
 
     def select(game_id):
-        nonlocal following, current, last_change, state_received_at, state_raw
+        nonlocal following, current, last_change, state_received_at, state_raw, kept_goal
         # The arrival time and the bytes belong to the document that has just
         # been thrown away, not to whatever arrives for the new game -- and
         # clearing them is what makes the new game's first document news
-        # even if it is somehow identical to the old game's.
+        # even if it is somehow identical to the old game's. So does the
+        # strip's last goal: it was the old game's, and the new game's first
+        # document may carry no goal at all to replace it with.
         following, current, last_change = game_id, None, time.monotonic()
-        state_received_at, state_raw = None, None
+        state_received_at, state_raw, kept_goal = None, None, None
         if cfg:
             cfg.save_game_id(game_id)
         if link:
@@ -1473,6 +1518,10 @@ def main() -> None:
                         if state_raw != item[2]:
                             state_received_at = time.monotonic()
                             state_raw = item[2]
+                        # After the document is accepted, so a document that
+                        # could not be read leaves the strip's goal as it
+                        # was, the way it leaves the frame.
+                        kept_goal = keep_goal(kept_goal, current)
                     except Exception as e:
                         # Every exception, not ValueError. The document is
                         # network input and from_json indexes, converts and
@@ -1516,6 +1565,11 @@ def main() -> None:
                     # deliberate -- an owner who edits rotate= on a running
                     # panel sees it on the next document, not the next boot.
                     if readable_document(item[1]):
+                        # The next game rides in the same document and is
+                        # read by the same rule as the settings: a document
+                        # decides it, even by leaving it out; garbage on the
+                        # topic leaves the slot as it was.
+                        next_game = parse_next(item[1])
                         if cfg:
                             # A card that cannot be written, or an identity
                             # damaged since boot, costs the next boot's first
@@ -1570,6 +1624,17 @@ def main() -> None:
                                     type(e).__name__, e)
                     else:
                         pregame_from_today()
+                elif kind == "summary":
+                    # parse_summary never raises; None is a document this
+                    # panel cannot read, which changes nothing (the same
+                    # standard as parse_display), and is said once rather
+                    # than once a minute for as long as it keeps arriving.
+                    parsed = parse_summary(item[1])
+                    if parsed is None:
+                        _complain_once("summary:unreadable",
+                                       "ignoring an unreadable games summary; the strip keeps the last one")
+                    else:
+                        summary = parsed
                 elif kind == "link":
                     link_ok = item[1]
                     # First moment it went down, not the latest: the screen
@@ -1680,6 +1745,11 @@ def main() -> None:
             # the process. A panel showing the wrong thing can be reported;
             # a panel that has exited cannot be told from dead hardware.
             canvas.clear_margins(BG)
+            # The strip goes with the scoreboard and nothing else: under a
+            # help screen or the settings screen it is painted out, and OFF
+            # is the whole frame black, strip included. Inside the guard,
+            # because everything on it is text somebody else wrote.
+            strip = None
             try:
                 if now_showing.show == OFF:
                     # Black, and that is all this change claims. Whether the
@@ -1706,9 +1776,18 @@ def main() -> None:
                     # behind it: it is what presentation says when the panel
                     # is following something it cannot show, such as a game
                     # whose start it cannot read.
-                    draw(layout, None if now_showing.show == NO_GAME else current,
-                         now_ms, assets, link_ok, clock_ok=now_utc is not None,
+                    on_screen = None if now_showing.show == NO_GAME else current
+                    draw(layout, on_screen, now_ms, assets, link_ok, clock_ok=now_utc is not None,
                          stale_s=state_age)
+                    if canvas.strip is not None:
+                        strip = strip_for(now_ms, on_screen, state_age, kept_goal, summary,
+                                          following, next_game, display)
+                        draw_strip(canvas.strip, strip, assets)
+                if canvas.strip is not None and strip is None and now_showing.show != OFF:
+                    # A help screen, or the settings screen: the strip is
+                    # painted out, every frame, for the same reason the
+                    # margins are.
+                    draw_strip(canvas.strip, None, assets)
             except Exception as e:
                 # Once per distinct failure, not once per frame: at 10 Hz
                 # the second kind fills the journal in an afternoon, and the

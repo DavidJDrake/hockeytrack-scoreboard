@@ -1,5 +1,5 @@
 """MQTT connection to AWS IoT Core: TLS with the device certificate,
-auto-reconnect, and routing of the three subscribed topics to callbacks.
+auto-reconnect, and routing of the four subscribed topics to callbacks.
 
 The device's IoT policy only allows Connect, Subscribe and Receive --
 this module must never publish. That holds even for the config topic, which
@@ -15,6 +15,13 @@ import paho.mqtt.client as mqtt
 
 log = logging.getLogger(__name__)
 TODAY = "hockeytrack/games/today"
+# One retained document with every game's score today, for the strip's
+# "another game" slot (SCO-56, SCO-57). Under hockeytrack/games/*, which the
+# device policy already allows for Subscribe and Receive (terraform/iot.tf),
+# so no policy is widened for it; a policy that refused it would cost the
+# strip one slot and nothing else, because it is asked for after the topics
+# that carry the game.
+SUMMARY = "hockeytrack/games/summary"
 
 
 def _refused(reason_code) -> bool:
@@ -90,9 +97,10 @@ def config_topic(thing_name: str) -> str:
 
 class Link:
     def __init__(self, endpoint: str, client_id: str, cert: Path, key: Path, ca: Path,
-                 on_state, on_today, on_link, on_config=None, status_topics=()) -> None:
+                 on_state, on_today, on_link, on_config=None, status_topics=(), on_summary=None) -> None:
         self.on_state, self.on_today, self.on_link = on_state, on_today, on_link
         self.on_config = on_config
+        self.on_summary = on_summary
         self._config_topic = config_topic(client_id)
         # scoreboard/<thing>/status/running/<version> and its two siblings
         # (design 8.1): subscribed to, never published to, never received
@@ -166,6 +174,10 @@ class Link:
         client.subscribe(self._config_topic, qos=1)
         if self._game is not None:
             client.subscribe(self._state_topic(self._game), qos=1)
+        # After the game's own document: the summary feeds one slot of the
+        # strip, and the game is what the panel is for.
+        if self.on_summary is not None:
+            client.subscribe(SUMMARY, qos=1)
         # QoS 0 and after the topics that matter: nothing will ever arrive on
         # these, and a broker that answers one of them with a SUBACK failure
         # (a policy without the status/* filter) must not cost the panel its
@@ -207,11 +219,11 @@ class Link:
 
     def _on_message(self, client, userdata, msg):
         self.route(msg.topic, msg.payload, self.on_state, self.on_today,
-                   self.on_config, self._config_topic, msg.retain)
+                   self.on_config, self._config_topic, msg.retain, self.on_summary)
 
     @staticmethod
     def route(topic: str, payload: bytes, on_state, on_today,
-              on_config=None, config_topic_=None, retain: bool = False) -> None:
+              on_config=None, config_topic_=None, retain: bool = False, on_summary=None) -> None:
         """Dispatch one message. ``retain`` is the flag off the wire.
 
         It matters for exactly one topic. The config topic is published
@@ -228,6 +240,10 @@ class Link:
         """
         if topic == TODAY:
             on_today(payload)
+            return
+        if topic == SUMMARY:
+            if on_summary is not None:
+                on_summary(payload)
             return
         # Exact match rather than a pattern: the broker already guarantees we
         # only receive our own config, but matching the one topic we asked for

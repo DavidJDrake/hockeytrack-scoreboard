@@ -114,6 +114,10 @@ class Canvas:
         self.frame = pygame.Surface(size)
         self.area = regions(size[1], strip)
         self.layout = self.frame.subsurface(self.area.layout)
+        # The strip's own subsurface, clipped the same way, or None on a
+        # panel with no rows for one: render.draw_strip draws on it and can
+        # no more reach the layout than the layout can reach the strip.
+        self.strip = self.frame.subsurface(self.area.strip) if self.area.strip else None
 
     def clear_margins(self, color) -> None:
         """Repaint the rows that nothing draws on. Every frame, because the

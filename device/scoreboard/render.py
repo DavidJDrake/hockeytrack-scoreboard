@@ -1,10 +1,15 @@
-"""Paint one frame of the scoreboard onto a 1920x480 surface."""
+"""Paint one frame of the scoreboard onto a 1920x480 surface, and the
+information strip under it on a panel that has the rows for one."""
 from __future__ import annotations
+
+from datetime import datetime
+from typing import NamedTuple
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pygame
 
 from .assets import Assets
-from .model import GameState, fmt_clock
+from .model import GameState, NextGame, StripGoal, SummaryGame, fmt_clock
 
 W, H = 1920, 480
 
@@ -193,6 +198,14 @@ def _stale_banner(surface, assets, stale_s: float | None, link_ok: bool) -> None
               W // 2, BANNER_TOP + BANNER_H // 2, "center")
 
 
+def stale_frame(state: GameState | None, stale_s: float | None) -> bool:
+    """Whether the frame is frozen at its document's own numbers. One rule,
+    used by draw() for the clocks and the band and by main for the strip,
+    so the strip cannot go on changing under a band that says nothing is."""
+    return (state is not None and stale_s is not None and stale_s >= STALE_FRAME_S
+            and state.state not in STATIC_STATES)
+
+
 def draw(surface: pygame.Surface, state: GameState | None, now_ms: int, assets: Assets,
          link_ok: bool = True, clock_ok: bool = True, stale_s: float | None = None) -> None:
     """Paint one frame of the scoreboard.
@@ -250,8 +263,7 @@ def draw(surface: pygame.Surface, state: GameState | None, now_ms: int, assets: 
     # The moment every derived clock is measured from. Frozen at the
     # document's own asOf once it has gone stale, so clock_at and
     # penalties_at return exactly what it said.
-    stale = (stale_s is not None and stale_s >= STALE_FRAME_S
-             and state.state not in STATIC_STATES)
+    stale = stale_frame(state, stale_s)
     clock_ms = state.as_of_ms if stale else now_ms
     # The goal flash is deliberately left on the real clock: it is a
     # three-second animation, and freezing it would leave a wash on the
@@ -302,3 +314,134 @@ def draw(surface: pygame.Surface, state: GameState | None, now_ms: int, assets: 
         _stale_banner(surface, assets, stale_s, link_ok)
     if not link_ok:
         pygame.draw.circle(surface, RED, (W - 24, 24), 8)
+
+
+# ---------------------------------------------------------------------------
+# The information strip (SCO-57, mock-up C in docs/mockups)
+#
+# A panel taller than 4:1 has rows under the layout (display.regions), and
+# this is what goes in them: one line, three slots of equal width. The layout
+# above is not touched -- on a 4:1 panel there is no strip and nothing here
+# runs -- and the strip is drawn on its own subsurface, so it cannot reach
+# the layout any more than the layout can reach it.
+#
+# Everything on it is text somebody else wrote: a team abbreviation from the
+# reducer, a score from the summary function, a matchup from the director.
+# model.py checks the spelling on the way in; here each string is fitted to
+# its slot and then drawn on the slot's own subsurface, which pygame clips,
+# so a string that will not fit at the smallest size is cut at the slot's
+# edge rather than run into the next one or off the panel. Bounded, fitted,
+# never trusted to be short.
+# ---------------------------------------------------------------------------
+
+# A shade above the frame's background, as mock-up C had it, so the strip
+# reads as a strip and not as a wider layout. The rule line at its top is
+# what separates the two; it is not inset like the layout's, because the
+# strip is the frame's own bottom edge and there is nothing beside it.
+STRIP_BG = (18, 20, 26)
+STRIP_RULE_Y = 6
+# The text's center line, in the strip's own rows. Mock-up C put it at 543
+# in a 600-row frame, which is 63 rows into a strip that starts at 480. With
+# 48 px text that is rows 39..87, and the burn-in shift only ever moves the
+# frame up, by four at most: nothing on the strip can be pushed off it.
+STRIP_TEXT_Y = 63
+STRIP_TEXT_PX, STRIP_MIN_PX = 48, 24
+# The slots start 60 px in, the same margin as the layout's rule line, and
+# each keeps 20 px clear on either side of its text.
+STRIP_MARGIN, STRIP_SLOT_PAD = 60, 20
+STRIP_SLOTS = 3
+
+DAYS = ("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN")
+
+
+class Strip(NamedTuple):
+    """The three lines, already spelled out: last goal, another game, next.
+    "" is an empty slot, drawn as nothing -- deliberately nothing, never
+    "undefined" and never yesterday's goal (docs/mockups/README.md)."""
+    goal: str
+    other: str
+    next: str
+
+
+def _ordinal(label: str) -> str:
+    """"2" -> "2ND"; "OT", "2OT" and "SO" as they are."""
+    if not label.isdigit():
+        return label
+    n = int(label)
+    return f"{n}{'ST' if n == 1 else 'ND' if n == 2 else 'RD' if n == 3 else 'TH'}"
+
+
+def _local_time(start_ms: int | None, zone: str | None) -> str:
+    """"SAT 7:00 PM" where the panel hangs, or "" when that cannot be said.
+
+    The zone is the one the owner chose for sleep hours, which is the only
+    zone this panel knows for certain; the image's own /etc/localtime is
+    whatever it was built with. Without one the time is left off rather
+    than shown in a zone that may be three hours out -- "NEXT  TOR at MTL"
+    is still true. The day names are spelled here rather than by strftime,
+    whose spelling follows the locale of whatever machine is running this.
+    """
+    if start_ms is None or not zone:
+        return ""
+    try:
+        local = datetime.fromtimestamp(start_ms / 1000, ZoneInfo(zone))
+    except (ZoneInfoNotFoundError, ValueError, TypeError, OSError, OverflowError):
+        return ""
+    hour = local.hour % 12 or 12
+    return f"{DAYS[local.weekday()]} {hour}:{local.minute:02d} {'AM' if local.hour < 12 else 'PM'}"
+
+
+def strip_lines(goal: StripGoal | None, other: SummaryGame | None,
+                nxt: NextGame | None, zone: str | None) -> Strip:
+    """Spell out the three slots. Which goal, which other game and which
+    next game is decided in main (strip_for); this only says how each reads.
+    """
+    if goal is None:
+        goal_text = ""
+    else:
+        who = " ".join(part for part in (f"#{goal.number}" if goal.number else "", goal.team) if part)
+        when = " ".join(part for part in (goal.time, _ordinal(goal.period)) if part)
+        goal_text = "  ".join(part for part in ("LAST GOAL", who, when) if part)
+    if other is None:
+        other_text = ""
+    else:
+        score = f"{other.away} {other.away_score}  {other.home} {other.home_score}"
+        if other.state == "FINAL":
+            # How it ended matters only when it went past regulation.
+            where = f"FINAL {other.period}" if other.period and not other.period.isdigit() else "FINAL"
+        else:
+            where = _ordinal(other.period) + (" INT" if other.intermission else "")
+        other_text = f"{score}  ·  {where}".rstrip(" ·")
+    if nxt is None:
+        next_text = ""
+    else:
+        next_text = "  ".join(part for part in ("NEXT", f"{nxt.away} at {nxt.home}",
+                                                _local_time(nxt.start_ms, zone)) if part)
+    return Strip(goal_text, other_text, next_text)
+
+
+def draw_strip(surface: pygame.Surface, strip: Strip | None, assets: Assets) -> None:
+    """Paint the strip. ``None`` paints the frame's background and nothing
+    else: what the strip shows under a screen that is not the scoreboard
+    (a pairing code, "no network"), where a line about last night's game
+    would be noise. The whole surface is repainted every frame, because the
+    burn-in shift scrolls the frame and would otherwise leave a copy of the
+    strip's own top rows where it used to be.
+    """
+    if strip is None:
+        surface.fill(BG)
+        return
+    w, _ = surface.get_size()
+    surface.fill(BG, (0, 0, w, STRIP_RULE_Y))
+    surface.fill(STRIP_BG, (0, STRIP_RULE_Y, w, surface.get_height() - STRIP_RULE_Y))
+    pygame.draw.line(surface, RULE, (0, STRIP_RULE_Y), (w, STRIP_RULE_Y), 2)
+    slot_w = (w - 2 * STRIP_MARGIN) // STRIP_SLOTS
+    for i, text in enumerate(strip):
+        if not text:
+            continue
+        # The slot's own subsurface: pygame clips to it, so nothing drawn
+        # here can reach the slot beside it whatever fit_px managed.
+        slot = surface.subsurface((STRIP_MARGIN + i * slot_w, 0, slot_w, surface.get_height()))
+        _text_fit(slot, assets, text, STRIP_TEXT_PX, slot_w - 2 * STRIP_SLOT_PAD,
+                  INK if i == 0 else MUTED, slot_w // 2, STRIP_TEXT_Y, "center",
+                  bold=False, min_px=STRIP_MIN_PX)

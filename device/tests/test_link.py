@@ -1,4 +1,4 @@
-from scoreboard.link import Link, config_topic
+from scoreboard.link import SUMMARY, Link, config_topic
 
 
 def test_route_dispatches_by_topic():
@@ -43,6 +43,40 @@ def test_route_without_a_config_topic_still_works():
     Link.route("hockeytrack/games/today", b"{}", on_state=lambda *a: None,
                on_today=lambda b: got.setdefault("today", b))
     assert got["today"] == b"{}"
+
+
+# --------------------------------------------------------------------------
+# The games summary (SCO-57): one retained document for the strip's
+# "another game" slot, under hockeytrack/games/* like the state documents.
+# --------------------------------------------------------------------------
+
+
+def test_route_dispatches_the_summary_to_its_own_callback():
+    got = {}
+    sink = lambda *a: got.setdefault("bad", a)
+    Link.route(SUMMARY, b'{"v":1,"games":[]}', on_state=sink, on_today=sink,
+               on_summary=lambda b: got.setdefault("summary", b))
+    assert got == {"summary": b'{"v":1,"games":[]}'}
+    # It is neither a state document (four parts, a game id) nor the today
+    # list, and a link built without the callback drops it on the floor.
+    Link.route(SUMMARY, b"{}", on_state=sink, on_today=sink)
+    assert "bad" not in got
+
+
+def test_the_summary_is_subscribed_after_the_game_and_only_when_asked_for():
+    # After the game's own document: the strip is one line and the game is
+    # what the panel is for. QoS 1 like the other retained documents, so a
+    # panel that was away is handed the current one on connect.
+    link = make_link(on_summary=lambda b: None)
+    client = FakeClient()
+    link._on_connect(client, None, {}, ReasonCode(False, "Success"))
+    assert client.subscribed == ["hockeytrack/games/today", config_topic("scoreboard-abc123"),
+                                 "hockeytrack/games/2026020001/state", SUMMARY]
+    assert client.qos[SUMMARY] == 1
+    assert SUMMARY.startswith("hockeytrack/games/"), \
+        "the device policy allows hockeytrack/games/* and nothing is widened for this"
+    _, without = connect_with(ReasonCode(False, "Success"))
+    assert SUMMARY not in without.subscribed
 
 
 # --------------------------------------------------------------------------
@@ -93,6 +127,7 @@ def test_the_flag_reaches_the_callback_off_the_wire():
     link = Link.__new__(Link)          # no socket, no TLS: only the routing
     link.on_state = link.on_today = lambda *a: None
     link.on_config = lambda payload, retain: seen.update(payload=payload, retain=retain)
+    link.on_summary = None
     link._config_topic = config_topic("scoreboard-abc123")
 
     message = mqtt.MQTTMessage(topic=link._config_topic.encode())
@@ -132,9 +167,10 @@ class FakeClient:
         return 0, mid
 
 
-def make_link(status_topics=()):
+def make_link(status_topics=(), on_summary=None):
     link = Link.__new__(Link)
     link.on_state = link.on_today = link.on_config = lambda *a: None
+    link.on_summary = on_summary
     link._config_topic = config_topic("scoreboard-abc123")
     link._game = 2026020001
     link._status_topics = tuple(status_topics)
