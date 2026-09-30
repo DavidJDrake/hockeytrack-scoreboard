@@ -207,6 +207,26 @@ Three further requirements that are not incidental:
 - **Values reach `nmcli` as list arguments from Python**, never interpolated
   into a shell command.
 
+**Recorded, not fixed (SCO-26): the pre-shared key is on `nmcli`'s command
+line.** `nmcli device wifi connect <ssid> password <psk>` is a subprocess, and
+a subprocess's argv is readable by any process on the panel in
+`/proc/<pid>/cmdline` for as long as it runs. This is inherent to driving
+`nmcli` from the command line and is accepted for this release, on three
+grounds. The exposure is bounded in time: it lasts for the one connect, at most
+`CONNECT_TIMEOUT_S` (45 s), and never for the panel's life the way the
+cleartext file on SETUP would have. It requires an attacker who already has a
+process running on the panel, and the image gives no one that — no SSH, no
+shell, no service that takes input from the network (§9.13); an attacker in
+that position reads NetworkManager's own profile store, where the same key
+lives permanently, and has no need of `/proc`. And the fix is not small: it
+means handing the key to NetworkManager over D-Bus instead of the command
+line, which is a different client library and a new dependency on a path
+that has only just been proven on hardware. Deferred until there is a reason
+to take that on. The same exposure applies to the settings screen's connect,
+which calls the same `apply()`. It does not apply to the country code or the
+SSID, which are not secrets, and it does not apply to the pairing token or the
+IoT private key, which never go through a subprocess.
+
 This path is the universal fallback: it works from any computer, at any time,
 with no keyboard and no network.
 

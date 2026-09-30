@@ -370,8 +370,64 @@ from scoreboard.netcfg import (NetworkManager, NetworkError, Network, Status,
                                split_terse, apply_boot_file)
 
 
+# nmcli options that take a value. Skipped, with their value, when the fake
+# below reads an argv for its subcommand: `-f STATE general` is the subcommand
+# `general`, not `STATE`.
+NMCLI_VALUED_OPTIONS = ("-f", "-w", "--rescan")
+# The command words this module ever puts after an nmcli object: what tells
+# the fake that `device wifi connect X` is a different call from `device
+# wifi`, and that `X` is an argument rather than yet another command.
+NMCLI_COMMAND_WORDS = frozenset({"list", "connect", "rescan", "show", "delete", "on", "off"})
+
+
+def nmcli_subcommand(args) -> list[str]:
+    """The object and command words of one nmcli argv, options removed.
+
+    ``["-t", "-f", "SSID", "device", "wifi", "list", "--rescan", "no"]`` is
+    ``["device", "wifi", "list"]``; ``["-w", "43", "device", "wifi",
+    "connect", "HomeNet", "password", "x"]`` is ``["device", "wifi",
+    "connect", "HomeNet", "password", "x"]``. The arguments after the command
+    are left in, because nothing here knows where a command's arguments
+    begin; what matters is that they can never come FIRST.
+    """
+    words: list[str] = []
+    skip = False
+    for arg in args:
+        if skip:
+            skip = False
+            continue
+        if arg in NMCLI_VALUED_OPTIONS:
+            skip = True
+            continue
+        if arg.startswith("-"):
+            continue
+        words.append(arg)
+    return words
+
+
 class FakeNmcli:
     """Stands in for nmcli. Records calls; returns canned output per subcommand.
+
+    **Keys are subcommands, matched from the front.** ``outputs`` maps a
+    space-separated nmcli subcommand -- ``"general"``, ``"device wifi"``,
+    ``"device wifi list"``, ``"connection show"`` -- to the output it should
+    return, and ``fail_on`` names one the same way. A key matches a call when
+    its words are the call's leading object-and-command words once options
+    are skipped (see nmcli_subcommand) AND the call does not go on with a
+    further command word: ``"device wifi"`` is status()'s active-SSID query
+    and nothing else, so it does not answer ``device wifi connect HomeNet``,
+    whose next word is a command, but ``"device wifi connect"`` does, because
+    ``HomeNet`` is an argument. NMCLI_COMMAND_WORDS is that distinction, and
+    it is the one piece of nmcli grammar the fake has to know.
+
+    This used to dispatch on list membership: a key matched when it appeared
+    ANYWHERE in the argv. That worked only while no test's argument values
+    happened to collide with another test's key -- an SSID called "list", a
+    field spec containing "show", or the ``"show"`` key answering both
+    ``connection show`` and ``device show`` with the same canned text. A
+    reviewer checked every combination by hand (SCO-26); a position-based
+    match makes the check unnecessary, because an argument can never be the
+    first word.
 
     It records ``timeout=`` as well as argv, and that is not bookkeeping. This
     fake ignored the timeout entirely for one round, so it could not tell a
@@ -386,21 +442,56 @@ class FakeNmcli:
         self.calls = []
         self.timeouts = []
 
+    @staticmethod
+    def _matches(key: str, words: list[str]) -> bool:
+        wanted = key.split()
+        if words[:len(wanted)] != wanted:
+            return False
+        rest = words[len(wanted):]
+        return not rest or rest[0] not in NMCLI_COMMAND_WORDS
+
     def __call__(self, args, timeout=None):
         self.calls.append(list(args))
         self.timeouts.append(timeout)
-        if self.fail_on is not None and self.fail_on in args:
+        words = nmcli_subcommand(args)
+        if self.fail_on is not None and self._matches(self.fail_on, words):
             raise NetworkError("nmcli said no")
         for key, value in self.outputs.items():
-            if key in args:
+            if self._matches(key, words):
                 return value
         return ""
 
 
-# Every setup file now has to carry a country=, so apply_boot_file calls
-# raspi-config as well as nmcli. A test that fakes only nmcli would shell out
-# to the real raspi-config, which is not on this machine and must never be run
-# by this suite even where it is.
+def test_the_fake_dispatches_on_the_subcommand_not_on_membership():
+    # The property the fake now guarantees, pinned so the next author can rely
+    # on it: an argument value that spells a key does not select that key.
+    fake = FakeNmcli({"device wifi list": "Strong:88:WPA2\n",
+                      "device wifi": "yes:HomeNet\n",
+                      "connection show": "aaa:802-11-wireless\n"})
+    assert fake(["-t", "-f", "SSID,SIGNAL,SECURITY", "device", "wifi", "list"]) == "Strong:88:WPA2\n"
+    assert fake(["-t", "-f", "SSID", "device", "wifi", "list", "--rescan", "no"]) == "Strong:88:WPA2\n"
+    assert fake(["-t", "-f", "ACTIVE,SSID", "device", "wifi"]) == "yes:HomeNet\n"
+    assert fake(["-t", "-f", "UUID,TYPE", "connection", "show"]) == "aaa:802-11-wireless\n"
+    # `device show` is not `connection show`, whatever the old fake thought.
+    assert fake(["-t", "-f", "IP4.ADDRESS", "device", "show"]) == ""
+    # An SSID that happens to be called "list" is an argument, not a command --
+    # and a connect is not the "device wifi" status query, either, however
+    # the two begin.
+    assert fake(["-w", "43", "device", "wifi", "connect", "list", "password", "show"]) == ""
+    joining = FakeNmcli({"device wifi connect": "Device 'wlan0' successfully activated.\n",
+                         "device wifi": "yes:HomeNet\n"})
+    assert joining(["-w", "43", "device", "wifi", "connect", "HomeNet"]).startswith("Device")
+    assert joining(["-t", "-f", "ACTIVE,SSID", "device", "wifi"]) == "yes:HomeNet\n"
+    failing = FakeNmcli(fail_on="device wifi connect")
+    with pytest.raises(NetworkError):
+        failing(["-w", "43", "device", "wifi", "connect", "HomeNet"])
+    assert failing(["-t", "-f", "SSID", "device", "wifi", "list"]) == ""
+
+
+# Every setup file has to carry a country= (or the panel must already have
+# one), so apply_boot_file runs `iw reg set` as well as nmcli. A test that
+# fakes only nmcli would shell out to the real iw, which must never be run by
+# this suite: the runner is injected through NetworkManager(run_reg_set=).
 NO_REG_SET = lambda args, timeout=None: ""
 
 
@@ -418,17 +509,17 @@ def test_split_terse_unescapes_backslash():
 
 
 def test_scan_sorts_by_signal_and_drops_unnamed():
-    nm = NetworkManager(run=FakeNmcli({"list": "Weak:20:WPA2\nStrong:88:WPA2\n:55:WPA2\n"}))
+    nm = NetworkManager(run=FakeNmcli({"device wifi list": "Weak:20:WPA2\nStrong:88:WPA2\n:55:WPA2\n"}))
     assert [n.ssid for n in nm.scan()] == ["Strong", "Weak"]
 
 
 def test_scan_keeps_the_strongest_of_a_repeated_ssid():
-    nm = NetworkManager(run=FakeNmcli({"list": "HomeNet:20:WPA2\nHomeNet:88:WPA2\n"}))
+    nm = NetworkManager(run=FakeNmcli({"device wifi list": "HomeNet:20:WPA2\nHomeNet:88:WPA2\n"}))
     assert [(n.ssid, n.signal) for n in nm.scan()] == [("HomeNet", 88)]
 
 
 def test_scan_marks_open_networks():
-    nm = NetworkManager(run=FakeNmcli({"list": "Open:50:\nLocked:50:WPA2\n"}))
+    nm = NetworkManager(run=FakeNmcli({"device wifi list": "Open:50:\nLocked:50:WPA2\n"}))
     assert {n.ssid: n.secured for n in nm.scan()} == {"Open": False, "Locked": True}
 
 
@@ -452,7 +543,7 @@ def test_apply_marks_a_hidden_network():
 
 
 def test_forget_all_deletes_only_wireless_connections_by_uuid():
-    fake = FakeNmcli({"show": "aaa:802-11-wireless\nbbb:ethernet\nccc:802-11-wireless\n"})
+    fake = FakeNmcli({"connection show": "aaa:802-11-wireless\nbbb:ethernet\nccc:802-11-wireless\n"})
     NetworkManager(run=fake).forget_all()
     assert [c for c in fake.calls if c[0] == "connection" and c[1] == "delete"] == [
         ["connection", "delete", "uuid", "aaa"],
@@ -462,16 +553,16 @@ def test_forget_all_deletes_only_wireless_connections_by_uuid():
 
 def test_status_reports_the_active_network():
     fake = FakeNmcli({"general": "connected\n",
-                      "wifi": "no:Neighbour\nyes:HomeNet\n",
-                      "show": "192.168.1.20/24\n"})
+                      "device wifi": "no:Neighbour\nyes:HomeNet\n",
+                      "device show": "192.168.1.20/24\n"})
     got = NetworkManager(run=fake).status()
     assert got == Status(online=True, ssid="HomeNet", ip="192.168.1.20")
 
 
 def status_fake():
     return FakeNmcli({"general": "connected\n",
-                      "wifi": "no:Neighbour\nyes:HomeNet\n",
-                      "show": "192.168.1.20/24\n"})
+                      "device wifi": "no:Neighbour\nyes:HomeNet\n",
+                      "device show": "192.168.1.20/24\n"})
 
 
 def test_the_render_loops_own_status_call_is_bounded():
@@ -608,7 +699,7 @@ def test_apply_boot_file_leaves_a_broken_file_alone(tmp_path):
 def test_apply_boot_file_leaves_the_file_when_nmcli_fails(tmp_path):
     path = tmp_path / "scoreboard-wifi.txt"
     path.write_text("ssid=HomeNet\npsk=supersecret\ncountry=US\n")
-    nm = NetworkManager(run=FakeNmcli(fail_on="connect"), run_reg_set=NO_REG_SET)
+    nm = NetworkManager(run=FakeNmcli(fail_on="device wifi connect"), run_reg_set=NO_REG_SET)
     with pytest.raises(NetworkError):
         apply_boot_file(path, nm=nm)
     assert "psk=supersecret" in path.read_text()
@@ -815,6 +906,48 @@ def test_a_setup_file_with_no_country_line_replays_the_code_saved_on_state(tmp_p
     # The radio still comes on and the connect still goes out.
     assert ["radio", "wifi", "on"] in fake.calls
     assert ["-w", "43", "device", "wifi", "connect", "HomeNet", "password", "supersecret"] in fake.calls
+
+
+def test_the_country_line_reaches_iw_through_the_injected_runner(tmp_path, monkeypatch):
+    # The country= branch of apply_boot_file, end to end, with nothing
+    # monkeypatched on the module: the seam is NetworkManager(run_reg_set=),
+    # and this is the test that proves the setup file's line comes out of it.
+    # It used to be untestable -- set_country called raspi-config with no
+    # runner, so a test of this branch shelled out for real (SCO-26).
+    monkeypatch.setattr(netcfg, "COUNTRY_FILE", tmp_path / "country")
+    path = tmp_path / "scoreboard-setup.txt"
+    path.write_text("ssid=HomeNet\npsk=supersecret\ncountry=gb\n")
+    reg_set = []
+    nm = NetworkManager(run=FakeNmcli(),
+                        run_reg_set=lambda args, timeout=None: reg_set.append((args, timeout)) or "")
+    assert apply_boot_file(path, nm=nm, now=lambda: "NOW") is True
+    assert [args for args, _ in reg_set] == [["reg", "set", "GB"]], \
+        "the file's country line did not reach iw, upper-cased, exactly once"
+    assert reg_set[0][1] is not None and reg_set[0][1] <= netcfg.REG_TIMEOUT_S, \
+        "the regulatory call on the boot path was left off the budget"
+    assert (tmp_path / "country").read_text() == "GB\n", "the code was not saved on STATE"
+
+
+def test_a_failed_country_set_leaves_the_file_unconsumed_and_never_connects(tmp_path, monkeypatch):
+    # A failure in the regulatory step propagates before the boot file is
+    # consumed, so the owner's only copy of what they meant survives -- and
+    # nothing goes on to nmcli, because a connect with the radio still blocked
+    # cannot succeed and would put a cleartext password on the command line
+    # for no reason.
+    monkeypatch.setattr(netcfg, "COUNTRY_FILE", tmp_path / "country")
+    path = tmp_path / "scoreboard-setup.txt"
+    before = "ssid=HomeNet\npsk=supersecret\ncountry=US\n"
+    path.write_text(before)
+
+    def refused(args, timeout=None):
+        raise NetworkError("iw reg set failed")
+
+    fake = FakeNmcli()
+    with pytest.raises(NetworkError):
+        apply_boot_file(path, nm=NetworkManager(run=fake, run_reg_set=refused), now=lambda: "NOW")
+    assert path.read_text() == before, "the boot file was consumed after a failed country set"
+    assert fake.calls == [], "nmcli was reached with the regulatory domain unset"
+    assert not (tmp_path / "country").exists(), "a code iw refused was saved as if it had been set"
 
 
 def test_the_radio_is_switched_on_before_connecting(tmp_path, monkeypatch):
@@ -1050,7 +1183,10 @@ class Air(FakeNmcli):
             if self.rescan_error is not None:
                 raise NetworkError(self.rescan_error)
             return ""
-        if "list" in args:
+        # Positional, like FakeNmcli: "list" and "connect" are matched as the
+        # command word, never as an SSID that happens to spell one.
+        words = nmcli_subcommand(args)
+        if words[:3] == ["device", "wifi", "list"]:
             self.lists += 1
             self.list_timeouts.append(timeout)
             self._spend(timeout)
@@ -1064,7 +1200,7 @@ class Air(FakeNmcli):
                 if self.clock() - self.started >= when:
                     names.append(ssid)
             return "".join(n.replace("\\", r"\\").replace(":", r"\:") + "\n" for n in names)
-        if "connect" in args:
+        if words[:3] == ["device", "wifi", "connect"]:
             self.connects += 1
             self.connect_timeouts.append(timeout)
             error = self.connect_errors.pop(0) if self.connect_errors else None
@@ -1361,7 +1497,7 @@ def test_a_non_ascii_ssid_survives_the_scan_and_comes_back_to_connect():
     # is scanned, shown in the settings list, and handed back to `nmcli device
     # wifi connect` byte for byte. A mangled name joins nothing.
     ssid = "Café Münster"
-    fake = FakeNmcli({"list": f"{ssid}:71:WPA2\n"})
+    fake = FakeNmcli({"device wifi list": f"{ssid}:71:WPA2\n"})
     manager = NetworkManager(run=fake)
     found = manager.scan()
     assert [n.ssid for n in found] == [ssid]
@@ -2289,7 +2425,7 @@ def test_main_does_not_replay_the_country_after_a_network_error(tmp_path, monkey
     monkeypatch.setattr(netcfg, "COUNTRY_FILE", tmp_path / "country")
     reg = []
     monkeypatch.setattr(netcfg, "_run_iw_reg_set", lambda args, timeout=None: reg.append(args) or "")
-    monkeypatch.setattr(netcfg, "_run_nmcli", FakeNmcli(fail_on="connect"))
+    monkeypatch.setattr(netcfg, "_run_nmcli", FakeNmcli(fail_on="device wifi connect"))
     with caplog.at_level("ERROR", logger="scoreboard.netcfg"):
         assert netcfg.main([]) == 0
     assert reg == [["reg", "set", "US"]], "the country is set exactly once on this path"
