@@ -227,6 +227,12 @@ panel reads `0` as a game to select. `testdata/config-documents.json` is
 composed byte for byte by the Go suite and read by the panel's own parsers in
 the device suite.
 
+Only two roles may publish it, the API's and the director's. Every accepted
+publish to a config topic is logged by an IoT rule
+(`terraform/config-publish-alarm.tf`, SCO-72), and a publish by any other
+principal pages the security topic; a publish by one of those two roles under
+a stolen credential does not, since they publish on every game change.
+
 ### `PUT /api/devices/{thing}/wake`
 
 The owner's hand on the sleep switch. Body: `{"mode":"awake"|"asleep"|"auto"}`

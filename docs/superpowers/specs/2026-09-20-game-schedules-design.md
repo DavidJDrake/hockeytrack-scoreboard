@@ -306,6 +306,19 @@ director must treat an absent id as "over", not as an error.
 - **Detection.** A publish to a config topic by any principal other than the
   API role or the director alarms. Extend the existing IoT detection; do not
   widen it.
+
+  *What shipped (SCO-42, then SCO-72).* SCO-42 extended the denied-publish
+  alarms in `terraform/iot-alarms.tf` to name the director, which covers a
+  principal the broker refuses. SCO-72 added `terraform/config-publish-alarm.tf`
+  for the principal the broker accepts: an IoT topic rule logs one line per
+  publish to `scoreboard/+/config`, and `scoreboard-config-publish-by-other`
+  pages the security topic on any principal whose user ID is not the API's or
+  the director's. What now pages: an IAM user or any third role publishing a
+  config, over HTTPS or MQTT, and the rule itself failing to log. What does
+  not: a publish by the API or the director under a compromised credential
+  (they publish on every game change and are excluded outright), and a policy
+  widened to publish retained on some other topic, which the rule does not
+  listen to. Verification is pending one deliberate publish by the owner.
 - **Blast radius of a stolen session:** an attacker can change what the
   owner's panels show to other NHL games. They cannot reach another account's
   panels or templates, and nothing here touches a certificate.
