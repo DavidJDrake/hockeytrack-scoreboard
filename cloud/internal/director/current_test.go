@@ -175,6 +175,133 @@ func TestTheOwnersOverrideWinsUntilThatGameIsOver(t *testing.T) {
 	}
 }
 
+// The strip's "up next" (SCO-56), against the same night.
+func TestTheNextGameIsTheFirstKeptGameAfterTheCurrentOne(t *testing.T) {
+	// 7:30 PM, the early game current and upcoming: the late game is next.
+	p := night()
+	if got := Next(p, clock); got != late {
+		t.Errorf("early upcoming: got %d, want %d", got, late)
+	}
+	// Live, then final and held: still the late game, and never itself.
+	p.Games[early] = Game{Start: clock.Add(-30 * time.Minute), State: "LIVE"}
+	if got := Next(p, clock); got != late {
+		t.Errorf("early live: got %d, want %d", got, late)
+	}
+	p.Games[early] = Game{Start: clock.Add(-3 * time.Hour), State: "FINAL", FinalAt: clock.Add(-10 * time.Minute)}
+	if got := Next(p, clock); got != late {
+		t.Errorf("early final and held: got %d, want %d", got, late)
+	}
+	// The late game current: tomorrow's is next, even though the early
+	// final is still inside its hold -- it is behind, not ahead.
+	p.Games[early] = Game{Start: clock.Add(-30 * time.Minute), State: "FINAL", FinalAt: clock.Add(2 * time.Hour)}
+	at := p.Games[late].Start.Add(time.Minute)
+	if got := Next(p, at); got != tomorrow {
+		t.Errorf("late current: got %d, want %d", got, tomorrow)
+	}
+}
+
+func TestNoNextGameWhenNothingIsAhead(t *testing.T) {
+	// One kept game, current: nothing after it.
+	p := night()
+	p.Kept = []int64{early}
+	if got := Next(p, clock); got != 0 {
+		t.Errorf("one game: got %d, want 0", got)
+	}
+	// The last kept game current: nothing after it either.
+	p = night()
+	if got := Next(p, clock.Add(24*time.Hour+time.Minute)); got != 0 {
+		t.Errorf("last game current: got %d, want 0", got)
+	}
+	if got := Next(Panel{}, clock); got != 0 {
+		t.Errorf("empty panel: got %d, want 0", got)
+	}
+}
+
+// Nothing current means nothing ahead: a kept game still to come is itself
+// the current game (Current's rule 4, the panel counts down to it), so the
+// only way Current says 0 is a schedule with nothing left in it. The strip
+// then has nothing to name either -- not last night's final, not the game
+// that passed unseen. Next's "after now" reading is what makes that so.
+func TestNothingCurrentMeansNothingNext(t *testing.T) {
+	p := Panel{Kept: []int64{early, late}, Games: map[int64]Game{
+		early: {Start: clock.Add(-30 * time.Hour), State: "FINAL", FinalAt: clock.Add(-28 * time.Hour)},
+		late:  {Start: clock.Add(-4 * time.Hour)},
+	}, Hold: hold, Showing: early, Sent: early}
+	if got := Current(p, clock); got != 0 {
+		t.Fatalf("the case wants nothing current, got %d", got)
+	}
+	if got := Next(p, clock); got != 0 {
+		t.Errorf("got %d, want 0", got)
+	}
+	// And the moment a game is added ahead, it is current, and next is the
+	// one after it, not it.
+	p.Kept = []int64{early, late, tomorrow}
+	p.Games[tomorrow] = Game{Start: clock.Add(24 * time.Hour)}
+	if got := Current(p, clock); got != tomorrow {
+		t.Fatalf("got %d current, want %d", got, tomorrow)
+	}
+	if got := Next(p, clock); got != 0 {
+		t.Errorf("got %d next, want 0", got)
+	}
+}
+
+// A kept game that has already started is never "next", whatever the current
+// game is doing: the strip would be naming a puck drop that has passed. The
+// early game in triple overtime is current; the late game's start went by
+// while it played, so tomorrow's game is what is next.
+func TestANextThatStartsBeforeNowIsSkipped(t *testing.T) {
+	p := night()
+	p.Games[early] = Game{Start: clock.Add(-4 * time.Hour), State: "LIVE"}
+	p.Games[late] = Game{Start: clock.Add(-10 * time.Minute)}
+	if got := Current(p, clock); got != early {
+		t.Fatalf("the case wants the live game current, got %d", got)
+	}
+	if got := Next(p, clock); got != tomorrow {
+		t.Errorf("got %d, want %d", got, tomorrow)
+	}
+	// The same with the late game already live: two live games at once.
+	p.Games[late] = Game{Start: clock.Add(-10 * time.Minute), State: "LIVE"}
+	if got := Next(p, clock); got != tomorrow {
+		t.Errorf("two live: got %d, want %d", got, tomorrow)
+	}
+}
+
+// Two kept games exactly schedule.Occupies apart: the schedule allows the
+// pair (touching exactly is not overlapping), so the second is next while the
+// first is current, upcoming or live, not the game after it.
+func TestAGameStartingExactlyAtTheCurrentOnesEndIsNext(t *testing.T) {
+	p := night()
+	touching := p.Games[early].Start.Add(schedule.Occupies)
+	p.Games[late] = Game{Start: touching, State: "PRE"}
+	if got := Next(p, clock); got != late {
+		t.Errorf("early upcoming: got %d, want %d", got, late)
+	}
+	p.Games[early] = Game{Start: clock.Add(-30 * time.Minute), State: "LIVE"}
+	if got := Next(p, clock); got != late {
+		t.Errorf("early live: got %d, want %d", got, late)
+	}
+	// And a final that ends on the second's puck drop exactly.
+	p.Games[early] = Game{Start: clock.Add(-30 * time.Minute), State: "FINAL", FinalAt: touching}
+	if got := Next(p, clock); got != late {
+		t.Errorf("early final: got %d, want %d", got, late)
+	}
+}
+
+// The owner's override is not kept and is not skipped over blindly: the next
+// game is the first kept one after the override ends.
+func TestTheNextGameAfterAnOverrideIsTheFirstKeptGameAfterIt(t *testing.T) {
+	p := night()
+	p.Games[stranger] = Game{Start: clock.Add(-time.Hour), State: "LIVE"}
+	p.Showing, p.Sent = stranger, early
+	if got := Current(p, clock); got != stranger {
+		t.Fatalf("the case wants the override current, got %d", got)
+	}
+	// Its slot ends at 9:10 PM; the late game starts at 10 PM and is next.
+	if got := Next(p, clock); got != late {
+		t.Errorf("got %d, want %d", got, late)
+	}
+}
+
 // The property the security review asks for: whatever the inputs, the rule
 // names a kept game, the game the owner put there, or nothing. Random panels
 // rather than chosen ones, so the guarantee does not rest on the cases above
@@ -203,16 +330,17 @@ func TestTheRuleNeverNamesAGameOutsideTheKeptSet(t *testing.T) {
 		if p.Showing == 999 {
 			p.Showing = 0
 		}
-		got := Current(p, clock.Add(time.Duration(rng.Intn(600)-300)*time.Minute))
-		if got == 0 || got == p.Showing {
-			continue
-		}
-		ok := false
-		for _, id := range p.Kept {
-			ok = ok || id == got
-		}
-		if !ok {
+		at := clock.Add(time.Duration(rng.Intn(600)-300) * time.Minute)
+		got := Current(p, at)
+		if got != 0 && got != p.Showing && !contains(p.Kept, got) {
 			t.Fatalf("case %d: %d is neither kept %v, showing %d nor 0", i, got, p.Kept, p.Showing)
+		}
+		// The next game is held to more: kept or nothing, never the game
+		// being sent, and always still ahead.
+		if next := Next(p, at); next != 0 {
+			if !contains(p.Kept, next) || next == got || !p.Games[next].Start.After(at) {
+				t.Fatalf("case %d: next %d with current %d, kept %v, start %v at %v", i, next, got, p.Kept, p.Games[next].Start, at)
+			}
 		}
 	}
 }

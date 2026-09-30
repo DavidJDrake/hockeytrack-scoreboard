@@ -23,7 +23,7 @@ from .assets import Assets
 from .config import ROTATIONS, Config, NotProvisioned, default_config_dir, parse_rotate
 from .display import Canvas, Placement, display_failure, frame_size, parse_size, placement, present
 from .link import Link
-from .model import GameState, parse_chosen_at, parse_today, parse_config
+from .model import GameState, NextGame, parse_chosen_at, parse_next, parse_today, parse_config
 from .netcfg import Network, NetworkError, NetworkManager, Status, owner_hint, rotate_hint
 from .render import BG, H, STALE_FRAME_S, W, draw, shift_frame
 from .reset import factory_reset
@@ -1318,6 +1318,11 @@ def main() -> None:
     # The defaults, until there is a channel to deliver anything else; see
     # Display, and docs/hardware-checks.md for what carrying them will touch.
     display = Display()
+    # The next kept game, off the same document (SCO-56). Held here for the
+    # strip to draw (SCO-57); nothing in this build draws it. None until a
+    # document says otherwise, and None again when one says nothing: the
+    # document is the whole truth each time, like the settings above.
+    next_game: NextGame | None = None
     today = []
     following = cfg.load_game_id() if cfg else None
     link_ok = bool(fixture)
@@ -1516,6 +1521,15 @@ def main() -> None:
                     # deliberate -- an owner who edits rotate= on a running
                     # panel sees it on the next document, not the next boot.
                     if readable_document(item[1]):
+                        # The next game, read strictly (parse_next): one
+                        # that is wrong in any way is dropped, and the game
+                        # and settings halves of this document are still
+                        # obeyed below. Only for a message that is a
+                        # document, for the reason rotate gives.
+                        new_next = parse_next(item[1])
+                        if new_next != next_game:
+                            log.info("next game: %s", new_next)
+                            next_game = new_next
                         if cfg:
                             # A card that cannot be written, or an identity
                             # damaged since boot, costs the next boot's first

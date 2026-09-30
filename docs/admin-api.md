@@ -217,7 +217,9 @@ whole document, because a retained message replaces what was there:
 {"gameId": 2026020001, "chosenAt": 1789871240471,
  "display": {"v":1,"countdownLeadMin":120,"finalHoldMin":180,
              "sleep":{"start":"23:00","end":"07:00","zone":"America/Toronto"},
-             "rotate":270}}
+             "rotate":270},
+ "next": {"gameId": 2026020002, "away": "MTL", "home": "TOR",
+          "start": "2026-10-15T02:00:00Z"}}
 ```
 
 `chosenAt` changes only when the owner chooses a game; every other publish
@@ -226,6 +228,28 @@ button press. A panel following nothing is sent `"gameId": null`, because a
 panel reads `0` as a game to select. `testdata/config-documents.json` is
 composed byte for byte by the Go suite and read by the panel's own parsers in
 the device suite.
+
+`next` is the panel's next kept game, for the strip's "up next": the first
+kept game whose start is after the current game's end, or after now when
+nothing is current, never the game the document names
+(`cloud/internal/director.Next`). `away` and `home` are two-to-four-letter
+club abbreviations and `start` is RFC 3339 in UTC (`Z`), as the season
+normalizes every start (`cloud/internal/season`); the panel formats it in its
+own zone. The key is **omitted**, never `null`, when there is no next
+game: a panel in the field reads the keys it knows and ignores the rest, so a
+document without the key is the document it has always had, and "no key" and
+"no next game" are one state on every panel. The panel reads it strictly --
+every field type-checked and bounded, and a `next` wrong in any way is dropped
+whole while the game and settings in the same document still apply -- so the
+cloud writes one only when it would pass that reading.
+
+Only the director fills the slot, and only when it changes a panel's game: the
+API's own publishes (a choice, a settings save, the sleep switch) carry no
+`next`, because working out a scheduled game is the director's job alone. A
+panel that got one of those is without its next game until the director's
+next publish to it, which is its next change of game; a schedule edit that
+changes the next game without changing the current one reaches the panel the
+same way. Neither is covered yet.
 
 ### `PUT /api/devices/{thing}/wake`
 
