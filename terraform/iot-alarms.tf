@@ -280,15 +280,14 @@ resource "aws_cloudwatch_metric_alarm" "iot_publish_out_auth_error" {
 # PublishIn.AuthError alarm above (MQTT) or this one (retained, over HTTPS),
 # both of which already fire on a single datapoint. That is the detection
 # for "a principal other than the API or the director published a config",
-# extended by naming the director here rather than by a new alarm. What it
-# does not cover, plainly: a principal that already holds a broad iot:Publish
+# extended by naming the director here rather than by a new alarm. What these
+# two alarms do not cover: a principal that already holds an iot:Publish
 # grant -- an administrator's own keys, or a role changed to carry one --
 # publishes successfully, and a successful data-plane publish is neither
 # logged at ERROR (iot-logging.tf) nor recorded by CloudTrail, which does not
-# log IoT data-plane calls. Turning IoT logging up to INFO would record it at
-# the cost the comment in iot-logging.tf describes; that widening is a
-# separate decision. Until then the control on that path is the IAM change
-# detection HockeyTrack's security rules provide, not this file.
+# log IoT data-plane calls. That path is config-publish-alarm.tf (SCO-72): a
+# topic rule logs every accepted publish to the config topics, and an alarm
+# pages on any principal other than these two roles.
 resource "aws_cloudwatch_metric_alarm" "iot_publish_retained_auth_error" {
   alarm_name        = "scoreboard-iot-publish-retained-auth-error"
   alarm_description = <<-EOT

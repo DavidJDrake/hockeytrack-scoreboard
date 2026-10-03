@@ -251,6 +251,12 @@ next publish to it, which is its next change of game; a schedule edit that
 changes the next game without changing the current one reaches the panel the
 same way. Neither is covered yet.
 
+Only two roles may publish the document, the API's and the director's. Every
+accepted publish to a config topic is logged by an IoT rule
+(`terraform/config-publish-alarm.tf`, SCO-72), and a publish by any other
+principal pages the security topic; a publish by one of those two roles under
+a stolen credential does not, since they publish on every game change.
+
 ### `PUT /api/devices/{thing}/wake`
 
 The owner's hand on the sleep switch. Body: `{"mode":"awake"|"asleep"|"auto"}`
