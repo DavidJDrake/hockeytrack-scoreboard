@@ -207,6 +207,26 @@ Three further requirements that are not incidental:
 - **Values reach `nmcli` as list arguments from Python**, never interpolated
   into a shell command.
 
+**Recorded, not fixed (SCO-26): the pre-shared key is on `nmcli`'s command
+line.** `nmcli device wifi connect <ssid> password <psk>` is a subprocess, and
+a subprocess's argv is readable by any process on the panel in
+`/proc/<pid>/cmdline` for as long as it runs. This is inherent to driving
+`nmcli` from the command line and is accepted for this release, on three
+grounds. The exposure is bounded in time: it lasts for the one connect, at most
+`CONNECT_TIMEOUT_S` (45 s), and never for the panel's life the way the
+cleartext file on SETUP would have. It requires an attacker who already has a
+process running on the panel, and the image gives no one that — no SSH, no
+shell, no service that takes input from the network (§9.13); an attacker in
+that position reads NetworkManager's own profile store, where the same key
+lives permanently, and has no need of `/proc`. And the fix is not small: it
+means handing the key to NetworkManager over D-Bus instead of the command
+line, which is a different client library and a new dependency on a path
+that has only just been proven on hardware. Deferred until there is a reason
+to take that on. The same exposure applies to the settings screen's connect,
+which calls the same `apply()`. It does not apply to the country code or the
+SSID, which are not secrets, and it does not apply to the pairing token or the
+IoT private key, which never go through a subprocess.
+
 This path is the universal fallback: it works from any computer, at any time,
 with no keyboard and no network.
 
@@ -447,6 +467,7 @@ on a real panel.
   - **This was never a Recommends problem.** pi-gen installs an `NN-packages` file *with* Recommends and reserves `--no-install-recommends` for `NN-packages-nr` (`build.sh` at the pinned commit), and `pi-setup.sh` does not pass the flag either. `libsdl2-2.0-0` 2.32.4+dfsg-1 simply has no `Recommends` at all. It `Depends`, among others, on `libdrm2`, `libgbm1`, `libwayland-egl1` and `libasound2t64` — that last one being why the ALSA noise existed at all, since pygame's mixer had a working libasound to go and look for a sound card with. It `Suggests` only `xdg-utils`, and dlopens the rest. A desktop image hides the gap because a desktop pulls the whole stack in for its own reasons; a Lite appliance image does not.
   - The list carries these comments in the file itself. pi-gen strips them with `scripts/remove-comments.sed` before apt sees it, and `device/tests/test_pi_gen_recipe.py` reads the file through the same rule, so the two lists can be explained without drifting apart.
 - **Where the Python code comes from.** Every dependency in `device/requirements.txt` is a Debian package from the signed trixie archive: `python3-pygame` (2.6.1, for its kmsdrm driver), `python3-cryptography` (43.0.0) and `python3-paho-mqtt` (2.1.0, which satisfies `>=2.1,<3`; checked on packages.debian.org, 2026-09-16). paho-mqtt matters most, because the service that imports it holds the panel's IoT private key. The appliance venv is made with `--system-site-packages`, and pip runs only as `pip install --no-index --no-cache-dir --disable-pip-version-check -r requirements.txt`. That confirms apt's packages satisfy the requirements, and it cannot download anything, including from the piwheels index Raspberry Pi OS configures in `/etc/pip.conf`. A missing or too-old package fails the build instead of pulling an unpinned wheel. No pip cache is written. Development checkouts (`pi-setup.sh` without `--appliance`) still install from PyPI.
+  - **CI knows those versions too (SCO-48, 2026-09-30).** Before this, CI installed `requirements.txt` from PyPI and was satisfied by any floor, so a Dependabot bump to a floor trixie cannot meet (PR #44, `cryptography>=50.0.1`) passed CI and would have failed only here, thirty-five minutes into a build. `device/debian-versions.txt` now pins each Debian-supplied package's trixie version with the date it was read; `device/tests/test_debian_floors.py` fails CI when a floor in `requirements.txt` exceeds it, and the gate (§9.3) fails a build when the real rootfs's `dpkg` version differs from the file, so the file cannot rot silently. The gate compares upstream versions, epoch and Debian revision stripped, so a security revision or binNMU does not cost a build. `.github/dependabot.yml` ignores version updates to the three Debian-supplied packages for the same reason; security advisories still surface and are read by hand against Debian's tracker.
 - **`stage-scoreboard/01-install/00-run.sh`** copies `device/` and `tools/pi-setup.sh` into the rootfs under `/tmp/scoreboard-src`, runs `pi-setup.sh --appliance` there with `on_chroot`, removes the copy, and writes `/etc/scoreboard-build` as `<version> · <UTC build date> · <short commit>`.
 
 ### 9.3 The no-secrets gate, extended
@@ -633,7 +654,7 @@ Three things are **not** yet shown, because they can only be read from the card'
 What the controls above do not cover. Each is named so it is a decision, not an oversight.
 
 - **pi-gen's Docker base image floats.** `build-docker.sh` builds from `docker.io/debian:trixie` by tag, not digest, and runs it `--privileged`. The pi-gen commit is pinned; the container it runs in is not. The build job holds no signing token for that reason (§9.4), and the gate inspects the result.
-- **Package versions float within signed archives.** pi-gen and `pi-setup.sh` install whatever version the Debian and Raspberry Pi archives serve on the day of the build. Those archives are signed, and apt verifies them. But two builds of the same tag can differ, and nothing pins or records the versions beyond the image's own `/var/lib/dpkg/status`.
+- **Package versions float within signed archives.** pi-gen and `pi-setup.sh` install whatever version the Debian and Raspberry Pi archives serve on the day of the build. Those archives are signed, and apt verifies them. But two builds of the same tag can differ, and nothing pins or records the versions beyond the image's own `/var/lib/dpkg/status` -- except the three Python packages `device/debian-versions.txt` names, whose upstream versions the gate asserts against that file (§9.2). Everything else still floats.
 - **Tools come from the runner image.** The AWS CLI and `gh` the publish job uses are whatever GitHub's `ubuntu-24.04` runner image ships, not pinned versions.
 - **The publisher role is exempt from detection.** A stolen publisher session can overwrite older `images/<v>/` objects or place files under `images/`. Neither §9.8's rule nor §9.6's monitor, which checks only the current version, sees it (§9.8).
 - **GitHub Release assets were mutable until 2026-09-17,** when immutable releases were enabled (§9.9). A release published before that date could have had an asset replaced by anyone holding `contents: write`; none existed.

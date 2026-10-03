@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from scoreboard.model import GameState, fmt_clock, parse_today, parse_config
+from scoreboard.model import GameState, NextGame, fmt_clock, parse_next, parse_today, parse_config
 
 FIX = Path(__file__).parent / "fixtures"
 
@@ -128,6 +128,55 @@ def test_parse_config_rejects_anything_malformed():
                 b'{"gameId":"2026020001"}', b'{"gameId":null}',
                 b'{"gameId":true}', b'{"other":1}']:
         assert parse_config(bad) is None, bad
+
+
+NEXT = {"gameId": 2026020102, "away": "MTL", "home": "TOR", "start": "2026-10-15T02:00:00Z"}
+
+
+def _config(next_=NEXT) -> bytes:
+    return json.dumps({"gameId": 2026020101, "chosenAt": 7, "next": next_}).encode()
+
+
+def test_parse_next_reads_a_well_formed_next_game():
+    assert parse_next(_config()) == NextGame(2026020102, "MTL", "TOR", "2026-10-15T02:00:00Z")
+    # The season's other form of a start, with an offset, is read as well.
+    assert parse_next(_config({**NEXT, "start": "2026-10-14T22:00:00-04:00"})).start == "2026-10-14T22:00:00-04:00"
+
+
+def test_an_absent_next_is_none_and_costs_nothing():
+    """Documents from before this field, and from the API's own publishes,
+    have no next key; a null one is the same."""
+    for payload in [b'{"gameId":2026020101}', _config(None)]:
+        assert parse_next(payload) is None
+        assert parse_config(payload) == 2026020101
+
+
+@pytest.mark.parametrize("bad", [
+    "not an object", [], 1,
+    {**NEXT, "gameId": None}, {**NEXT, "gameId": "2026020102"}, {**NEXT, "gameId": True},
+    {**NEXT, "gameId": 0}, {**NEXT, "gameId": -1}, {**NEXT, "gameId": 10_000_000_000},
+    {k: v for k, v in NEXT.items() if k != "gameId"},
+    {**NEXT, "away": None}, {**NEXT, "away": 7}, {**NEXT, "away": ""}, {**NEXT, "away": "mtl"},
+    {**NEXT, "away": "MONTREAL"}, {**NEXT, "away": "M"}, {**NEXT, "away": "MTL "}, {**NEXT, "away": "MTL\n"}, {**NEXT, "away": "TOR"},
+    {k: v for k, v in NEXT.items() if k != "away"},
+    {**NEXT, "home": None}, {**NEXT, "home": 7}, {**NEXT, "home": "tor"}, {**NEXT, "home": "MTLX5"},
+    {k: v for k, v in NEXT.items() if k != "home"},
+    {**NEXT, "start": None}, {**NEXT, "start": 1789871240471}, {**NEXT, "start": ""},
+    {**NEXT, "start": "tonight"}, {**NEXT, "start": "2026-10-15T02:00:00"},
+    {**NEXT, "start": "2026-10-15T02:00:00Z" + " " * 40},
+    {k: v for k, v in NEXT.items() if k != "start"},
+], ids=lambda b: json.dumps(b)[:60])
+def test_a_next_that_is_wrong_in_any_way_is_dropped_and_the_game_is_kept(bad):
+    """This arrives from the network. One bad field costs the owner the
+    strip, never the game the document names."""
+    payload = _config(bad)
+    assert parse_next(payload) is None
+    assert parse_config(payload) == 2026020101
+
+
+def test_parse_next_never_raises():
+    for payload in [b"", b"not json", b"[]", b"null", b'"a string"', b"{", None, 5]:
+        assert parse_next(payload) is None
 
 
 def _intermission(seconds=1080):

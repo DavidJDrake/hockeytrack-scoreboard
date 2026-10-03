@@ -1,0 +1,22 @@
+# The Debian trixie version of each package that device/requirements.txt
+# names and the image satisfies from Debian's signed archive instead of PyPI.
+#
+# CI installs requirements.txt from PyPI and is satisfied by any floor; the
+# image installs these python3-* packages from trixie and never reaches PyPI
+# (pip runs --no-index). Nothing connected the two, so a floor trixie cannot
+# meet (PR #44: cryptography >=50.0.1 against 43.0.0) passed CI and would
+# have failed thirty-five minutes into a release build. Two checks read this
+# file now: device/tests/test_debian_floors.py fails CI when a floor in
+# requirements.txt is above the version here, and tools/image-gate.sh fails a
+# build when the version dpkg actually installed differs from the one here,
+# so this file cannot rot silently once a Debian point release moves one.
+#
+# One line per package: <pip name> <Debian package> <Debian version> <date
+# read>. The Debian version is the full binary version as
+# packages.debian.org/trixie/<package> shows it; the readers strip the epoch
+# and the Debian revision to compare upstream versions, so a security
+# revision (43.0.0-3+deb13u1 -> deb13u2) or a binNMU (+b1) is not a change
+# in what pip sees.
+cryptography python3-cryptography 43.0.0-3+deb13u1 2026-09-30
+paho-mqtt python3-paho-mqtt 2.1.0-1 2026-09-30
+pygame python3-pygame 2.6.1-1 2026-09-30

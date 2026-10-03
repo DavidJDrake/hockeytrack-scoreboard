@@ -35,6 +35,47 @@ def test_draw_live_frame_paints_team_colours_and_clock():
     assert any(max(c) > 200 for c in centre), "clock digits not drawn"
 
 
+def test_the_waiting_screen_says_what_size_the_display_reported():
+    # The one line that lets a new panel's resolution be read off the glass
+    # instead of the card (SCO-70). Something is drawn under the waiting
+    # line where nothing was before, and it is the display's own numbers.
+    from scoreboard.render import display_line
+    assert display_line((440, 1980)) == "440 x 1980  (4.5:1)"
+    assert display_line((1980, 440)) == "1980 x 440  (4.5:1)"
+    assert display_line((400, 1280)) == "400 x 1280  (3.2:1)"
+    assert display_line((0, 1280)) == "0 x 1280"   # the hardware's claim, not a division by zero
+    without, with_size, assets = surface(), surface(), Assets()
+    draw(without, None, 0, assets)
+    draw(with_size, None, 0, assets, display=(440, 1980))
+    band = pygame.Rect(0, H // 2 + 100, W, 70)
+    assert pygame.image.tostring(without.subsurface(band), "RGB") == bg_bytes(band)
+    assert pygame.image.tostring(with_size.subsurface(band), "RGB") != bg_bytes(band)
+    # Nothing else moved: above the band the two screens are identical.
+    above = pygame.Rect(0, 0, W, band.top)
+    assert pygame.image.tostring(without.subsurface(above), "RGB") == \
+        pygame.image.tostring(with_size.subsurface(above), "RGB")
+
+
+def test_the_display_size_appears_only_on_the_waiting_screen():
+    assets = Assets()
+    for name in ("state_live.json", "state_pre.json"):
+        s = GameState.from_json((FIX / name).read_bytes())
+        plain, sized = surface(), surface()
+        draw(plain, s, s.as_of_ms, assets)
+        draw(sized, s, s.as_of_ms, assets, display=(440, 1980))
+        assert pygame.image.tostring(plain, "RGB") == pygame.image.tostring(sized, "RGB"), \
+            f"{name} changed when the display size was given"
+
+
+def test_a_size_line_with_no_display_draws_exactly_what_it_drew_before():
+    # A caller that says nothing about the display gets the old screen byte
+    # for byte, which is what test_canvas's equivalence rests on.
+    a, b, assets = surface(), surface(), Assets()
+    draw(a, None, 0, assets)
+    draw(b, None, 0, assets, display=None)
+    assert pygame.image.tostring(a, "RGB") == pygame.image.tostring(b, "RGB")
+
+
 def test_draw_handles_every_state_without_error():
     surf, assets = surface(), Assets()
     for name in ("state_live.json", "state_pre.json"):

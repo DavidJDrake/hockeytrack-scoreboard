@@ -23,7 +23,7 @@ from .assets import Assets
 from .config import ROTATIONS, Config, NotProvisioned, default_config_dir, parse_rotate
 from .display import Canvas, Placement, display_failure, frame_size, parse_size, placement, present
 from .link import Link
-from .model import GameState, parse_chosen_at, parse_today, parse_config
+from .model import GameState, NextGame, parse_chosen_at, parse_next, parse_today, parse_config
 from .netcfg import Network, NetworkError, NetworkManager, Status, owner_hint, rotate_hint
 from .render import BG, H, STALE_FRAME_S, W, draw, shift_frame
 from .reset import factory_reset
@@ -137,6 +137,13 @@ GRACE_S = 5 * 60
 # goes down: it is one ring for every panel, a 4:1 panel is still bound by
 # the paragraph above, and the strip that will take those rows runs to the
 # frame's bottom edge the same way the penalty bars do.
+#
+# On a panel longer than 4:1 (440x1980) the frame is wider than the layout
+# instead, with 120 columns of margin at each end. The ring's +-4 px across
+# is inside the layout's own 60 px side margins, so it never needed the
+# frame's, and it stays inside the frame on every panel: a step's reach is
+# bounded by the pattern below and by nothing the display reports.
+# test_canvas.py holds it to both.
 #
 # Schedule. Seven minutes a step: minutes rather than seconds, because at
 # 10 Hz anything faster reads as jitter from across the room, and a full
@@ -1318,6 +1325,11 @@ def main() -> None:
     # The defaults, until there is a channel to deliver anything else; see
     # Display, and docs/hardware-checks.md for what carrying them will touch.
     display = Display()
+    # The next kept game, off the same document (SCO-56). Held here for the
+    # strip to draw (SCO-57); nothing in this build draws it. None until a
+    # document says otherwise, and None again when one says nothing: the
+    # document is the whole truth each time, like the settings above.
+    next_game: NextGame | None = None
     today = []
     following = cfg.load_game_id() if cfg else None
     link_ok = bool(fixture)
@@ -1516,6 +1528,15 @@ def main() -> None:
                     # deliberate -- an owner who edits rotate= on a running
                     # panel sees it on the next document, not the next boot.
                     if readable_document(item[1]):
+                        # The next game, read strictly (parse_next): one
+                        # that is wrong in any way is dropped, and the game
+                        # and settings halves of this document are still
+                        # obeyed below. Only for a message that is a
+                        # document, for the reason rotate gives.
+                        new_next = parse_next(item[1])
+                        if new_next != next_game:
+                            log.info("next game: %s", new_next)
+                            next_game = new_next
                         if cfg:
                             # A card that cannot be written, or an identity
                             # damaged since boot, costs the next boot's first
@@ -1708,7 +1729,7 @@ def main() -> None:
                     # whose start it cannot read.
                     draw(layout, None if now_showing.show == NO_GAME else current,
                          now_ms, assets, link_ok, clock_ok=now_utc is not None,
-                         stale_s=state_age)
+                         stale_s=state_age, display=screen.get_size())
             except Exception as e:
                 # Once per distinct failure, not once per frame: at 10 Hz
                 # the second kind fills the journal in an afternoon, and the
