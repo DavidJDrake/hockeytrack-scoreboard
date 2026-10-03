@@ -2628,3 +2628,245 @@ def test_finalAt_is_a_positive_whole_number_or_it_is_nothing(value, want):
     if value is not None:
         doc["finalAt"] = value
     assert GameState.from_json(json.dumps(doc)).final_at_ms == want
+
+
+# --------------------------------------------------------------------------
+# The information strip (SCO-57)
+#
+# What the strip says is decided by strip_for and drawn by render.draw_strip
+# on the strip's own surface. The rule it lives by: the strip obeys what the
+# rest of the frame obeys -- frozen with the stale band, off with sleep
+# hours, shifted with the burn-in shift -- and nothing on it is anything but
+# the game on screen's, a game from the summary, or the next game the config
+# document names.
+# --------------------------------------------------------------------------
+
+from scoreboard.main import strip_for  # noqa: E402
+from scoreboard.model import OTHER_GAME_ROTATE_S, StripGoal, SummaryGame, keep_goal, parse_next  # noqa: E402
+from scoreboard.render import Strip  # noqa: E402
+
+BOS_MTL = SummaryGame(2026020002, "BOS", "MTL", 2, 1, "LIVE", "3", False)
+CHI_FLA = SummaryGame(2026020003, "CHI", "FLA", 0, 0, "LIVE", "1", False)
+SUMMARY = (BOS_MTL, CHI_FLA)
+GOAL = StripGoal(2026020001, "TBL", 86, "2", "12:41")
+STEP_MS = OTHER_GAME_ROTATE_S * 1000
+
+
+def strip_at(now_ms, state=None, state_age=0.0, goal=GOAL, summary=SUMMARY, following=2026020001,
+             next_game=None, display=DEFAULTS):
+    return strip_for(now_ms, state if state is not None else live_state(), state_age, goal, summary,
+                     following, next_game, display)
+
+
+def test_the_strip_rotates_on_a_fresh_frame_and_freezes_with_the_stale_band():
+    # Fresh: the other game takes its turn on the frame's clock. Stale: the
+    # clock is the document's own asOf, the same one draw() freezes the
+    # period clock at, so the slot stops changing along with everything
+    # else that the passage of time would have moved.
+    t0 = live_state().as_of_ms
+    fresh = [strip_at(t0 + k * STEP_MS).other for k in range(3)]
+    assert fresh[0] != fresh[1] and fresh[0] == fresh[2], fresh
+    stale = [strip_at(t0 + k * STEP_MS, state_age=STALE_FRAME_S + k * OTHER_GAME_ROTATE_S).other for k in range(3)]
+    assert len(set(stale)) == 1, stale
+    assert stale[0] == strip_at(t0, state_age=0.0).other, "frozen at the document's own moment"
+
+
+def test_a_final_never_freezes_the_strip():
+    # A final stops updating -- that is what a final is -- and its age says
+    # nothing, so the strip goes on taking turns under it.
+    t0 = final_state().as_of_ms
+    turns = {strip_at(t0 + k * STEP_MS, state=final_state(), state_age=3 * 3600.0).other for k in range(2)}
+    assert len(turns) == 2
+
+
+def test_the_other_game_skips_the_panels_own_and_empties_when_nothing_is_on():
+    own = SummaryGame(2026020001, "TBL", "NYR", 2, 1, "LIVE", "2", False)
+    assert strip_at(0, summary=(own, BOS_MTL)).other == "BOS 2  MTL 1  ·  3RD"
+    assert strip_at(0, summary=(own,)).other == ""
+    assert strip_at(0, summary=()).other == ""
+
+
+def test_the_last_goal_is_only_ever_the_game_on_screens():
+    assert strip_at(0).goal == "LAST GOAL  #86 TBL  12:41 2ND"
+    elsewhere = StripGoal(2026020009, "BOS", 63, "1", "05:00")
+    assert strip_at(0, goal=elsewhere).goal == "", "a goal from another game"
+    assert strip_at(0, goal=None).goal == ""
+
+
+def test_no_game_on_screen_means_no_goal_but_still_the_other_games():
+    # The no-game screen (a game whose start the panel cannot read, say):
+    # the strip has no game to show a goal for, and every other line is
+    # still true.
+    got = strip_for(0, None, None, GOAL, SUMMARY, 2026020001, None, DEFAULTS)
+    assert got.goal == "" and got.other != ""
+
+
+def test_the_next_games_time_follows_the_sleep_hours_zone():
+    # 23:00Z on a Saturday: 7 PM where the owner set sleep hours in Toronto,
+    # 4 PM in Los Angeles, and no time at all when nothing said where.
+    nxt = parse_next(b'{"gameId":1,"next":{"gameId":2026020100,"away":"TOR","home":"MTL","start":"2026-10-03T23:00:00Z"}}')
+    toronto = Display(sleep=Sleep("23:00", "07:00", "America/Toronto"))
+    assert strip_at(0, next_game=nxt, display=toronto).next == "NEXT  TOR at MTL  SAT 7:00 PM"
+    assert strip_at(0, next_game=nxt, display=Display(sleep=NIGHT)).next == "NEXT  TOR at MTL  SAT 4:00 PM"
+    assert strip_at(0, next_game=nxt, display=DEFAULTS).next == "NEXT  TOR at MTL", \
+        "no zone: the time is left off rather than shown in the wrong one"
+    assert strip_at(0, next_game=None).next == ""
+
+
+def test_the_strip_is_a_slow_change_not_an_animation():
+    # At 10 Hz, over a whole turn, the line does not change.
+    t0 = live_state().as_of_ms // STEP_MS * STEP_MS
+    within = {strip_at(t0 + ms) for ms in range(0, STEP_MS, 100)}
+    assert len(within) == 1
+
+
+# --- through the loop -----------------------------------------------------------
+
+SUMMARY_DOC = json.dumps({"v": 1, "asOf": 1791135723123, "games": [
+    {"gameId": 2026020001, "away": "TBL", "home": "NYR", "awayScore": 2, "homeScore": 1, "state": "LIVE", "period": "2"},
+    {"gameId": 2026020002, "away": "BOS", "home": "MTL", "awayScore": 2, "homeScore": 1, "state": "LIVE", "period": "3"},
+]}).encode()
+GOAL_DOC = LIVE_DOC.replace(b'"lastGoal":{"team":"TBL","number":86,"asOf":1791135690000}',
+                            b'"lastGoal":{"team":"TBL","number":86,"asOf":1791135690000,"period":"2","time":"12:41"}')
+assert GOAL_DOC != LIVE_DOC
+
+
+def strips_drawn(monkeypatch):
+    """Every Strip (or None) handed to draw_strip, in order. The dummy
+    video driver's mode is 4:3, so frame_size gives the loop a 600-row
+    frame with a strip -- the real panel's shape, as it happens."""
+    seen = []
+    real = main_module.draw_strip
+    monkeypatch.setattr(main_module, "draw_strip", lambda surf, strip, assets: seen.append(strip) or real(surf, strip, assets))
+    return seen
+
+
+def test_the_loop_draws_the_strip_from_the_documents_it_receives(tmp_path, monkeypatch):
+    seen = strips_drawn(monkeypatch)
+    a_loop_that_receives(monkeypatch, tmp_path, {
+        0: [("on_state", (2026020001, GOAL_DOC)), ("on_summary", (SUMMARY_DOC,))],
+    }, passes=3)
+    assert seen, "the loop never drew the strip"
+    assert seen[-1] == Strip("LAST GOAL  #86 TBL  12:41 2ND", "BOS 2  MTL 1  ·  3RD", "")
+    assert "TBL 2  NYR 1" not in seen[-1].other, "the panel's own game is not another game"
+
+
+def test_choosing_another_game_clears_the_last_goal(tmp_path, monkeypatch):
+    seen = strips_drawn(monkeypatch)
+    a_loop_that_receives(monkeypatch, tmp_path, {
+        0: [("on_state", (2026020001, GOAL_DOC))],
+        2: [("on_config", (b'{"gameId": 2026020002}', False))],
+    }, passes=4)
+    assert seen[1].goal == "LAST GOAL  #86 TBL  12:41 2ND"
+    assert seen[2].goal == "" and seen[3].goal == "", "the old game's goal outlived the game"
+
+
+def test_a_late_arriving_earlier_goal_leaves_the_strip_alone_in_the_real_loop(tmp_path, monkeypatch):
+    earlier = GOAL_DOC.replace(b'"number":86', b'"number":17').replace(b'"period":"2","time":"12:41"', b'"period":"1","time":"18:00"')
+    seen = strips_drawn(monkeypatch)
+    a_loop_that_receives(monkeypatch, tmp_path, {
+        0: [("on_state", (2026020001, GOAL_DOC))],
+        2: [("on_state", (2026020001, earlier))],
+    }, passes=4)
+    assert seen[3].goal == "LAST GOAL  #86 TBL  12:41 2ND", seen[3]
+
+
+def test_the_next_game_comes_and_goes_with_the_config_document(tmp_path, monkeypatch):
+    seen = strips_drawn(monkeypatch)
+    with_next = b'{"gameId": 2026020001, "next": {"gameId": 2026020100, "away": "TOR", "home": "MTL", "start": "2026-10-03T23:00:00Z"}}'
+    a_loop_that_receives(monkeypatch, tmp_path, {
+        1: [("on_config", (with_next, True))],
+        3: [("on_config", (b'{"gameId": 2026020001}', True))],   # the document is the whole truth
+        4: [("on_config", (b"not json", True))],                 # garbage decides nothing
+    }, passes=6)
+    # (Pass 0 is the first-boot OFFLINE frame -- net_ok is polled after the
+    # first flip -- under which the strip is painted out.)
+    assert seen[0] is None
+    assert seen[1].next == "NEXT  TOR at MTL", "no zone yet: the matchup without a time"
+    assert seen[3].next == "" and seen[4].next == ""
+
+
+@pytest.mark.parametrize("payload", [
+    b"", b"not json", b"[]", b"null", b"\xff\xfe", b'{"v":1}', b'{"v":1,"games":"BOS"}',
+    b'{"v":2,"games":[]}', b'{"v":true,"games":[]}',
+])
+def test_no_summary_document_can_stop_the_render_loop_or_change_the_strip(payload, tmp_path, monkeypatch):
+    # The same standard as parse_display: a malformed summary changes
+    # nothing, and the loop goes on. The strip keeps the last summary it
+    # could read.
+    seen = strips_drawn(monkeypatch)
+    a_loop_that_receives(monkeypatch, tmp_path, {
+        0: [("on_summary", (SUMMARY_DOC,))],
+        2: [("on_summary", (payload,))],
+    }, passes=4)
+    assert seen[1].other == "BOS 2  MTL 1  ·  3RD"
+    assert seen[3].other == seen[1].other, payload
+
+
+@pytest.mark.parametrize("payload", [
+    b'{"v":1,"games":[{"gameId":"x"}]}', b'{"v":1,"games":[null]}',
+    b'{"v":1,"games":[{"gameId":1,"away":"B\\u0000S","home":"MTL","state":"LIVE"}]}',
+    b'{"v":1,"games":[{"gameId":1,"away":"' + b"B" * 5000 + b'","home":"MTL","state":"LIVE"}]}',
+], ids=["a game id that is not a number", "a null row", "a null byte in an abbreviation", "a 5000-letter abbreviation"])
+def test_a_summary_whose_rows_all_fail_is_a_document_with_no_games(payload, tmp_path, monkeypatch):
+    # A readable document whose every row is one the panel cannot vouch
+    # for says there is nothing it can show, and the slot empties -- the
+    # row is what is dropped, never patched (a null byte in an
+    # abbreviation would reach pygame's font renderer). The loop goes on.
+    seen = strips_drawn(monkeypatch)
+    a_loop_that_receives(monkeypatch, tmp_path, {
+        0: [("on_summary", (SUMMARY_DOC,))],
+        2: [("on_summary", (payload,))],
+    }, passes=4)
+    assert seen[1].other != "" and seen[3].other == "", payload
+
+
+def test_an_empty_summary_empties_the_slot(tmp_path, monkeypatch):
+    seen = strips_drawn(monkeypatch)
+    a_loop_that_receives(monkeypatch, tmp_path, {
+        0: [("on_summary", (SUMMARY_DOC,))],
+        2: [("on_summary", (b'{"v":1,"asOf":1,"games":[]}',))],
+    }, passes=4)
+    assert seen[1].other != "" and seen[3].other == ""
+
+
+def test_the_strip_is_off_with_sleep_hours(tmp_path, monkeypatch):
+    # OFF is the whole frame black, strip included, and draw_strip is not
+    # asked at all. Sleep hours need a clock the panel trusts, so the
+    # loop's own check is answered "yes"; the window is the whole day in
+    # UTC, so whenever this runs it is inside it; and the panel has no
+    # fresh live game to beat it with.
+    monkeypatch.setattr(main_module, "clock_synced", lambda: True)
+    seen = strips_drawn(monkeypatch)
+    all_day = b'{"gameId": 2026020001, "display": {"v": 1, "sleep": {"start": "00:00", "end": "23:59", "zone": "UTC"}}}'
+    a_loop_that_receives(monkeypatch, tmp_path, {
+        0: [("on_summary", (SUMMARY_DOC,)), ("on_config", (all_day, True))],
+    }, passes=4)
+    # Pass 0 is the first-boot OFFLINE frame, painted out; every pass after
+    # it is OFF and asks for no strip at all.
+    assert seen == [None], f"the strip was drawn on a sleeping panel: {seen}"
+
+
+def test_the_strip_is_painted_out_under_a_screen_that_is_not_the_scoreboard(tmp_path, monkeypatch):
+    seen = strips_drawn(monkeypatch)
+    a_loop_that_receives(monkeypatch, tmp_path, {
+        0: [("on_summary", (SUMMARY_DOC,))],
+        2: [("key", (pygame.K_s, "s"))],       # the settings screen
+    }, passes=4)
+    assert seen[1] is not None and seen[2] is None and seen[3] is None
+
+
+def test_a_state_document_that_cannot_be_read_leaves_the_goal_as_it_was(tmp_path, monkeypatch):
+    seen = strips_drawn(monkeypatch)
+    a_loop_that_receives(monkeypatch, tmp_path, {
+        0: [("on_state", (2026020001, GOAL_DOC))],
+        2: [("on_state", (2026020001, b'{"v":1,"gameId":null}'))],
+    }, passes=4)
+    assert seen[3].goal == "LAST GOAL  #86 TBL  12:41 2ND"
+
+
+def test_keep_goal_is_what_the_loop_calls_on_every_accepted_document():
+    # The loop's own call is one line; the rule is in model.keep_goal and
+    # tested there. This pins that the two agree on the first document.
+    state = GameState.from_json(GOAL_DOC)
+    assert keep_goal(None, state) == GOAL

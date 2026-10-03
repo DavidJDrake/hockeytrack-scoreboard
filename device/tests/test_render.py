@@ -585,3 +585,209 @@ def test_the_penalty_rows_do_not_touch_the_rule_line_or_each_other():
     bar = _bar_rows(surf, (0x00, 0x28, 0x68))
     gap = [y for y in range(bar[7] + 1, bar[8]) if y not in lit]
     assert len(gap) >= 6, f"only {len(gap)} clear rows between the two penalty rows"
+
+
+# --------------------------------------------------------------------------
+# The information strip (SCO-57)
+#
+# One line under the layout on a panel with the rows for it: last goal,
+# another game, next game, in three slots of equal width. Everything on it
+# is text somebody else wrote, so each string is fitted to its slot and then
+# clipped to it -- nothing can run into the next slot or off the panel,
+# whatever it says. The layout above is not touched: the strip is drawn on
+# its own surface, and test_canvas proves a 4:1 frame is byte for byte what
+# it was.
+# --------------------------------------------------------------------------
+
+from scoreboard.display import STRIP_H  # noqa: E402
+from scoreboard.model import NextGame, StripGoal, SummaryGame  # noqa: E402
+from scoreboard.render import (MUTED, STRIP_BG, STRIP_MARGIN, STRIP_MIN_PX, STRIP_RULE_Y,  # noqa: E402
+                               STRIP_SLOT_PAD, STRIP_SLOTS, Strip, draw_strip, strip_lines)
+
+GOAL = StripGoal(2026020001, "TBL", 86, "2", "12:41")
+OTHER = SummaryGame(2026020002, "BOS", "MTL", 2, 1, "LIVE", "3", False)
+NEXT = NextGame(2026020100, "TOR", "MTL", "2026-10-03T23:00:00Z")   # a Saturday evening
+ZONE = "America/Toronto"
+
+
+def strip_surface():
+    pygame.init()
+    return pygame.Surface((W, STRIP_H))
+
+
+def slot_rect(i):
+    slot_w = (W - 2 * STRIP_MARGIN) // STRIP_SLOTS
+    return pygame.Rect(STRIP_MARGIN + i * slot_w, 0, slot_w, STRIP_H)
+
+
+def test_the_three_slots_read_as_mock_up_c_has_them():
+    assert strip_lines(GOAL, OTHER, NEXT, ZONE) == Strip(
+        "LAST GOAL  #86 TBL  12:41 2ND", "BOS 2  MTL 1  ·  3RD", "NEXT  TOR at MTL  SAT 7:00 PM")
+
+
+def test_an_empty_slot_is_nothing_never_undefined():
+    assert strip_lines(None, None, None, None) == Strip("", "", "")
+    assert strip_lines(None, None, None, ZONE) == Strip("", "", "")
+
+
+@pytest.mark.parametrize("goal,text", [
+    (StripGoal(1, "TBL", 86, "OT", "02:15"), "LAST GOAL  #86 TBL  02:15 OT"),
+    (StripGoal(1, "TBL", 86, "2OT", "02:15"), "LAST GOAL  #86 TBL  02:15 2OT"),
+    (StripGoal(1, "TBL", 86, "SO", ""), "LAST GOAL  #86 TBL  SO"),
+    (StripGoal(1, "TBL", 86, "", ""), "LAST GOAL  #86 TBL"),       # a document from before PR #52
+    (StripGoal(1, "TBL", 0, "1", "00:10"), "LAST GOAL  TBL  00:10 1ST"),   # no number yet
+    (StripGoal(1, "", 0, "", ""), "LAST GOAL"),
+    (StripGoal(1, "TBL", 86, "3", "19:59"), "LAST GOAL  #86 TBL  19:59 3RD"),
+    (StripGoal(1, "TBL", 86, "4", "01:00"), "LAST GOAL  #86 TBL  01:00 4TH"),
+])
+def test_the_goal_says_what_it_knows_and_nothing_it_does_not(goal, text):
+    assert strip_lines(goal, None, None, None).goal == text
+
+
+@pytest.mark.parametrize("other,text", [
+    (SummaryGame(2, "BOS", "MTL", 2, 1, "LIVE", "3", True), "BOS 2  MTL 1  ·  3RD INT"),
+    (SummaryGame(2, "BOS", "MTL", 2, 1, "LIVE", "OT", False), "BOS 2  MTL 1  ·  OT"),
+    (SummaryGame(2, "BOS", "MTL", 2, 1, "LIVE", "", False), "BOS 2  MTL 1"),
+    (SummaryGame(2, "BOS", "MTL", 2, 1, "FINAL", "3", False), "BOS 2  MTL 1  ·  FINAL"),
+    (SummaryGame(2, "BOS", "MTL", 2, 1, "FINAL", "OT", False), "BOS 2  MTL 1  ·  FINAL OT"),
+    (SummaryGame(2, "BOS", "MTL", 2, 1, "FINAL", "SO", False), "BOS 2  MTL 1  ·  FINAL SO"),
+    (SummaryGame(2, "BOS", "MTL", 2, 1, "FINAL", "", False), "BOS 2  MTL 1  ·  FINAL"),
+])
+def test_the_other_game_says_the_score_and_where_it_stands(other, text):
+    assert strip_lines(None, other, None, None).other == text
+
+
+def test_the_next_games_time_is_where_the_panel_hangs_or_left_off():
+    # 23:00Z on a Saturday is 7 PM in Toronto and 4 PM in Vancouver; the
+    # zone comes with the sleep hours, and without one the time is left off
+    # rather than shown three hours out.
+    assert strip_lines(None, None, NEXT, "America/Toronto").next == "NEXT  TOR at MTL  SAT 7:00 PM"
+    assert strip_lines(None, None, NEXT, "America/Vancouver").next == "NEXT  TOR at MTL  SAT 4:00 PM"
+    assert strip_lines(None, None, NEXT, "Europe/London").next == "NEXT  TOR at MTL  SUN 12:00 AM"
+    assert strip_lines(None, None, NEXT, None).next == "NEXT  TOR at MTL"
+    # The season's other form of a start, with an offset, reads the same.
+    assert strip_lines(None, None, NextGame(1, "TOR", "MTL", "2026-10-03T19:00:00-04:00"), ZONE).next \
+        == "NEXT  TOR at MTL  SAT 7:00 PM"
+
+
+def test_a_zone_or_an_instant_this_panel_cannot_use_leaves_the_time_off():
+    # parse_next drops a next whose start is not an instant, so these never
+    # reach the strip off the network; NextGame is a plain record, though,
+    # and the matchup stays true whatever its start says.
+    for zone in ("Mars/Olympus", "", "../../etc/passwd"):
+        assert strip_lines(None, None, NEXT, zone).next == "NEXT  TOR at MTL", zone
+    # (The last two: an instant whose shift to the zone falls outside what
+    # datetime can hold, and a start in the shape the old parser kept.)
+    for start in (None, "", "tonight", "2026-10-03T23:00:00", "9999-99-99T00:00:00Z",
+                  "0001-01-01T00:00:00Z", 1791068400000):
+        assert strip_lines(None, None, NextGame(1, "TOR", "MTL", start), ZONE).next == "NEXT  TOR at MTL", start
+
+
+def test_the_strip_is_drawn_in_three_slots_with_a_rule_above():
+    surf, assets = strip_surface(), Spy()
+    draw_strip(surf, strip_lines(GOAL, OTHER, NEXT, ZONE), assets)
+    assert assets.drawn == ["LAST GOAL  #86 TBL  12:41 2ND", "BOS 2  MTL 1  ·  3RD", "NEXT  TOR at MTL  SAT 7:00 PM"]
+    assert surf.get_at((5, 0))[:3] == BG, "the rows above the rule belong to the frame"
+    assert surf.get_at((5, STRIP_RULE_Y))[:3] == RULE
+    assert surf.get_at((5, STRIP_H - 1))[:3] == STRIP_BG
+    # Something bright in each slot, and the last goal brighter than the rest.
+    for i, color in enumerate((INK, MUTED, MUTED)):
+        rect = slot_rect(i)
+        assert any(surf.get_at((x, y))[:3] == color for x in range(rect.left, rect.right, 2)
+                   for y in range(20, STRIP_H, 2)), f"slot {i} drew nothing in its color"
+
+
+def test_nothing_painted_means_the_frames_background():
+    surf = strip_surface()
+    draw_strip(surf, strip_lines(GOAL, OTHER, NEXT, ZONE), Assets())
+    draw_strip(surf, None, Assets())
+    assert pygame.image.tostring(surf, "RGB") == bytes(BG) * (W * STRIP_H)
+
+
+def test_an_empty_slot_draws_nothing_and_the_others_stay_where_they_were():
+    surf, full = strip_surface(), strip_surface()
+    draw_strip(full, strip_lines(GOAL, OTHER, NEXT, ZONE), Assets())
+    draw_strip(surf, strip_lines(GOAL, None, NEXT, ZONE), Assets())
+    below_rule = slot_rect(1).move(0, STRIP_RULE_Y + 2).clip(surf.get_rect())
+    assert pygame.image.tostring(surf.subsurface(below_rule), "RGB") == \
+        bytes(STRIP_BG) * (below_rule.width * below_rule.height)
+    for i in (0, 2):
+        assert pygame.image.tostring(surf.subsurface(slot_rect(i)), "RGB") == \
+            pygame.image.tostring(full.subsurface(slot_rect(i)), "RGB")
+
+
+def ink_columns(surf, rect):
+    return [x for x in range(rect.left, rect.right)
+            if any(surf.get_at((x, y))[:3] not in (BG, STRIP_BG, RULE) for y in range(rect.top, rect.bottom))]
+
+
+@pytest.mark.parametrize("length", [10, 40, 80, 400])
+def test_text_is_fitted_to_its_slot_and_then_clipped_to_it(length):
+    # Fitted first: down to STRIP_MIN_PX the string shrinks to fit inside
+    # the slot's padding. Past what the smallest size can hold, the slot's
+    # own subsurface clips it: nothing reaches the slot beside it, and the
+    # slot beside it is untouched. A string this long cannot come off the
+    # parsers, and that is not what keeps it off the panel.
+    surf = strip_surface()
+    text = "X" * length
+    draw_strip(surf, Strip(text, text, text), Assets())
+    for i in range(STRIP_SLOTS):
+        rect = slot_rect(i)
+        cols = ink_columns(surf, rect)
+        assert cols, f"slot {i} drew nothing"
+        assert min(cols) >= rect.left and max(cols) < rect.right
+        inner = rect.inflate(-2 * STRIP_SLOT_PAD, 0)
+        fits = Assets().font(STRIP_MIN_PX, False).size(text)[0] <= inner.width
+        if fits:
+            assert min(cols) >= inner.left and max(cols) < inner.right, \
+                f"slot {i}: a string the smallest size can hold ran into its padding"
+    # The margins beside the first and last slots are never written.
+    for rect in (pygame.Rect(0, 0, STRIP_MARGIN, STRIP_H), pygame.Rect(W - STRIP_MARGIN, 0, STRIP_MARGIN, STRIP_H)):
+        assert not ink_columns(surf, rect), "text reached the frame's margin"
+
+
+def test_the_longest_lines_the_parsers_allow_still_read_across_a_room():
+    # The widest string each slot can be handed off the network, at the
+    # bounds model.py holds them to, fits without going below 32 px --
+    # which is the size the stale band is held to for the same reason.
+    assets = Assets()
+    inner = slot_rect(0).width - 2 * STRIP_SLOT_PAD
+    for longest in strip_lines(StripGoal(1, "WWWW", 99, "10OT", "20:00"),
+                               SummaryGame(2, "WWWW", "MMMM", 99, 99, "LIVE", "10OT", True),
+                               NextGame(3, "WWWW", "MMMM", "2026-10-03T23:00:00Z"), "Pacific/Auckland"):
+        px = fit_px(assets, longest, 48, inner, bold=False, min_px=STRIP_MIN_PX)
+        assert assets.font(px, False).size(longest)[0] <= inner, longest
+        assert px >= 32, f"{longest!r} was shrunk to {px} px"
+
+
+def test_the_strips_text_sits_clear_of_the_rows_the_shift_can_take():
+    # The burn-in shift moves the frame up by four at most and never down,
+    # and the strip is the frame's bottom edge: its text must not sit in
+    # the last four rows, or a shift would cut it. Nor in the rule.
+    surf = strip_surface()
+    draw_strip(surf, strip_lines(GOAL, OTHER, NEXT, ZONE), Assets())
+    ink = [y for y in range(STRIP_H) if any(surf.get_at((x, y))[:3] in (INK, MUTED) for x in range(0, W, 2))]
+    assert ink and min(ink) > STRIP_RULE_Y + 8 and max(ink) < STRIP_H - 4, (min(ink), max(ink))
+
+
+def test_fuzzed_summary_rows_and_goals_never_stop_the_strip_being_drawn():
+    # The strings the parsers pass are the strings pygame's font renderer
+    # is handed. A null byte is the one thing it refuses, and the parsers
+    # refuse it first; this is what says so from the drawing end.
+    import random
+    from scoreboard.model import parse_summary
+    rng = random.Random(57)
+    surf, assets = strip_surface(), Assets()
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:\0·abc "
+    for _ in range(300):
+        rows = [{"gameId": rng.randint(-2, 5), "away": "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 6))),
+                 "home": "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 6))),
+                 "awayScore": rng.randint(-5, 120), "homeScore": rng.choice([0, 3, "x", None, 99]),
+                 "state": rng.choice(["LIVE", "FINAL", "PRE", "OFF", 7, None]),
+                 "period": "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 5))),
+                 "intermission": rng.choice([True, False, 1, None])} for _ in range(rng.randint(0, 4))]
+        parsed = parse_summary(json.dumps({"v": 1, "games": rows}).encode())
+        goal = StripGoal(1, "".join(rng.choice("ABCDEFGH") for _ in range(rng.randint(0, 4))),
+                         rng.randint(0, 99), rng.choice(["", "1", "OT", "2OT", "SO", "99"]), rng.choice(["", "12:41", "20:00"]))
+        draw_strip(surf, strip_lines(goal, parsed[0] if parsed else None,
+                                     NextGame(1, "TOR", "MTL", rng.choice([None, "", "2026-10-03T23:00:00Z"])), ZONE), assets)
