@@ -1,10 +1,12 @@
-"""The taller frame shows exactly what the 4:1 frame showed (SCO-55).
+"""A frame grown around the layout shows exactly what the 4:1 frame showed.
 
-The layout did not change; the frame around it did. So the proof is a
-comparison, not a description: draw the old way onto 1920x480, draw the new
-way through a Canvas, and the bytes must match -- for a 4:1 panel the whole
-frame, for the real 3.2:1 panel the 480 rows in the middle, with background
-and nothing else above and below.
+The layout did not change; the frame around it did (SCO-55 taller, SCO-70
+wider, SCO-57 the strip under it). So the proof is a comparison, not a
+description: draw the old way onto 1920x480, draw the new way through a
+Canvas, and the bytes must match -- for a 4:1 panel the whole frame, for the
+3.2:1 panel the 480 rows at the top with the strip under them, for the 4.5:1
+panel the 1920 columns in the middle with background and nothing else at
+each end.
 """
 import os
 from pathlib import Path
@@ -136,13 +138,75 @@ def test_nothing_drawn_on_the_layout_can_land_outside_it():
         assert rgb(canvas.frame, margin) == bytes(BG) * (margin[2] * margin[3])
 
 
+# --- the wider frame for the longer panel (SCO-70) --------------------------
+#
+# The same proof the other way round: the second panel is 440x1980 (4.5:1),
+# so its frame is 2160x480, and the 1920 columns in the middle must be the
+# old frame byte for byte, with background and nothing else at each end.
+
+LONG = (440, 1980)
+END = 120
+
+
+@pytest.mark.parametrize("name", list(PAINTERS))
+def test_the_longer_panel_shows_the_same_layout_in_the_middle_of_a_wider_frame(name):
+    canvas = the_new_way(PAINTERS[name], LONG, (0, 0))
+    assert canvas.frame.get_size() == (2160, H)
+    assert rgb(canvas.frame, (END, 0, W, H)) == rgb(the_old_way(PAINTERS[name], (0, 0)))
+    assert canvas.area.margins == ((0, 0, END, H), (W + END, 0, END, H))
+    for margin in canvas.area.margins:
+        assert rgb(canvas.frame, margin) == bytes(BG) * (margin[2] * margin[3]), \
+            f"{name} drew outside the layout"
+
+
+@pytest.mark.parametrize("offset", [o for o in SHIFT_PATTERN if o != (0, 0)])
+def test_the_shift_on_a_wider_frame_loses_nothing_across_and_leaves_nothing_behind(offset):
+    # Across, the layout moves into the end margins and every column
+    # survives. Up, the frame is still 480 rows, so the top rows go off the
+    # panel exactly as they do on a 4:1 panel (background; test_render
+    # proves it), which is why the comparison below is over the rows kept.
+    dx, dy = offset
+    still = the_new_way(PAINTERS["live"], LONG, (0, 0))
+    moved = the_new_way(PAINTERS["live"], LONG, offset)
+    kept = pygame.Rect(END, -dy, W, H + dy)
+    assert rgb(still.frame, kept) == rgb(moved.frame, kept.move(dx, dy))
+
+    PAINTERS["live"](moved.layout, Assets())
+    moved.clear_margins(BG)
+    assert rgb(moved.frame) == rgb(still.frame)
+
+
+def test_the_end_margins_really_do_need_clearing():
+    # The flash washes the away half, which is the left one, so a step to
+    # the left is the one that carries colour into an end margin.
+    moved = the_new_way(PAINTERS["goal flash"], LONG, (-4, -2))
+    left = moved.area.margins[0]
+    assert rgb(moved.frame, left) != bytes(BG) * (left[2] * left[3])
+
+
+def test_the_shift_stays_inside_every_frame_it_is_applied_to():
+    # main.SHIFT_PATTERN is one ring for every panel. Across, no step reaches
+    # past the layout's own 60 px side margins, let alone the 120 px ends of
+    # the wider frame; up, no step reaches past the layout's 76 px top
+    # margin; and no step ever goes down, because the game screen's bottom
+    # margin is zero. Held here so a change to the ring is caught against
+    # the frames it moves, not discovered on the glass.
+    ends = the_new_way(PAINTERS["live"], LONG, (0, 0)).area.margins
+    end_w = min(m[2] for m in ends)
+    for dx, dy in SHIFT_PATTERN:
+        assert abs(dx) <= 60 and abs(dx) < end_w, f"{(dx, dy)} reaches past the ends"
+        assert -76 < dy <= 0, f"{(dx, dy)} moves the frame down or off the top"
+
+
 # --------------------------------------------------------------------------
 # The strip on the taller frame (SCO-57)
 #
 # main.turned asks for the strip on every panel. A 4:1 panel has no rows
-# for one and its frame is byte for byte what it was; the 3.2:1 panel gets
-# the layout at the top and the strip in the 120 rows under it. The strip
-# obeys the burn-in shift the way the layout does: it moves with the frame.
+# for one and its frame is byte for byte what it was; so has the longer
+# panel, whose spare glass is at the ends, and its frame is byte for byte
+# the wider frame above; the 3.2:1 panel gets the layout at the top and the
+# strip in the 120 rows under it. The strip obeys the burn-in shift the way
+# the layout does: it moves with the frame.
 # --------------------------------------------------------------------------
 
 from scoreboard.display import STRIP_H  # noqa: E402
@@ -174,6 +238,19 @@ def test_a_four_to_one_panel_asked_for_the_strip_has_none_and_shows_what_it_alwa
     assert canvas.strip is None and canvas.area.strip is None
     assert canvas.frame.get_size() == (W, H)
     assert rgb(canvas.frame) == rgb(the_old_way(PAINTERS[name], offset))
+
+
+@pytest.mark.parametrize("name", list(PAINTERS))
+@pytest.mark.parametrize("offset", [(0, 0), (4, -2), (-2, -4)])
+def test_the_longer_panel_asked_for_the_strip_has_none_and_shows_the_wider_frame(name, offset):
+    # The strip is what a TALLER panel gains. The longer panel's spare glass
+    # is at the ends, and asking for the strip changes nothing there: the
+    # frame is the wider one, ends and all, byte for byte.
+    canvas = with_strip(PAINTERS[name], LONG, offset)
+    assert canvas.strip is None and canvas.area.strip is None
+    assert canvas.frame.get_size() == (2160, H)
+    assert canvas.area.margins == ((0, 0, END, H), (W + END, 0, END, H))
+    assert rgb(canvas.frame) == rgb(the_new_way(PAINTERS[name], LONG, offset).frame)
 
 
 @pytest.mark.parametrize("name", list(PAINTERS))

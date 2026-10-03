@@ -16,6 +16,7 @@ import (
 	"hockeytrack-scoreboard/internal/schedule"
 	"hockeytrack-scoreboard/internal/season"
 	"hockeytrack-scoreboard/internal/settings"
+	"hockeytrack-scoreboard/internal/templates"
 )
 
 // MaxPublishes is the ceiling on publishes in one run. The fleet is a handful
@@ -44,9 +45,17 @@ type Director struct {
 	// own in the document exactly as the API lays them (its send). Nil means
 	// nobody has any.
 	Accounts accounts.Store
-	Season   func(ctx context.Context) (season.Season, error)
-	Pub      iotpub.Publisher
-	Now      func() time.Time
+	// Templates holds each owner's templates, read under the owner of the
+	// panel being directed and never by id alone, so a panel's kept set is
+	// the same one the API shows its owner. Nil is for tests whose panels
+	// name no template: a panel that names one cannot be directed without
+	// the store and is skipped, the same as when the table is down.
+	// cmd/director requires TEMPLATES_TABLE, so a deployment never runs
+	// without it.
+	Templates templates.Store
+	Season    func(ctx context.Context) (season.Season, error)
+	Pub       iotpub.Publisher
+	Now       func() time.Time
 }
 
 // Run directs every claimed panel with a schedule, or only thing when it is
@@ -66,7 +75,7 @@ func (d *Director) Run(ctx context.Context, thing string) error {
 		return fmt.Errorf("season: %w", err)
 	}
 	now := d.Now()
-	run := &run{d: d, season: sn, now: now, states: map[int64]*reduce.State{}}
+	run := &run{d: d, season: sn, now: now, states: map[int64]*reduce.State{}, templates: map[string]map[string][]int64{}}
 	var errs []error
 	for _, dev := range panels {
 		if err := run.direct(ctx, dev); err != nil {
@@ -93,15 +102,40 @@ func (d *Director) panels(ctx context.Context, thing string) ([]devices.Device, 
 	return []devices.Device{dev}, nil
 }
 
-// run is one invocation's scratch: the clock it runs on and the states it
-// has read, so a game on several panels is read once.
+// run is one invocation's scratch: the clock it runs on, the states it has
+// read, so a game on several panels is read once, and each owner's
+// templates, read once for all of that owner's panels.
 type run struct {
 	d         *Director
 	season    season.Season
 	now       time.Time
 	states    map[int64]*reduce.State
+	templates map[string]map[string][]int64
 	published int
 	ceiling   bool
+}
+
+// templatesOf reads an owner's templates as the schedule rules take them,
+// once per run. A read that fails is an error for the panel, not a kept set
+// built without the template games in it: a panel is skipped, never sent a
+// game its schedule would not have chosen with everything read.
+func (r *run) templatesOf(ctx context.Context, owner string) (map[string][]int64, error) {
+	if tpls, ok := r.templates[owner]; ok {
+		return tpls, nil
+	}
+	// No store at all is the same failure as a store that cannot be read:
+	// the panel asked for templates and they cannot be had, so it is not
+	// directed from its own games as if it had asked for none.
+	if r.d.Templates == nil {
+		return nil, errors.New("no templates store")
+	}
+	list, err := r.d.Templates.List(ctx, owner)
+	if err != nil {
+		return nil, err
+	}
+	tpls := templates.GamesOf(list)
+	r.templates[owner] = tpls
+	return tpls, nil
 }
 
 func (r *run) state(ctx context.Context, id int64) (*reduce.State, error) {
@@ -176,10 +210,20 @@ func (r *run) direct(ctx context.Context, dev devices.Device) error {
 	}
 	resolved, _ := settings.Resolve(account, dev.Display)
 
-	// The kept set, the same way the API shows it to the owner. Nothing the
-	// rule returns can be outside it except what the owner put there.
-	starts := r.season.Starts(dev.Schedule.Games)
-	out := schedule.Resolve(dev.Schedule, dev.Schedule.Games, nil, starts)
+	// The kept set, the same way the API shows it to the owner: the panel's
+	// own games and its templates' together, with the panel's own winning
+	// an unanswered conflict. Nothing the rule returns can be outside it
+	// except what the owner put there.
+	tpls := map[string][]int64{}
+	if len(dev.Schedule.Templates) > 0 {
+		var err error
+		if tpls, err = r.templatesOf(ctx, dev.Owner); err != nil {
+			return fmt.Errorf("templates: %w", err)
+		}
+	}
+	games, sources := schedule.Candidates(dev.Schedule, tpls)
+	starts := r.season.Starts(games)
+	out := schedule.Resolve(dev.Schedule, games, sources, starts)
 	p := Panel{Kept: out.Kept, Games: map[int64]Game{}, Hold: time.Duration(resolved.FinalHoldMin) * time.Minute,
 		Showing: dev.GameID, Sent: dev.Sent}
 	for _, id := range out.Kept {
@@ -231,7 +275,21 @@ func (r *run) direct(ctx context.Context, dev devices.Device) error {
 	// director publishes only on a change of game, and a change of game is
 	// a choice (design section 6).
 	chosenAt := r.now.UnixMilli()
-	payload, err := panelconfig.Compose(current, chosenAt, resolved, dev.Wake.Live(r.now))
+	// The next game rides in the same document (SCO-56), from the season's
+	// row for it: the season checked its abbreviations and its start on the
+	// way in, and a kept game is always one the season lists (a game with no
+	// readable start is never kept). One it does not list gets no next
+	// rather than a guess. Only the director fills this slot, and only here,
+	// on a change of game: what is not covered is a schedule edit that
+	// changes the next game without changing the current one, which reaches
+	// the panel with the next change of game.
+	var next *panelconfig.Next
+	if id := Next(p, r.now); id != 0 {
+		if g, found := r.season.Find(id); found {
+			next = &panelconfig.Next{GameID: id, Away: g.Away, Home: g.Home, Start: g.Start}
+		}
+	}
+	payload, err := panelconfig.Compose(current, chosenAt, resolved, dev.Wake.Live(r.now), next)
 	if err != nil {
 		return err
 	}

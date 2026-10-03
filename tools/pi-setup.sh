@@ -46,6 +46,46 @@ render_unit() {
   sed -e "s|@USER@|$USER_NAME|g" -e "s|@DEVICE_DIR@|$DEVICE|g" "$DEVICE/scoreboard.service"
 }
 
+pygame_location() {
+  # Where the interpreter in $1 imports pygame from. Printed, not judged:
+  # the judgment is require_distribution_pygame's, so the two installers and
+  # the throwaway probe below all apply exactly one rule.
+  PYGAME_HIDE_SUPPORT_PROMPT=1 "$1" -c 'import os, pygame; print(os.path.dirname(pygame.__file__))'
+}
+
+require_distribution_pygame() {
+  # $1 is where pygame was imported from, $2 the advice for this install
+  # path. Only the distribution's pygame carries SDL's kmsdrm driver; a PyPI
+  # wheel imports fine and then fails to open the panel, with nothing in the
+  # log to say why (docs/hardware-checks.md, H1).
+  case "$1" in
+    /usr/lib/python3/dist-packages/*) ;;
+    *) die "the venv is using pygame from $1, not the system package, so it has no kmsdrm driver. $2" ;;
+  esac
+}
+
+probe_pygame_provenance() {
+  # The pygame guard, run against a throwaway venv BEFORE install_appliance
+  # creates anything. It used to run only against the real venv, which is
+  # built inside $APP_DIR after the service account and its state directory
+  # exist -- so a failed install left a stray scoreboard account behind.
+  # Re-running was idempotent, so this was untidy rather than harmful, but a
+  # guard that fires after the side effects is not a guard. The venv is
+  # rebuilt the same way in a directory mktemp owns, pip is told the same
+  # --no-index so the answer is the one the real build would get, and the
+  # directory is removed on every exit path, die() included.
+  local probe where
+  probe="$(mktemp -d)"
+  # shellcheck disable=SC2064  # expanded now, on purpose: $probe is local
+  trap "rm -rf '$probe'" EXIT
+  python3 -m venv --system-site-packages "$probe/venv"
+  "$probe/venv/bin/pip" install --no-index --no-cache-dir --disable-pip-version-check -r "$DEVICE/requirements.txt" >/dev/null
+  where="$(pygame_location "$probe/venv/bin/python")"
+  rm -rf "$probe"
+  trap - EXIT
+  require_distribution_pygame "$where" "Check that apt's python3-pygame satisfies device/requirements.txt, then run this again; nothing has been installed yet."
+}
+
 preflight() {
   local codename mode f
   codename="$(. "$OS_RELEASE" && echo "${VERSION_CODENAME:-}")"
@@ -79,12 +119,12 @@ install_checkout() {
   echo "==> virtualenv"
   python3 -m venv --system-site-packages "$DEVICE/.venv"
   "$DEVICE/.venv/bin/pip" install -r "$DEVICE/requirements.txt"
+  # An assignment, not a substitution inside the argument list: set -e sees
+  # the interpreter fail here, and would not see it there.
   local where
-  where="$(PYGAME_HIDE_SUPPORT_PROMPT=1 "$DEVICE/.venv/bin/python" -c 'import os, pygame; print(os.path.dirname(pygame.__file__))')"
-  case "$where" in
-    /usr/lib/python3/dist-packages/*) ;;
-    *) die "the venv is using pygame from $where, not the system package, so it has no kmsdrm driver. Delete $DEVICE/.venv, check that apt's python3-pygame satisfies device/requirements.txt, and run this again." ;;
-  esac
+  where="$(pygame_location "$DEVICE/.venv/bin/python")"
+  require_distribution_pygame "$where" \
+    "Delete $DEVICE/.venv, check that apt's python3-pygame satisfies device/requirements.txt, and run this again."
 
   echo "==> groups"
   local groups=video,render,input
@@ -138,6 +178,11 @@ install_appliance() {
   # reasoning.
   apt-get install -y python3-pygame python3-gpiozero python3-venv network-manager polkitd python3-cryptography python3-paho-mqtt ca-certificates iw libegl1 libegl-mesa0 libgles2 libgl1-mesa-dri
 
+  echo "==> pygame provenance"
+  # Before the account and the state directory, so that when this is the
+  # step that fails, nothing has been created for the failure to leave behind.
+  probe_pygame_provenance
+
   echo "==> service account"
   getent group "$SERVICE_USER" >/dev/null || groupadd --system --gid "$SERVICE_ID" "$SERVICE_USER"
   getent passwd "$SERVICE_USER" >/dev/null || \
@@ -172,12 +217,13 @@ install_appliance() {
   # install instead of quietly downloading an unpinned, unhashed wheel; with
   # --no-cache-dir it leaves no pip cache in /root for an image to ship.
   "$APP_DIR/.venv/bin/pip" install --no-index --no-cache-dir --disable-pip-version-check -r "$APP_DIR/requirements.txt"
+  # Checked again on the venv that will actually run, not only on the probe:
+  # the probe proves apt's package is the one pip resolves, and this proves
+  # the same held for the venv that is being shipped.
   local where
-  where="$(PYGAME_HIDE_SUPPORT_PROMPT=1 "$APP_DIR/.venv/bin/python" -c 'import os, pygame; print(os.path.dirname(pygame.__file__))')"
-  case "$where" in
-    /usr/lib/python3/dist-packages/*) ;;
-    *) die "the venv is using pygame from $where, not the system package, so it has no kmsdrm driver." ;;
-  esac
+  where="$(pygame_location "$APP_DIR/.venv/bin/python")"
+  require_distribution_pygame "$where" \
+    "The probe above passed, so something changed between it and this venv."
   chown -R root:root "$APP_DIR"
 
   echo "==> read-only root"

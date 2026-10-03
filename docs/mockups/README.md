@@ -1,6 +1,6 @@
 # Layout mock-ups for the real panel
 
-**Chosen by the owner, 2026-09-21: C, the information strip.** The rest are kept as the record of what was considered. What C needed before it could be built is at the end, with what has since been built against it.
+**Chosen by the owner, 2026-09-21: C, the information strip.** The rest are kept as the record of what was considered. What C needed before it could be built is below, with what has since been built against it. The second, longer panel has its own pair of mock-ups at the end, not chosen yet.
 
 The panel is 400x1280: **3.2:1**. The scoreboard frame is drawn at 1920x480,
 which is 4:1, so turned and scaled it lands as 1280x320 with **40 px of unused
@@ -60,7 +60,7 @@ says. This file's `render_mockups.py` is still only a picture.
 |---|---|---|
 | **Last goal** | `lastGoal.period` and `.time` in the state document (SCO-56, PR #52) | Kept per game and cleared when the game changes. A goal that arrives late is compared by period and time before it replaces the one on the strip, so an earlier goal cannot overwrite a later one; the flash follows the reducer's order and is unchanged. |
 | **Another game** | the retained `hockeytrack/games/summary` (SCO-56), under the `hockeytrack/games/*` filter the device policy already allowed | Today's other live games take turns of twenty seconds each, the panel's own skipped; finals once no live game remains; empty otherwise. The turn is stepped on the frame's clock, which the stale band freezes, so the strip freezes with it. The summary carries no `start` and only LIVE and FINAL rows; games not started are not this slot's business. |
-| **Next game** | `next: {gameId, away, home, start}` in the config document, once the director composes it (SCO-56, item 3; not yet) | Read strictly (`model.parse_next`) and drawn only when a document carries it, in the sleep-hours zone; without a zone the time is left off. Until the director writes one the slot is empty. |
+| **Next game** | `next: {gameId, away, home, start}` in the config document, composed by the director from the schedule (SCO-56, item 3) | Read strictly (`model.parse_next`: a next wrong in any way is dropped whole, and the game and settings in the same document still apply) and drawn only when a document carries it, in the sleep-hours zone; without a zone the time is left off. A document without one leaves the slot empty. |
 
 Every string comes off the network and is read to the cloud's own spelling
 (`model.parse_summary` holds the summary to 32 rows, two-to-four-letter
@@ -68,5 +68,29 @@ abbreviations, scores 0-99 and a fixed set of states); a document the panel
 cannot read changes nothing and cannot stop the render loop. Each slot's text
 is fitted to its width and then drawn on the slot's own clipped surface, so
 nothing runs into the next slot or off the panel whatever it says. A 4:1
-panel has no strip and its frame is byte for byte what it was
-(`device/tests/test_canvas.py`).
+panel has no strip and its frame is byte for byte what it was, and so is
+the longer panel's wider frame below: the strip is what a taller panel
+gains (`device/tests/test_canvas.py`).
+
+## The second panel: 440x1980, 4.5:1 -- choose one
+
+**Not chosen yet.** The owner's second panel (received 2026-09-25) is longer
+than the layout rather than taller, so the spare glass is at the ends: the
+frame is 2160x480 and the layout sits in the middle with **120 px at each
+end** (SCO-70). These two are drawn at that size, with the real fonts and the
+same game as A to D.
+
+| | |
+|---|---|
+| **E** wider columns | The side columns take the width: abbreviations and scores about a quarter bigger, longer penalty bars. Nothing new to feed; reads from further away. |
+| **F** end columns | Today's layout untouched in the middle, and an information column at each end carrying what C's strip carries on the taller panel: last goal, another game, the next game. The data is what C's strip already reads (`main.strip_for`); the columns are narrow, so each slot is a heading and a few short lines. |
+
+![E](e-wider-columns.png)
+![F](f-end-columns.png)
+
+**Until one is chosen, the shipped code draws the ends as plain margins** in
+the frame's background (`display.regions`), and the layout in the middle is
+the 4:1 frame byte for byte. That is deliberate: nothing goes into the ends
+that would later have to come out. Whichever is chosen comes with the same
+two things C did: the shift and the stale band placed against it and
+re-tested, and on F, the data.

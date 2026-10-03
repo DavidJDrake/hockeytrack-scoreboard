@@ -3,6 +3,7 @@ renderer needs (local clock, ticking penalties, goal flash, countdown)."""
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -210,6 +211,74 @@ def parse_chosen_at(payload: bytes) -> int | None:
     if isinstance(stamp, bool) or not isinstance(stamp, int):
         return None
     return stamp
+
+
+@dataclass(frozen=True)
+class NextGame:
+    """The panel's next kept game, off the config document's ``next`` key:
+    what the strip draws as "up next" (render.strip_lines; nothing here
+    does). ``start`` is kept as the RFC 3339 text the cloud sent, already
+    checked to name an instant, so the drawing code can format it in the
+    panel's zone without a second guess at what it means."""
+    game_id: int
+    away: str
+    home: str
+    start: str
+
+
+# The bounds the season holds a club's abbreviation to (cloud/internal/season):
+# two to four capital ASCII letters. A game id is the NHL's ten digits.
+_ABBREV = re.compile(r"^[A-Z]{2,4}$")
+_GAME_ID_MAX = 9_999_999_999
+_START_MAX_LEN = 40
+
+
+def _next_from(value) -> NextGame | None:
+    if not isinstance(value, dict):
+        return None
+    gid = value.get("gameId")
+    if isinstance(gid, bool) or not isinstance(gid, int) or not 0 < gid <= _GAME_ID_MAX:
+        return None
+    away, home, start = value.get("away"), value.get("home"), value.get("start")
+    if not all(isinstance(x, str) for x in (away, home, start)):
+        return None
+    # fullmatch, not match: with match, $ lets "MTL\n" through, and the strip
+    # would be handed a club with a newline in it.
+    if not _ABBREV.fullmatch(away) or not _ABBREV.fullmatch(home) or away == home:
+        return None
+    if len(start) > _START_MAX_LEN:
+        return None
+    try:
+        when = datetime.fromisoformat(start.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if when.tzinfo is None:
+        # No zone names no instant (the same refusal as seconds_to_start).
+        return None
+    return NextGame(gid, away, home, start)
+
+
+def parse_next(payload: bytes) -> NextGame | None:
+    """The next kept game out of a config message, or None.
+
+    Read to the same standard as parse_display: every field type-checked and
+    bounded, and a ``next`` that is wrong in any way is no next -- not a
+    strip with a blank club, not a start that will fail to format three
+    frames below a render loop. The rest of the document is read by the
+    other parsers and is not touched by this one being dropped: a bad next
+    costs the owner the strip, not their game or their sleep hours.
+
+    None is also the ordinary answer: an API that does not send the key yet,
+    a document from the API's own publishes (which never carry it), and a
+    panel with nothing kept after the game on screen.
+    """
+    try:
+        d = json.loads(payload)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(d, dict):
+        return None
+    return _next_from(d.get("next"))
 
 
 def parse_config(payload: bytes) -> int | None:
@@ -436,53 +505,3 @@ def keep_goal(kept: StripGoal | None, state: GameState) -> StripGoal | None:
     if kept is None or kept.game_id != state.game_id or new.order() >= kept.order():
         return new
     return kept
-
-
-@dataclass(frozen=True)
-class NextGame:
-    """This panel's next game, from the config document's ``next`` slot:
-    ``{gameId, away, home, start}``, composed by the director (SCO-56, item
-    3). ``start_ms`` is None for a start this panel cannot read; the matchup
-    is still true and is still drawn, without a time."""
-    game_id: int
-    away: str
-    home: str
-    start_ms: int | None
-
-
-def parse_next(payload) -> NextGame | None:
-    """The ``next`` slot of a config message, or None.
-
-    Read to the same standard as the rest of the document: a slot missing
-    anything it needs is no slot, and a document with no ``next`` at all --
-    every document until the director composes one -- means the strip's
-    third slot is empty. Never raises.
-    """
-    try:
-        d = json.loads(payload)
-    except (ValueError, TypeError):
-        return None
-    if not isinstance(d, dict) or not isinstance(d.get("next"), dict):
-        return None
-    slot = d["next"]
-    gid = slot.get("gameId")
-    if isinstance(gid, bool) or not isinstance(gid, int) or gid <= 0:
-        return None
-    away, home = _abbrev(slot.get("away")), _abbrev(slot.get("home"))
-    if away is None or home is None or away == home:
-        return None
-    return NextGame(gid, away, home, _start_ms(slot.get("start")))
-
-
-def _start_ms(value) -> int | None:
-    """An ISO instant with a zone, as ms since the epoch, or None. Parsed
-    the way seconds_to_start parses a start, for the same reasons."""
-    if not isinstance(value, str):
-        return None
-    try:
-        when = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        if when.tzinfo is None:
-            return None
-        return int(when.timestamp() * 1000)
-    except (ValueError, TypeError, OverflowError, OSError):
-        return None

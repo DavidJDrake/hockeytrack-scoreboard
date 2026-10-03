@@ -396,7 +396,7 @@ def _definitions_only(script_text):
     return script_text.split(marker, 1)[0]
 
 
-def _run_probe(tmp_path, script_text, tail):
+def _run_probe(tmp_path, script_text, tail, env=None):
     # Written to a real file, not `bash -c`, so ${BASH_SOURCE[0]} resolves
     # normally under `set -u` and REPO/DEVICE compute to paths under
     # tmp_path -- never the real checkout's device/config.
@@ -404,7 +404,92 @@ def _run_probe(tmp_path, script_text, tail):
     tools.mkdir(exist_ok=True)
     probe = tools / "probe.sh"
     probe.write_text(_definitions_only(script_text) + "\n" + tail + "\n")
-    return subprocess.run(["bash", str(probe)], capture_output=True, text=True, timeout=30)
+    return subprocess.run(["bash", str(probe)], capture_output=True, text=True, timeout=30,
+                          env=None if env is None else dict(os.environ, **env))
+
+
+# --- The pygame guard runs before the service account exists (SCO-26) -------
+#
+# install_appliance creates the scoreboard account and its state directory,
+# and only then builds the venv the pygame-provenance guard inspects. A guard
+# that fails there leaves the account behind. The fix is a throwaway venv
+# probed first, so the tests below drive that probe with a python3 shim: the
+# real one cannot be used, because pip --no-index against this machine's
+# site-packages would answer for this machine, not for a Pi, and the point is
+# the ordering and the cleanup, not the answer.
+
+PYTHON3_SHIM = r"""
+python3() {
+  # Stands in for `python3 -m venv --system-site-packages DIR`: the last
+  # argument is the venv directory. The pip it writes exits with PIP_EXIT
+  # (0 unless a test says otherwise), and the python it writes answers
+  # pygame's location from PYGAME_WHERE.
+  local dir="${@: -1}"
+  mkdir -p "$dir/bin"
+  printf '#!/bin/sh\nexit %s\n' "${PIP_EXIT:-0}" >"$dir/bin/pip"
+  printf '#!/bin/sh\necho "$PYGAME_WHERE"\n' >"$dir/bin/python"
+  chmod +x "$dir/bin/pip" "$dir/bin/python"
+}
+"""
+
+
+def _probe_provenance(tmp_path, where, pip_exit=0):
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    r = _run_probe(tmp_path, (REPO / "tools" / "pi-setup.sh").read_text(),
+                   PYTHON3_SHIM + "probe_pygame_provenance\necho probe-passed\n",
+                   env={"TMPDIR": str(scratch), "PYGAME_WHERE": where,
+                        "PIP_EXIT": str(pip_exit)})
+    return r, scratch
+
+
+def test_the_provenance_probe_accepts_the_distribution_pygame(tmp_path):
+    r, scratch = _probe_provenance(tmp_path, "/usr/lib/python3/dist-packages/pygame")
+    assert r.returncode == 0, r.stderr
+    assert "probe-passed" in r.stdout
+    assert list(scratch.iterdir()) == [], "the throwaway venv was left behind after a pass"
+
+
+def test_the_provenance_probe_refuses_a_pypi_pygame_and_cleans_up(tmp_path):
+    # The failure the guard exists for. The probe removes its directory and
+    # clears the trap BEFORE it judges the location, so on this path the
+    # cleanup is the explicit rm and die() finds nothing left to leak. This
+    # test does not reach the trap; the one below does.
+    r, scratch = _probe_provenance(tmp_path, str(tmp_path / "venv/lib/python3.13/site-packages/pygame"))
+    assert r.returncode != 0
+    assert "kmsdrm" in r.stderr
+    assert "probe-passed" not in r.stdout
+    assert list(scratch.iterdir()) == [], "the throwaway venv was left behind after a failure"
+
+
+def test_the_provenance_probe_cleans_up_when_pip_fails(tmp_path):
+    # The exit path the trap exists for. Under --no-index, pip fails when
+    # apt's python3-pygame does not satisfy requirements.txt (the realistic
+    # failure on a Pi), and `set -e` then leaves the function from the pip
+    # line -- above the explicit rm, with the venv half-built. Only the EXIT
+    # trap can remove it. Deleting the trap line in pi-setup.sh fails this
+    # test and only this test.
+    r, scratch = _probe_provenance(tmp_path, "/usr/lib/python3/dist-packages/pygame", pip_exit=1)
+    assert r.returncode != 0
+    assert "probe-passed" not in r.stdout
+    assert "kmsdrm" not in r.stderr, "the judgment ran on a venv pip never finished"
+    assert list(scratch.iterdir()) == [], "the throwaway venv was left behind after pip failed"
+
+
+def test_the_appliance_probes_pygame_before_creating_the_service_account():
+    # The ordering itself, read from the script: the probe must come before
+    # the first thing install_appliance creates. Everything above the
+    # account line is apt-get, which leaves nothing of ours behind.
+    body = install_appliance_body()
+    probe = body.index("probe_pygame_provenance")
+    account = body.index("==> service account")
+    assert probe < account, "a failed pygame guard would leave the scoreboard account behind"
+    assert body.index("useradd") > probe
+    assert body.index('install -d -o "$SERVICE_USER"') > probe
+    # And the guard on the venv that ships is still there; the probe adds a
+    # check, it does not move one.
+    assert body.count("require_distribution_pygame") == 1
+    assert body.index("require_distribution_pygame") > body.index("==> application")
 
 
 def test_appliance_install_dash_d_reaches_coreutils_install(tmp_path):

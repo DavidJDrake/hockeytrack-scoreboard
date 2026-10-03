@@ -4,7 +4,7 @@
 //
 // It is the second principal that may publish a panel's config document;
 // terraform/director.tf is the policy that says what it may do, and it is as
-// little as the job needs: read three tables, write one marker, publish to
+// little as the job needs: read four tables, write one marker, publish to
 // scoreboard/*/config. It takes one optional input, a thing name, which only
 // selects a row; nothing in the event reaches a panel.
 package main
@@ -30,6 +30,7 @@ import (
 	"hockeytrack-scoreboard/internal/gamestore"
 	"hockeytrack-scoreboard/internal/iotpub"
 	"hockeytrack-scoreboard/internal/season"
+	"hockeytrack-scoreboard/internal/templates"
 )
 
 // fetchSchedule reads HockeyTrack's schedule file, as cmd/api does. The
@@ -75,8 +76,13 @@ func main() {
 	}
 	devicesTable, accountsTable, gamesTable := os.Getenv("DEVICES_TABLE"), os.Getenv("ACCOUNTS_TABLE"), os.Getenv("GAMES_TABLE")
 	endpoint, scheduleURL := os.Getenv("IOT_ENDPOINT"), os.Getenv("SCHEDULE_URL")
-	if devicesTable == "" || accountsTable == "" || gamesTable == "" || endpoint == "" || scheduleURL == "" {
-		slog.Error("DEVICES_TABLE, ACCOUNTS_TABLE, GAMES_TABLE, IOT_ENDPOINT and SCHEDULE_URL are required")
+	// Required, not optional as it is for the API: a director without the
+	// templates table would direct every panel from its own games alone and
+	// say nothing, and the owner would see a panel skip what its template
+	// holds.
+	templatesTable := os.Getenv("TEMPLATES_TABLE")
+	if devicesTable == "" || accountsTable == "" || gamesTable == "" || templatesTable == "" || endpoint == "" || scheduleURL == "" {
+		slog.Error("DEVICES_TABLE, ACCOUNTS_TABLE, GAMES_TABLE, TEMPLATES_TABLE, IOT_ENDPOINT and SCHEDULE_URL are required")
 		os.Exit(1)
 	}
 	iot := iotdataplane.NewFromConfig(cfg, func(o *iotdataplane.Options) { o.BaseEndpoint = &endpoint })
@@ -89,12 +95,13 @@ func main() {
 		Dropped:  func(n int) { slog.Warn("schedule rows failed a check and were left out", "rows", n) },
 	}
 	d := &director.Director{
-		Devices:  devices.NewDynamo(db, devicesTable),
-		Games:    gamestore.NewDynamo(db, gamesTable),
-		Accounts: accounts.NewDynamo(db, accountsTable),
-		Season:   seasons.Get,
-		Pub:      iotpub.NewIoT(iot),
-		Now:      time.Now,
+		Devices:   devices.NewDynamo(db, devicesTable),
+		Games:     gamestore.NewDynamo(db, gamesTable),
+		Accounts:  accounts.NewDynamo(db, accountsTable),
+		Templates: templates.NewDynamo(db, templatesTable),
+		Season:    seasons.Get,
+		Pub:       iotpub.NewIoT(iot),
+		Now:       time.Now,
 	}
 	lambda.Start(func(ctx context.Context, payload json.RawMessage) error {
 		return d.Run(ctx, thingIn(payload))

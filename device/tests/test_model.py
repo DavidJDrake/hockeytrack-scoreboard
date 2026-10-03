@@ -133,6 +133,55 @@ def test_parse_config_rejects_anything_malformed():
         assert parse_config(bad) is None, bad
 
 
+NEXT = {"gameId": 2026020102, "away": "MTL", "home": "TOR", "start": "2026-10-15T02:00:00Z"}
+
+
+def _config(next_=NEXT) -> bytes:
+    return json.dumps({"gameId": 2026020101, "chosenAt": 7, "next": next_}).encode()
+
+
+def test_parse_next_reads_a_well_formed_next_game():
+    assert parse_next(_config()) == NextGame(2026020102, "MTL", "TOR", "2026-10-15T02:00:00Z")
+    # The season's other form of a start, with an offset, is read as well.
+    assert parse_next(_config({**NEXT, "start": "2026-10-14T22:00:00-04:00"})).start == "2026-10-14T22:00:00-04:00"
+
+
+def test_an_absent_next_is_none_and_costs_nothing():
+    """Documents from before this field, and from the API's own publishes,
+    have no next key; a null one is the same."""
+    for payload in [b'{"gameId":2026020101}', _config(None)]:
+        assert parse_next(payload) is None
+        assert parse_config(payload) == 2026020101
+
+
+@pytest.mark.parametrize("bad", [
+    "not an object", [], 1,
+    {**NEXT, "gameId": None}, {**NEXT, "gameId": "2026020102"}, {**NEXT, "gameId": True},
+    {**NEXT, "gameId": 0}, {**NEXT, "gameId": -1}, {**NEXT, "gameId": 10_000_000_000},
+    {k: v for k, v in NEXT.items() if k != "gameId"},
+    {**NEXT, "away": None}, {**NEXT, "away": 7}, {**NEXT, "away": ""}, {**NEXT, "away": "mtl"},
+    {**NEXT, "away": "MONTREAL"}, {**NEXT, "away": "M"}, {**NEXT, "away": "MTL "}, {**NEXT, "away": "MTL\n"}, {**NEXT, "away": "TOR"},
+    {k: v for k, v in NEXT.items() if k != "away"},
+    {**NEXT, "home": None}, {**NEXT, "home": 7}, {**NEXT, "home": "tor"}, {**NEXT, "home": "MTLX5"},
+    {k: v for k, v in NEXT.items() if k != "home"},
+    {**NEXT, "start": None}, {**NEXT, "start": 1789871240471}, {**NEXT, "start": ""},
+    {**NEXT, "start": "tonight"}, {**NEXT, "start": "2026-10-15T02:00:00"},
+    {**NEXT, "start": "2026-10-15T02:00:00Z" + " " * 40},
+    {k: v for k, v in NEXT.items() if k != "start"},
+], ids=lambda b: json.dumps(b)[:60])
+def test_a_next_that_is_wrong_in_any_way_is_dropped_and_the_game_is_kept(bad):
+    """This arrives from the network. One bad field costs the owner the
+    strip, never the game the document names."""
+    payload = _config(bad)
+    assert parse_next(payload) is None
+    assert parse_config(payload) == 2026020101
+
+
+def test_parse_next_never_raises():
+    for payload in [b"", b"not json", b"[]", b"null", b'"a string"', b"{", None, 5]:
+        assert parse_next(payload) is None
+
+
 def _intermission(seconds=1080):
     text = (FIX / "state_live.json").read_text().replace('"running":true,"intermission":false', '"running":false,"intermission":true')
     s = GameState.from_json(text)
@@ -444,41 +493,7 @@ def test_the_goals_team_and_number_are_bounded_before_they_are_drawn():
     assert got == StripGoal(2026020001, "", 0, "", "")
 
 
-# --- the next game ----------------------------------------------------------------
-
-NEXT = {"gameId": 2026020100, "away": "TOR", "home": "MTL", "start": "2026-10-03T23:00:00Z"}
-
-
-def config(**doc) -> bytes:
-    return json.dumps({"gameId": 2026020001, "chosenAt": 1, **doc}).encode()
-
-
-def test_the_next_game_is_read_out_of_the_config_document():
-    assert parse_next(config(next=NEXT)) == NextGame(2026020100, "TOR", "MTL", 1791068400000)
-
-
-def test_a_document_with_no_next_slot_is_no_next_game():
-    # Every document until the director composes one (SCO-56, item 3).
-    assert parse_next(config()) is None
-    assert parse_next(config(next=None)) is None
-
-
-@pytest.mark.parametrize("bad", [
-    {**NEXT, "gameId": "2026020100"}, {**NEXT, "gameId": 0}, {**NEXT, "gameId": True},
-    {k: v for k, v in NEXT.items() if k != "gameId"},
-    {**NEXT, "away": "Toronto"}, {**NEXT, "away": "MTL"}, {**NEXT, "home": None}, {**NEXT, "home": "M\0L"},
-    "TOR at MTL", 7, [NEXT],
-])
-def test_a_next_slot_missing_anything_it_needs_is_no_next_game(bad):
-    assert parse_next(config(next=bad)) is None
-
-
-@pytest.mark.parametrize("start", ["not a timestamp", "23:30", "2026-10-03T23:00:00", None, 7, "9999-99-99T00:00:00Z"])
-def test_a_start_this_panel_cannot_read_leaves_the_matchup_without_a_time(start):
-    # The matchup is still true, and the time is left off rather than guessed.
-    assert parse_next(config(next={**NEXT, "start": start})) == NextGame(2026020100, "TOR", "MTL", None)
-
-
-@pytest.mark.parametrize("payload", [b"", b"not json", b"[]", b"null", b'{"next":"soon"}', b"\xff", None, 5])
-def test_parse_next_never_raises(payload):
-    assert parse_next(payload) is None
+# The next game's parser is held above, next to parse_config, against the
+# shared cases in testdata/config-documents.json: a next the panel cannot read
+# is dropped whole, never a matchup without a time. What the strip makes of
+# one is test_render's business.

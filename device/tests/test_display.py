@@ -112,7 +112,6 @@ from scoreboard import render  # noqa: E402
     ((400, 1280), 90, (1920, 600)),
     ((1280, 400), 180, (1920, 600)),
     # Between the two: what the shape gives, on an even row.
-    ((440, 1920), None, (1920, 480)),   # narrower than 4:1 never goes under the layout
     ((1280, 351), None, (1920, 526)),   # 526.5 -> 526
     ((1280, 352), None, (1920, 528)),
     # A bench TV is capped, and letterboxed as before.
@@ -154,6 +153,68 @@ def test_the_real_panel_is_filled_edge_to_edge():
 def test_a_four_to_one_frame_is_the_layout_and_nothing_else():
     for strip in (False, True):
         assert regions(480, strip) == ((0, 0, 1920, 480), None, ())
+
+
+# --- the frame's width follows a longer panel's shape (SCO-70) --------------
+
+from scoreboard.display import MAX_FRAME_W  # noqa: E402
+
+
+@pytest.mark.parametrize("display, rotate, want", [
+    # The second panel: 440x1980 is 4.5:1, which at 480 rows is 2160 columns.
+    ((440, 1980), None, (2160, 480)),
+    ((440, 1980), 90, (2160, 480)),
+    ((1980, 440), 180, (2160, 480)),
+    # Longer than 4:1 by less: what the shape gives, on an even column.
+    ((440, 1920), None, (2094, 480)),   # 2094.5 -> 2094
+    ((441, 1980), None, (2154, 480)),   # 2155.1 -> 2154
+    # A panel longer than 5:1 is capped, and letterboxed at the ends as before.
+    ((320, 1920), None, (MAX_FRAME_W, 480)),
+    # The width never grows at the height's expense: a panel that is exactly
+    # 4:1 on the row rule is the layout, not a frame one column wider.
+    ((480, 1920), None, (1920, 480)),
+])
+def test_the_frame_is_as_wide_as_the_panels_shape_allows(display, rotate, want):
+    assert frame_size(display, rotate) == want
+
+
+def test_the_second_panel_is_filled_edge_to_edge():
+    frame = frame_size((440, 1980), None)
+    assert placement(frame, (440, 1980), None) == Placement(90, (440, 1980), (0, 0))
+
+
+def test_a_wider_frame_keeps_the_layout_in_the_middle_with_a_margin_at_each_end():
+    area = regions(480, frame_w=2160)
+    assert area.layout == (120, 0, 1920, 480)
+    assert area.strip is None
+    assert area.margins == ((0, 0, 120, 480), (2040, 0, 120, 480))
+
+
+def test_a_wider_frame_never_gets_a_strip_it_has_no_rows_for():
+    # The strip is what a TALLER panel gains. Asking for one on a frame that
+    # is wider and not taller changes nothing.
+    assert regions(480, strip=True, frame_w=2160) == regions(480, frame_w=2160)
+
+
+def test_an_odd_spare_width_puts_the_extra_column_on_the_right():
+    area = regions(480, frame_w=1923)
+    assert area.layout == (1, 0, 1920, 480)
+    assert area.margins == ((0, 0, 1, 480), (1921, 0, 2, 480))
+
+
+@pytest.mark.parametrize("w", range(1920, 2402, 2))
+def test_every_column_of_a_wider_frame_belongs_to_exactly_one_region(w):
+    area = regions(480, frame_w=w)
+    rects = [area.layout, *area.margins]
+    cols = sorted((r[0], r[0] + r[2]) for r in rects)
+    assert cols[0][0] == 0 and cols[-1][1] == w
+    assert all(a[1] == b[0] for a, b in zip(cols, cols[1:]))
+    assert all(r[1] == 0 and r[3] == 480 and r[2] > 0 for r in rects)
+
+
+def test_a_frame_narrower_than_the_layout_is_refused():
+    with pytest.raises(ValueError):
+        regions(480, frame_w=1918)
 
 
 def test_without_a_strip_the_layout_sits_where_the_letterbox_put_it():

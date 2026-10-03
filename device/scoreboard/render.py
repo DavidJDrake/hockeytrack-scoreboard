@@ -206,9 +206,29 @@ def stale_frame(state: GameState | None, stale_s: float | None) -> bool:
             and state.state not in STATIC_STATES)
 
 
+def display_line(display: tuple[int, int]) -> str:
+    """The display's reported size and shape as one line, e.g. ``440 x 1980
+    (4.5:1)``: long side over short side, to one decimal, whichever way
+    round the panel reported itself. The hardware's numbers are shown as
+    reported and never divided by zero: a side of zero gets no ratio."""
+    w, h = display
+    long_side, short_side = max(w, h), min(w, h)
+    if short_side <= 0:
+        return f"{w} x {h}"
+    return f"{w} x {h}  ({long_side / short_side:.1f}:1)"
+
+
 def draw(surface: pygame.Surface, state: GameState | None, now_ms: int, assets: Assets,
-         link_ok: bool = True, clock_ok: bool = True, stale_s: float | None = None) -> None:
+         link_ok: bool = True, clock_ok: bool = True, stale_s: float | None = None,
+         display: tuple[int, int] | None = None) -> None:
     """Paint one frame of the scoreboard.
+
+    ``display`` is the size the attached display reported, or None when the
+    caller has nothing to say about it. It appears on the waiting-for-a-game
+    screen only, as one muted line, so a new panel's resolution can be read
+    off the glass instead of off the card: the second panel turned out to
+    be 440x1980 and nobody knew until the journal was read. Nothing else on
+    the panel changes with it.
 
     ``clock_ok`` is False while this panel's wall clock has not been set by
     NTP. It has no RTC, so until then ``now_ms`` may be hours out, and the
@@ -237,6 +257,11 @@ def draw(surface: pygame.Surface, state: GameState | None, now_ms: int, assets: 
     if state is None:
         _text(surface, assets, "HOCKEYTRACK", 120, INK, W // 2, H // 2 - 40, "center")
         _text(surface, assets, "waiting for a game...", 48, MUTED, W // 2, H // 2 + 60, "center", bold=False)
+        if display is not None:
+            # Under the waiting line, well clear of the bottom edge: the
+            # burn-in shift only ever moves the frame up, and this must not
+            # become the one line the bottom margin cannot afford.
+            _text(surface, assets, display_line(display), 36, MUTED, W // 2, H // 2 + 135, "center", bold=False)
         return
 
     if state.state == "PRE":
@@ -371,8 +396,14 @@ def _ordinal(label: str) -> str:
     return f"{n}{'ST' if n == 1 else 'ND' if n == 2 else 'RD' if n == 3 else 'TH'}"
 
 
-def _local_time(start_ms: int | None, zone: str | None) -> str:
+def _local_time(start: str | None, zone: str | None) -> str:
     """"SAT 7:00 PM" where the panel hangs, or "" when that cannot be said.
+
+    ``start`` is the RFC 3339 text the config document carried, which
+    model.parse_next has already held to naming an instant with a zone (a
+    next that does not is dropped whole, matchup and all). It is read again
+    here rather than trusted, because NextGame is a plain record and this
+    is the function that would hand a bad value to the clock arithmetic.
 
     The zone is the one the owner chose for sleep hours, which is the only
     zone this panel knows for certain; the image's own /etc/localtime is
@@ -381,10 +412,13 @@ def _local_time(start_ms: int | None, zone: str | None) -> str:
     is still true. The day names are spelled here rather than by strftime,
     whose spelling follows the locale of whatever machine is running this.
     """
-    if start_ms is None or not zone:
+    if not start or not zone or not isinstance(start, str):
         return ""
     try:
-        local = datetime.fromtimestamp(start_ms / 1000, ZoneInfo(zone))
+        when = datetime.fromisoformat(start.replace("Z", "+00:00"))
+        if when.tzinfo is None:
+            return ""
+        local = when.astimezone(ZoneInfo(zone))
     except (ZoneInfoNotFoundError, ValueError, TypeError, OSError, OverflowError):
         return ""
     hour = local.hour % 12 or 12
@@ -416,7 +450,7 @@ def strip_lines(goal: StripGoal | None, other: SummaryGame | None,
         next_text = ""
     else:
         next_text = "  ".join(part for part in ("NEXT", f"{nxt.away} at {nxt.home}",
-                                                _local_time(nxt.start_ms, zone)) if part)
+                                                _local_time(nxt.start, zone)) if part)
     return Strip(goal_text, other_text, next_text)
 
 

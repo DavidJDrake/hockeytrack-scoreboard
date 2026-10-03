@@ -35,6 +35,47 @@ def test_draw_live_frame_paints_team_colours_and_clock():
     assert any(max(c) > 200 for c in centre), "clock digits not drawn"
 
 
+def test_the_waiting_screen_says_what_size_the_display_reported():
+    # The one line that lets a new panel's resolution be read off the glass
+    # instead of the card (SCO-70). Something is drawn under the waiting
+    # line where nothing was before, and it is the display's own numbers.
+    from scoreboard.render import display_line
+    assert display_line((440, 1980)) == "440 x 1980  (4.5:1)"
+    assert display_line((1980, 440)) == "1980 x 440  (4.5:1)"
+    assert display_line((400, 1280)) == "400 x 1280  (3.2:1)"
+    assert display_line((0, 1280)) == "0 x 1280"   # the hardware's claim, not a division by zero
+    without, with_size, assets = surface(), surface(), Assets()
+    draw(without, None, 0, assets)
+    draw(with_size, None, 0, assets, display=(440, 1980))
+    band = pygame.Rect(0, H // 2 + 100, W, 70)
+    assert pygame.image.tostring(without.subsurface(band), "RGB") == bg_bytes(band)
+    assert pygame.image.tostring(with_size.subsurface(band), "RGB") != bg_bytes(band)
+    # Nothing else moved: above the band the two screens are identical.
+    above = pygame.Rect(0, 0, W, band.top)
+    assert pygame.image.tostring(without.subsurface(above), "RGB") == \
+        pygame.image.tostring(with_size.subsurface(above), "RGB")
+
+
+def test_the_display_size_appears_only_on_the_waiting_screen():
+    assets = Assets()
+    for name in ("state_live.json", "state_pre.json"):
+        s = GameState.from_json((FIX / name).read_bytes())
+        plain, sized = surface(), surface()
+        draw(plain, s, s.as_of_ms, assets)
+        draw(sized, s, s.as_of_ms, assets, display=(440, 1980))
+        assert pygame.image.tostring(plain, "RGB") == pygame.image.tostring(sized, "RGB"), \
+            f"{name} changed when the display size was given"
+
+
+def test_a_size_line_with_no_display_draws_exactly_what_it_drew_before():
+    # A caller that says nothing about the display gets the old screen byte
+    # for byte, which is what test_canvas's equivalence rests on.
+    a, b, assets = surface(), surface(), Assets()
+    draw(a, None, 0, assets)
+    draw(b, None, 0, assets, display=None)
+    assert pygame.image.tostring(a, "RGB") == pygame.image.tostring(b, "RGB")
+
+
 def test_draw_handles_every_state_without_error():
     surf, assets = surface(), Assets()
     for name in ("state_live.json", "state_pre.json"):
@@ -565,7 +606,7 @@ from scoreboard.render import (MUTED, STRIP_BG, STRIP_MARGIN, STRIP_MIN_PX, STRI
 
 GOAL = StripGoal(2026020001, "TBL", 86, "2", "12:41")
 OTHER = SummaryGame(2026020002, "BOS", "MTL", 2, 1, "LIVE", "3", False)
-NEXT = NextGame(2026020100, "TOR", "MTL", 1791068400000)   # 2026-10-03T23:00:00Z
+NEXT = NextGame(2026020100, "TOR", "MTL", "2026-10-03T23:00:00Z")   # a Saturday evening
 ZONE = "America/Toronto"
 
 
@@ -624,13 +665,21 @@ def test_the_next_games_time_is_where_the_panel_hangs_or_left_off():
     assert strip_lines(None, None, NEXT, "America/Vancouver").next == "NEXT  TOR at MTL  SAT 4:00 PM"
     assert strip_lines(None, None, NEXT, "Europe/London").next == "NEXT  TOR at MTL  SUN 12:00 AM"
     assert strip_lines(None, None, NEXT, None).next == "NEXT  TOR at MTL"
-    assert strip_lines(None, None, NextGame(1, "TOR", "MTL", None), ZONE).next == "NEXT  TOR at MTL"
+    # The season's other form of a start, with an offset, reads the same.
+    assert strip_lines(None, None, NextGame(1, "TOR", "MTL", "2026-10-03T19:00:00-04:00"), ZONE).next \
+        == "NEXT  TOR at MTL  SAT 7:00 PM"
 
 
 def test_a_zone_or_an_instant_this_panel_cannot_use_leaves_the_time_off():
+    # parse_next drops a next whose start is not an instant, so these never
+    # reach the strip off the network; NextGame is a plain record, though,
+    # and the matchup stays true whatever its start says.
     for zone in ("Mars/Olympus", "", "../../etc/passwd"):
         assert strip_lines(None, None, NEXT, zone).next == "NEXT  TOR at MTL", zone
-    for start in (-(10 ** 18), 10 ** 18, 2 ** 63):
+    # (The last two: an instant whose shift to the zone falls outside what
+    # datetime can hold, and a start in the shape the old parser kept.)
+    for start in (None, "", "tonight", "2026-10-03T23:00:00", "9999-99-99T00:00:00Z",
+                  "0001-01-01T00:00:00Z", 1791068400000):
         assert strip_lines(None, None, NextGame(1, "TOR", "MTL", start), ZONE).next == "NEXT  TOR at MTL", start
 
 
@@ -705,7 +754,7 @@ def test_the_longest_lines_the_parsers_allow_still_read_across_a_room():
     inner = slot_rect(0).width - 2 * STRIP_SLOT_PAD
     for longest in strip_lines(StripGoal(1, "WWWW", 99, "10OT", "20:00"),
                                SummaryGame(2, "WWWW", "MMMM", 99, 99, "LIVE", "10OT", True),
-                               NextGame(3, "WWWW", "MMMM", 1791068400000), "Pacific/Auckland"):
+                               NextGame(3, "WWWW", "MMMM", "2026-10-03T23:00:00Z"), "Pacific/Auckland"):
         px = fit_px(assets, longest, 48, inner, bold=False, min_px=STRIP_MIN_PX)
         assert assets.font(px, False).size(longest)[0] <= inner, longest
         assert px >= 32, f"{longest!r} was shrunk to {px} px"
@@ -741,4 +790,4 @@ def test_fuzzed_summary_rows_and_goals_never_stop_the_strip_being_drawn():
         goal = StripGoal(1, "".join(rng.choice("ABCDEFGH") for _ in range(rng.randint(0, 4))),
                          rng.randint(0, 99), rng.choice(["", "1", "OT", "2OT", "SO", "99"]), rng.choice(["", "12:41", "20:00"]))
         draw_strip(surf, strip_lines(goal, parsed[0] if parsed else None,
-                                     NextGame(1, "TOR", "MTL", rng.choice([None, 0, 1791068400000])), ZONE), assets)
+                                     NextGame(1, "TOR", "MTL", rng.choice([None, "", "2026-10-03T23:00:00Z"])), ZONE), assets)

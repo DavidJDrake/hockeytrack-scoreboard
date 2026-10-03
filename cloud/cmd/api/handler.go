@@ -20,6 +20,7 @@ import (
 	"hockeytrack-scoreboard/internal/schedule"
 	"hockeytrack-scoreboard/internal/season"
 	"hockeytrack-scoreboard/internal/settings"
+	"hockeytrack-scoreboard/internal/templates"
 )
 
 // Handler serves the admin API. Every device-scoped route resolves the
@@ -48,6 +49,23 @@ type Handler struct {
 	// itself: that stays one principal's job. Nil means the minute sweep is
 	// the only trigger.
 	Direct func(ctx context.Context, thing string) error
+	// Templates holds each account's templates (internal/templates), read
+	// under the caller's subject and never by id alone. Nil means nobody has
+	// any: the template routes say so, a schedule naming one is refused as
+	// not found, and a row that names one anyway is listed with Known false,
+	// as it is when the table is down, never with a kept set built without
+	// the template games in it.
+	Templates templates.Store
+	// NewID makes a template id. Injected so a test can make a collision;
+	// nil means templates.NewID.
+	NewID func() string
+}
+
+func (h *Handler) newID() string {
+	if h.NewID != nil {
+		return h.NewID()
+	}
+	return templates.NewID()
 }
 
 func (h *Handler) now() time.Time {
@@ -82,9 +100,10 @@ type deviceView struct {
 }
 
 // scheduleView is a panel's schedule as stored, plus what follows from it.
-// Kept, Next and Undecided need the season; when it could not be read they
-// are absent and Known is false, so the site can say so rather than show an
-// empty list as if it were an answer.
+// Kept, Next and Undecided need the season and, for a panel with templates,
+// the templates' games; when either could not be read they are absent and
+// Known is false, so the site can say so rather than show an empty list, or
+// a list missing the template games, as if it were an answer.
 type scheduleView struct {
 	Games       []int64               `json:"games"`
 	Templates   []string              `json:"templates"`
@@ -97,7 +116,17 @@ type scheduleView struct {
 // nextShown is how many coming games a panel's row lists.
 const nextShown = 3
 
-func scheduleViewOf(p schedule.Panel, s *season.Season, now time.Time) scheduleView {
+// outcome is what the rules make of a panel's schedule today: its own games
+// and its templates' games together, the panel's own winning any unanswered
+// conflict. tpls is the owner's templates by id (templates.GamesOf); a panel
+// with none needs none. Every kept set shown or acted on comes from here, so
+// the site, the director and a template edit's report agree.
+func outcome(p schedule.Panel, tpls map[string][]int64, s *season.Season) schedule.Outcome {
+	games, sources := schedule.Candidates(p, tpls)
+	return schedule.Resolve(p, games, sources, s.Starts(games))
+}
+
+func scheduleViewOf(p schedule.Panel, tpls map[string][]int64, s *season.Season, now time.Time) scheduleView {
 	v := scheduleView{Games: p.Games, Templates: p.Templates, Resolutions: p.Resolutions}
 	if v.Games == nil {
 		v.Games = []int64{}
@@ -112,7 +141,7 @@ func scheduleViewOf(p schedule.Panel, s *season.Season, now time.Time) scheduleV
 		return v
 	}
 	v.Known = true
-	out := schedule.Resolve(p, p.Games, nil, s.Starts(p.Games))
+	out := outcome(p, tpls, s)
 	v.Undecided = out.Undecided
 	for _, id := range out.Kept {
 		g, ok := s.Find(id)
@@ -183,7 +212,17 @@ func (h *Handler) send(ctx context.Context, d devices.Device, account settings.S
 	resolved, _ := settings.Resolve(account, d.Display)
 	// A switch that has ended is not sent: the panel would ignore it, and the
 	// document should say what is true.
-	payload, err := panelconfig.Compose(d.GameID, d.ChosenAt, resolved, d.Wake.Live(h.now()))
+	//
+	// The next game is nil here, deliberately. Working out a panel's next
+	// kept game is the director's rule (internal/director.Next) over a
+	// situation only the director builds, and the API never works out a
+	// scheduled game itself: that stays one principal's job. So a publish
+	// from here -- a choice, a settings save, the sleep switch -- carries no
+	// next, and the panel's strip is empty until the director's next publish
+	// to that panel fills it, which is its next change of game. What is not
+	// covered: the director publishes only on a change of game, so a settings
+	// save between two games leaves the strip empty until the second starts.
+	payload, err := panelconfig.Compose(d.GameID, d.ChosenAt, resolved, d.Wake.Live(h.now()), nil)
 	if err != nil {
 		return err
 	}
@@ -197,6 +236,88 @@ const maxScheduleBody = 64 << 10
 // maxSettingsBody is far more than any settings document needs. Decode is
 // strict about keys; this is strict about size before it parses anything.
 const maxSettingsBody = 4 << 10
+
+// viewOne is view for a route that answers with one panel, reading what its
+// schedule needs.
+func (h *Handler) viewOne(ctx context.Context, d devices.Device, account *settings.Settings) deviceView {
+	sn, tpls := h.scheduleInputs(ctx, d.Owner, []devices.Device{d})
+	return h.view(ctx, d, account, sn, tpls)
+}
+
+// affectedPanel is one panel a template edit changed the games of, and
+// whether the change left it with a conflict nobody has answered.
+type affectedPanel struct {
+	ThingName     string    `json:"thingName"`
+	Name          string    `json:"name"`
+	NeedsDecision bool      `json:"needsDecision"`
+	Undecided     [][]int64 `json:"undecided"`
+}
+
+// affected reports the caller's panels that use template id, as they stand
+// after the edit, and asks the director to run for each: a template edit
+// changes what those panels show, and the change should be felt now. tpls
+// is the caller's templates with the edit in them.
+func (h *Handler) affected(ctx context.Context, sub, id string, tpls map[string][]int64, sn *season.Season) ([]affectedPanel, error) {
+	devs, err := h.Store.ListByOwner(ctx, sub)
+	if err != nil {
+		return nil, err
+	}
+	out := []affectedPanel{}
+	for _, d := range devs {
+		if !uses(d, id) {
+			continue
+		}
+		o := outcome(d.Schedule, tpls, sn)
+		out = append(out, affectedPanel{ThingName: d.ThingName, Name: d.Name,
+			NeedsDecision: len(o.Undecided) > 0, Undecided: o.Undecided})
+		if h.Direct != nil {
+			if err := h.Direct(ctx, d.ThingName); err != nil {
+				slog.Warn("director not asked; the next minute will act", "thing", d.ThingName, "err", err)
+			}
+		}
+	}
+	return out, nil
+}
+
+// uses reports whether a panel's schedule names template id.
+func uses(d devices.Device, id string) bool {
+	for _, t := range d.Schedule.Templates {
+		if t == id {
+			return true
+		}
+	}
+	return false
+}
+
+// find returns the caller's template with this id, from the list the store
+// gave for the caller. There is no other way to reach a template from an id:
+// one that is not in the caller's list does not exist, whoever holds it.
+func find(list []templates.Template, id string) (templates.Template, bool) {
+	for _, t := range list {
+		if t.ID == id {
+			return t, true
+		}
+	}
+	return templates.Template{}, false
+}
+
+// templateBody reads a template request: size, then shape, then the name.
+func templateBody(rawBody []byte) (templates.Template, events.APIGatewayV2HTTPResponse, bool) {
+	if len(rawBody) > templates.MaxBody {
+		res, _ := fail(400, "invalid template")
+		return templates.Template{}, res, false
+	}
+	t, err := templates.Decode(rawBody)
+	switch {
+	case errors.Is(err, templates.ErrBadName):
+		res, _ := fail(400, "invalid name")
+		return templates.Template{}, res, false
+	case err != nil:
+		res, _ := fail(400, "invalid template")
+		return templates.Template{}, res, false
+	}
+	return t, events.APIGatewayV2HTTPResponse{}, true
+}
 
 // seasonOrNil reads the season for a view. A schedule source that is down
 // must not take the panels off the page; they are listed without what
@@ -213,19 +334,57 @@ func (h *Handler) seasonOrNil(ctx context.Context) *season.Season {
 	return &s
 }
 
-// seasonOrNilFor is seasonOrNil for one panel, skipping the read when the
-// panel has no schedule for it to explain.
-func (h *Handler) seasonOrNilFor(ctx context.Context, d devices.Device) *season.Season {
-	if d.Schedule.IsZero() {
-		return nil
+// templatesOf reads the caller's templates as the schedule rules take them.
+// With no templates store wired (an older deployment) an account has none.
+func (h *Handler) templatesOf(ctx context.Context, sub string) (map[string][]int64, error) {
+	if h.Templates == nil {
+		return map[string][]int64{}, nil
 	}
-	return h.seasonOrNil(ctx)
+	list, err := h.Templates.List(ctx, sub)
+	if err != nil {
+		return nil, err
+	}
+	return templates.GamesOf(list), nil
 }
 
-func (h *Handler) view(ctx context.Context, d devices.Device, account *settings.Settings, sn *season.Season) deviceView {
+// scheduleInputs reads what these panels' schedule views need beyond their
+// rows: the season, and the owner's templates when any panel has one. The
+// reads are skipped when no panel has a schedule to explain. Either source
+// down is a nil season, and the views say less (Known false) rather than
+// show a kept set built without the template games in it.
+func (h *Handler) scheduleInputs(ctx context.Context, sub string, panels []devices.Device) (*season.Season, map[string][]int64) {
+	scheduled, templated := false, false
+	for _, d := range panels {
+		scheduled = scheduled || !d.Schedule.IsZero()
+		templated = templated || len(d.Schedule.Templates) > 0
+	}
+	if !scheduled {
+		return nil, nil
+	}
+	tpls := map[string][]int64{}
+	if templated {
+		// No store wired is the same failure as a store that cannot be read,
+		// as the director treats it (internal/director): a row names
+		// templates and their games cannot be had, so the view says less
+		// rather than show a kept set the owner did not ask for. Only a row
+		// written under a deployment that had the table can be in this state.
+		if h.Templates == nil {
+			slog.Warn("templates not configured; listing panels without what follows from their schedules")
+			return nil, nil
+		}
+		var err error
+		if tpls, err = h.templatesOf(ctx, sub); err != nil {
+			slog.Warn("templates unavailable; listing panels without what follows from their schedules", "err", err)
+			return nil, nil
+		}
+	}
+	return h.seasonOrNil(ctx), tpls
+}
+
+func (h *Handler) view(ctx context.Context, d devices.Device, account *settings.Settings, sn *season.Season, tpls map[string][]int64) deviceView {
 	v := deviceView{ThingName: d.ThingName, Name: d.Name, GameID: d.GameID, ChosenAt: d.ChosenAt,
 		Wake:     d.Wake.Live(h.now()),
-		Schedule: scheduleViewOf(d.Schedule, sn, h.now())}
+		Schedule: scheduleViewOf(d.Schedule, tpls, sn, h.now())}
 	if account != nil {
 		view := settings.ViewOf(*account, d.Display)
 		v.Display = &view
@@ -319,16 +478,10 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 		} else {
 			slog.Warn("defaults lookup failed; listing panels without resolved settings", "err", err)
 		}
-		var sn *season.Season
-		for _, d := range devs {
-			if !d.Schedule.IsZero() { // nobody has a schedule: no need to fetch one
-				sn = h.seasonOrNil(ctx)
-				break
-			}
-		}
+		sn, tpls := h.scheduleInputs(ctx, sub, devs)
 		out := make([]deviceView, 0, len(devs))
 		for _, d := range devs {
-			out = append(out, h.view(ctx, d, account, sn))
+			out = append(out, h.view(ctx, d, account, sn, tpls))
 		}
 		return respond(200, out)
 
@@ -412,7 +565,7 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 			return fail(500, "save failed")
 		}
 		slog.Info("panel settings saved", "sub", sub, "thing", d.ThingName)
-		return respond(200, h.view(ctx, d, &account, h.seasonOrNilFor(ctx, d)))
+		return respond(200, h.viewOne(ctx, d, &account))
 
 	case "PUT /api/devices/{thing}/wake":
 		// The owner's hand on the sleep switch: awake, asleep, or auto (follow
@@ -457,7 +610,7 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 			return fail(500, "save failed")
 		}
 		slog.Info("panel wake switch set", "sub", sub, "thing", d.ThingName, "mode", body.Mode)
-		return respond(200, h.view(ctx, d, &account, h.seasonOrNilFor(ctx, d)))
+		return respond(200, h.viewOne(ctx, d, &account))
 
 	case "PUT /api/devices/{thing}/game":
 		var body struct {
@@ -506,7 +659,7 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 		if err := h.Store.Update(ctx, d); err != nil {
 			return fail(500, "save failed")
 		}
-		return respond(200, h.view(ctx, d, &account, h.seasonOrNilFor(ctx, d)))
+		return respond(200, h.viewOne(ctx, d, &account))
 
 	case "GET /api/schedule":
 		// The whole season, for the picker. Public data, served here only
@@ -544,11 +697,20 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 		if !ok {
 			return fail(404, "no such device")
 		}
+		// Every template named is looked up under the caller, in the list
+		// the store gives for their subject, before it is attached. One that
+		// is not there is not theirs or does not exist, and those are the
+		// same answer on purpose: not-yours is a 404, never a 403.
+		tpls := map[string][]int64{}
 		if len(asked.Templates) > 0 {
-			// A template is looked up under the caller, and the caller has
-			// none: there is nowhere to make one yet. Not-yours and
-			// not-there are the same answer on purpose.
-			return fail(404, "no such template")
+			if tpls, err = h.templatesOf(ctx, sub); err != nil {
+				return fail(500, "lookup failed")
+			}
+			for _, id := range asked.Templates {
+				if _, ok := tpls[id]; !ok {
+					return fail(404, "no such template")
+				}
+			}
 		}
 		if h.Season == nil {
 			return fail(500, "no schedule source")
@@ -560,12 +722,15 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 			slog.Warn("season unavailable; schedule not saved", "err", err)
 			return fail(502, "schedule unavailable")
 		}
-		saved, err := schedule.Save(asked, d.Schedule, sn.Starts(asked.Games))
+		all, _ := schedule.Candidates(asked, tpls)
+		saved, err := schedule.Save(asked, d.Schedule, tpls, sn.Starts(all))
 		switch {
 		case errors.Is(err, schedule.ErrUnknownGame):
 			return fail(400, "unknown game")
 		case errors.Is(err, schedule.ErrBadResolution):
 			return fail(400, "invalid resolution")
+		case errors.Is(err, schedule.ErrUnknownTemplate):
+			return fail(404, "no such template")
 		case err != nil:
 			return fail(400, "invalid schedule")
 		}
@@ -582,7 +747,7 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 			return fail(500, "save failed")
 		}
 		slog.Info("panel schedule saved", "sub", sub, "thing", d.ThingName,
-			"games", len(d.Schedule.Games), "resolutions", len(d.Schedule.Resolutions))
+			"games", len(d.Schedule.Games), "templates", len(d.Schedule.Templates), "resolutions", len(d.Schedule.Resolutions))
 		if h.Direct != nil {
 			// The save is done; a director that cannot be reached is a
 			// change felt within the minute, not a failed save.
@@ -590,7 +755,177 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 				slog.Warn("director not asked; the next minute will act", "thing", d.ThingName, "err", err)
 			}
 		}
-		return respond(200, scheduleViewOf(d.Schedule, &sn, h.now()))
+		return respond(200, scheduleViewOf(d.Schedule, tpls, &sn, h.now()))
+
+	case "GET /api/templates":
+		// The caller's templates: one Query under their subject. There is
+		// no route that takes an id and no owner.
+		if h.Templates == nil {
+			return fail(500, "templates are not configured")
+		}
+		list, err := h.Templates.List(ctx, sub)
+		if err != nil {
+			return fail(500, "list failed")
+		}
+		return respond(200, list)
+
+	case "POST /api/templates":
+		// Size, then shape, then the season, then the bound on the account.
+		// The id is made here and never taken from the body.
+		if h.Templates == nil {
+			return fail(500, "templates are not configured")
+		}
+		t, res, ok := templateBody(rawBody)
+		if !ok {
+			return res, nil
+		}
+		if h.Season == nil {
+			return fail(500, "no schedule source")
+		}
+		sn, err := h.Season(ctx)
+		if err != nil {
+			// Without the season a game id cannot be vouched for. Nothing is
+			// stored on a guess.
+			slog.Warn("season unavailable; template not saved", "err", err)
+			return fail(502, "schedule unavailable")
+		}
+		// A new template has no previous list, so every id must be in the
+		// season now: unknown ids are refused, never dropped quietly.
+		if t.Games, err = schedule.CheckGames(t.Games, nil, sn.Starts(t.Games)); err != nil {
+			return fail(400, "unknown game")
+		}
+		list, err := h.Templates.List(ctx, sub)
+		if err != nil {
+			return fail(500, "lookup failed")
+		}
+		// The bound is read-then-write, not a condition on the table: two
+		// creates racing could leave an account one over it. Twenty-one
+		// templates is not a harm worth a transaction; a runaway client is
+		// what the bound is for, and it stops one.
+		if len(list) >= templates.MaxPerAccount {
+			return respond(409, struct {
+				Error string `json:"error"`
+				Max   int    `json:"max"`
+			}{"too many templates", templates.MaxPerAccount})
+		}
+		// A collision on a fresh id is one in 2^96; a second try covers a
+		// broken NewID in a test, and after that something is wrong.
+		for try := 0; try < 2; try++ {
+			t.ID = h.newID()
+			err = h.Templates.Create(ctx, sub, t)
+			if !errors.Is(err, templates.ErrExists) {
+				break
+			}
+		}
+		if err != nil {
+			return fail(500, "save failed")
+		}
+		slog.Info("template created", "sub", sub, "template", t.ID, "games", len(t.Games))
+		return respond(201, t)
+
+	case "PUT /api/templates/{id}":
+		// The id from the path is only ever compared against the caller's
+		// own list. The body replaces the name and the games; a game the
+		// template already had that has since left the season is over and
+		// is dropped, as on a panel; a new id not in the season is refused.
+		if h.Templates == nil {
+			return fail(500, "templates are not configured")
+		}
+		t, res, ok := templateBody(rawBody)
+		if !ok {
+			return res, nil
+		}
+		list, err := h.Templates.List(ctx, sub)
+		if err != nil {
+			return fail(500, "lookup failed")
+		}
+		prev, ok := find(list, req.PathParameters["id"])
+		if !ok {
+			return fail(404, "no such template")
+		}
+		if h.Season == nil {
+			return fail(500, "no schedule source")
+		}
+		sn, err := h.Season(ctx)
+		if err != nil {
+			slog.Warn("season unavailable; template not saved", "err", err)
+			return fail(502, "schedule unavailable")
+		}
+		if t.Games, err = schedule.CheckGames(t.Games, prev.Games, sn.Starts(t.Games)); err != nil {
+			return fail(400, "unknown game")
+		}
+		t.ID = prev.ID
+		if err := h.Templates.Replace(ctx, sub, t); err != nil {
+			if errors.Is(err, templates.ErrNotFound) {
+				return fail(404, "no such template")
+			}
+			return fail(500, "save failed")
+		}
+		// Editing a template changes what several panels show. The answer
+		// says which, and whether any now has a conflict the owner must
+		// settle; the site (SCO-43) takes them through those. Nothing is
+		// refused for it: the default rule stands in until they do, and the
+		// panel is flagged until then.
+		tpls := templates.GamesOf(list)
+		tpls[t.ID] = t.Games
+		panels, err := h.affected(ctx, sub, t.ID, tpls, &sn)
+		if err != nil {
+			// Saved, but the report could not be built: the site should
+			// refresh rather than believe an empty list.
+			return fail(500, "lookup failed")
+		}
+		slog.Info("template saved", "sub", sub, "template", t.ID, "games", len(t.Games), "panels", len(panels))
+		return respond(200, struct {
+			templates.Template
+			Panels []affectedPanel `json:"panels"`
+		}{t, panels})
+
+	case "DELETE /api/templates/{id}":
+		if h.Templates == nil {
+			return fail(500, "templates are not configured")
+		}
+		list, err := h.Templates.List(ctx, sub)
+		if err != nil {
+			return fail(500, "lookup failed")
+		}
+		t, ok := find(list, req.PathParameters["id"])
+		if !ok {
+			return fail(404, "no such template")
+		}
+		// A template a panel uses is not deleted: the panel would silently
+		// show less. The owner detaches it first, or does not delete it.
+		// Only the caller's panels can use it, since attaching one is done
+		// under the caller, so their list is the whole count. The check is
+		// read-then-write, like the per-account bound: a schedule save that
+		// attaches this template between the list and the delete leaves a
+		// panel naming a template that is gone. schedule.Candidates ignores
+		// an id with no entry, so that panel shows less, never more, and the
+		// owner's own two requests are the only way to race it.
+		devs, err := h.Store.ListByOwner(ctx, sub)
+		if err != nil {
+			return fail(500, "lookup failed")
+		}
+		using := []string{}
+		for _, d := range devs {
+			if uses(d, t.ID) {
+				using = append(using, d.ThingName)
+			}
+		}
+		if len(using) > 0 {
+			return respond(409, struct {
+				Error  string   `json:"error"`
+				Panels int      `json:"panels"`
+				Things []string `json:"thingNames"`
+			}{"template in use", len(using), using})
+		}
+		if err := h.Templates.Delete(ctx, sub, t.ID); err != nil {
+			if errors.Is(err, templates.ErrNotFound) {
+				return fail(404, "no such template")
+			}
+			return fail(500, "delete failed")
+		}
+		slog.Info("template deleted", "sub", sub, "template", t.ID)
+		return respond(200, map[string]string{"id": t.ID})
 
 	case "PATCH /api/devices/{thing}":
 		var body struct {
@@ -610,7 +945,7 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 		if err := h.Store.Update(ctx, d); err != nil {
 			return fail(500, "save failed")
 		}
-		return respond(200, h.view(ctx, d, nil, h.seasonOrNilFor(ctx, d)))
+		return respond(200, h.viewOne(ctx, d, nil))
 
 	case "DELETE /api/devices/{thing}":
 		_, ok, err := h.owned(ctx, thing, sub)

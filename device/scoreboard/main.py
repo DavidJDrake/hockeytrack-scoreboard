@@ -140,6 +140,13 @@ GRACE_S = 5 * 60
 # the paragraph above, and the strip that will take those rows runs to the
 # frame's bottom edge the same way the penalty bars do.
 #
+# On a panel longer than 4:1 (440x1980) the frame is wider than the layout
+# instead, with 120 columns of margin at each end. The ring's +-4 px across
+# is inside the layout's own 60 px side margins, so it never needed the
+# frame's, and it stays inside the frame on every panel: a step's reach is
+# bounded by the pattern below and by nothing the display reports.
+# test_canvas.py holds it to both.
+#
 # Schedule. Seven minutes a step: minutes rather than seconds, because at
 # 10 Hz anything faster reads as jitter from across the room, and a full
 # circuit still comes in under an hour (8 x 7 min = 56 min), so a pairing
@@ -760,7 +767,10 @@ def turned(screen_size: tuple[int, int], rotate: int | None) -> tuple[Canvas, Pl
 
     The strip is asked for, and a panel with the rows for it gets one
     (display.regions): the 3.2:1 panel this was built for. A 4:1 panel has
-    none, and its frame is byte for byte what it was (test_canvas)."""
+    none, and its frame is byte for byte what it was; a panel longer than
+    4:1 (the 440x1980 one) has none either, because its spare glass is at
+    the ends, which are margins until a layout for them is chosen
+    (docs/mockups, E and F). Both are held in test_canvas."""
     canvas = Canvas(frame_size(screen_size, rotate), strip=True)
     return canvas, placement(canvas.frame.get_size(), screen_size, rotate)
 
@@ -784,8 +794,9 @@ def strip_for(now_ms: int, current: GameState | None, state_age: float | None,
     The last goal is only ever the game on screen's. ``kept_goal`` names
     its game, and a goal from any other game -- including the one this
     panel followed a moment ago -- is not shown. The next game is drawn
-    only when the config document carries one; nothing composes one yet
-    (SCO-56, item 3), so until then the third slot is empty by design.
+    only when the config document carries one, which the director composes
+    from the schedule (SCO-56, item 3); a document without one, or one the
+    panel could not read, leaves the third slot empty by design.
     """
     at_ms = current.as_of_ms if stale_frame(current, state_age) else now_ms
     goal = kept_goal if current is not None and kept_goal is not None \
@@ -1354,6 +1365,11 @@ def main() -> None:
     # The defaults, until there is a channel to deliver anything else; see
     # Display, and docs/hardware-checks.md for what carrying them will touch.
     display = Display()
+    # The next kept game, off the same document (SCO-56). Held here for the
+    # strip to draw (SCO-57); nothing in this build draws it. None until a
+    # document says otherwise, and None again when one says nothing: the
+    # document is the whole truth each time, like the settings above.
+    next_game: NextGame | None = None
     today = []
     # The strip's three sources (strip_for). The summary is the last one
     # this panel could read, () until one arrives; the next game is None
@@ -1567,9 +1583,16 @@ def main() -> None:
                     if readable_document(item[1]):
                         # The next game rides in the same document and is
                         # read by the same rule as the settings: a document
-                        # decides it, even by leaving it out; garbage on the
-                        # topic leaves the slot as it was.
-                        next_game = parse_next(item[1])
+                        # decides it, even by leaving it out, and garbage on
+                        # the topic leaves the slot as it was (the reason
+                        # rotate gives). Read strictly (parse_next): a next
+                        # that is wrong in any way is dropped, and the game
+                        # and settings halves of this document are still
+                        # obeyed below.
+                        new_next = parse_next(item[1])
+                        if new_next != next_game:
+                            log.info("next game: %s", new_next)
+                            next_game = new_next
                         if cfg:
                             # A card that cannot be written, or an identity
                             # damaged since boot, costs the next boot's first
@@ -1778,7 +1801,7 @@ def main() -> None:
                     # whose start it cannot read.
                     on_screen = None if now_showing.show == NO_GAME else current
                     draw(layout, on_screen, now_ms, assets, link_ok, clock_ok=now_utc is not None,
-                         stale_s=state_age)
+                         stale_s=state_age, display=screen.get_size())
                     if canvas.strip is not None:
                         strip = strip_for(now_ms, on_screen, state_age, kept_goal, summary,
                                           following, next_game, display)
