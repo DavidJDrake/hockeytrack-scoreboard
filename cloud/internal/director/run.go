@@ -231,7 +231,21 @@ func (r *run) direct(ctx context.Context, dev devices.Device) error {
 	// director publishes only on a change of game, and a change of game is
 	// a choice (design section 6).
 	chosenAt := r.now.UnixMilli()
-	payload, err := panelconfig.Compose(current, chosenAt, resolved, dev.Wake.Live(r.now))
+	// The next game rides in the same document (SCO-56), from the season's
+	// row for it: the season checked its abbreviations and its start on the
+	// way in, and a kept game is always one the season lists (a game with no
+	// readable start is never kept). One it does not list gets no next
+	// rather than a guess. Only the director fills this slot, and only here,
+	// on a change of game: what is not covered is a schedule edit that
+	// changes the next game without changing the current one, which reaches
+	// the panel with the next change of game.
+	var next *panelconfig.Next
+	if id := Next(p, r.now); id != 0 {
+		if g, found := r.season.Find(id); found {
+			next = &panelconfig.Next{GameID: id, Away: g.Away, Home: g.Home, Start: g.Start}
+		}
+	}
+	payload, err := panelconfig.Compose(current, chosenAt, resolved, dev.Wake.Live(r.now), next)
 	if err != nil {
 		return err
 	}

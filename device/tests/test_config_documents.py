@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from scoreboard.main import parse_display
-from scoreboard.model import parse_chosen_at, parse_config
+from scoreboard.model import parse_chosen_at, parse_config, parse_next
 
 CASES = json.loads((Path(__file__).resolve().parents[2] / "testdata" / "config-documents.json").read_text())["cases"]
 
@@ -20,9 +20,11 @@ def test_the_panel_reads_what_the_cloud_writes(case):
     payload, want = case["document"].encode(), case["panelReads"]
     display = parse_display(payload)
     sleep = display.sleep and [display.sleep.start, display.sleep.end, display.sleep.zone]
+    nxt = parse_next(payload)
     assert {
         "gameId": parse_config(payload), "chosenAt": parse_chosen_at(payload),
         "countdownLeadS": display.countdown_lead_s, "finalHoldS": display.final_hold_s, "sleep": sleep,
         "wake": display.wake and [display.wake.mode, display.wake.until_ms],
         "rotate": display.rotate,
+        "next": nxt and [nxt.game_id, nxt.away, nxt.home, nxt.start],
     } == want

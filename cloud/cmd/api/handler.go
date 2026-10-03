@@ -183,7 +183,17 @@ func (h *Handler) send(ctx context.Context, d devices.Device, account settings.S
 	resolved, _ := settings.Resolve(account, d.Display)
 	// A switch that has ended is not sent: the panel would ignore it, and the
 	// document should say what is true.
-	payload, err := panelconfig.Compose(d.GameID, d.ChosenAt, resolved, d.Wake.Live(h.now()))
+	//
+	// The next game is nil here, deliberately. Working out a panel's next
+	// kept game is the director's rule (internal/director.Next) over a
+	// situation only the director builds, and the API never works out a
+	// scheduled game itself: that stays one principal's job. So a publish
+	// from here -- a choice, a settings save, the sleep switch -- carries no
+	// next, and the panel's strip is empty until the director's next publish
+	// to that panel fills it, which is its next change of game. What is not
+	// covered: the director publishes only on a change of game, so a settings
+	// save between two games leaves the strip empty until the second starts.
+	payload, err := panelconfig.Compose(d.GameID, d.ChosenAt, resolved, d.Wake.Live(h.now()), nil)
 	if err != nil {
 		return err
 	}
