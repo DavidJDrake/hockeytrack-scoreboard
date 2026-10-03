@@ -24,6 +24,7 @@ func TestDecodeIsStrict(t *testing.T) {
 		`{"resolutions":[{"sequence":[1,2],"keep":[1,1]}]}`,
 		`{"resolutions":[{"sequence":[1,2],"keep":[1,2,3]}]}`,
 		`{"templates":["a","b","c","d","e","f"]}`,
+		`{"templates":["a","a"]}`, `{"templates":[""]}`, `{"templates":["` + strings.Repeat("x", maxTemplateID+1) + `"]}`,
 	} {
 		if _, err := Decode([]byte(bad)); !errors.Is(err, ErrMalformed) {
 			t.Errorf("%s: got %v", bad, err)
@@ -55,21 +56,21 @@ func TestStoredAndLoadRoundTripAndDamageReadsAsNothing(t *testing.T) {
 }
 
 func TestASaveWithNoConflictIsStoredSorted(t *testing.T) {
-	got, err := Save(Panel{Games: []int64{4, 1, 3}}, Panel{}, starts)
+	got, err := Save(Panel{Games: []int64{4, 1, 3}}, Panel{}, nil, starts)
 	if err != nil || len(got.Unresolved) != 0 || fmt.Sprint(got.Panel.Games) != "[1 3 4]" {
 		t.Fatalf("%+v %v", got, err)
 	}
 }
 
 func TestASaveThatLeavesAConflictUnansweredStoresNothing(t *testing.T) {
-	got, err := Save(Panel{Games: []int64{1, 2, 4}}, Panel{}, starts)
+	got, err := Save(Panel{Games: []int64{1, 2, 4}}, Panel{}, nil, starts)
 	if err != nil || fmt.Sprint(got.Unresolved) != "[[1 2]]" {
 		t.Fatalf("%+v %v", got, err)
 	}
 }
 
 func TestAnAnsweredConflictIsStoredAgainstItsSequence(t *testing.T) {
-	got, err := Save(Panel{Games: []int64{1, 2, 4}, Resolutions: []Resolution{{Sequence: []int64{2, 1}, Keep: []int64{2}}}}, Panel{}, starts)
+	got, err := Save(Panel{Games: []int64{1, 2, 4}, Resolutions: []Resolution{{Sequence: []int64{2, 1}, Keep: []int64{2}}}}, Panel{}, nil, starts)
 	if err != nil || len(got.Unresolved) != 0 {
 		t.Fatalf("%+v %v", got, err)
 	}
@@ -83,13 +84,13 @@ func TestAnAnswerIsCheckedNotTrusted(t *testing.T) {
 		"keeps both of two overlapping games": {Sequence: []int64{1, 2}, Keep: []int64{1, 2}},
 		"keeps nothing":                       {Sequence: []int64{1, 2}, Keep: []int64{}},
 	} {
-		if _, err := Save(Panel{Games: []int64{1, 2}, Resolutions: []Resolution{r}}, Panel{}, starts); !errors.Is(err, ErrBadResolution) {
+		if _, err := Save(Panel{Games: []int64{1, 2}, Resolutions: []Resolution{r}}, Panel{}, nil, starts); !errors.Is(err, ErrBadResolution) {
 			t.Errorf("%s: got %v", name, err)
 		}
 	}
 	// Two answers to one conflict: which one was meant is not ours to guess.
 	twice := []Resolution{{Sequence: []int64{1, 2}, Keep: []int64{1}}, {Sequence: []int64{2, 1}, Keep: []int64{2}}}
-	if _, err := Save(Panel{Games: []int64{1, 2}, Resolutions: twice}, Panel{}, starts); !errors.Is(err, ErrBadResolution) {
+	if _, err := Save(Panel{Games: []int64{1, 2}, Resolutions: twice}, Panel{}, nil, starts); !errors.Is(err, ErrBadResolution) {
 		t.Errorf("two answers: got %v", err)
 	}
 }
@@ -97,20 +98,81 @@ func TestAnAnswerIsCheckedNotTrusted(t *testing.T) {
 func TestAnAnswerToAConflictThatDoesNotExistIsDropped(t *testing.T) {
 	// A game outside the sequence cannot be smuggled in through an answer:
 	// the answer names a sequence that is not one, so it is simply not kept.
-	got, err := Save(Panel{Games: []int64{1, 4}, Resolutions: []Resolution{{Sequence: []int64{1, 2}, Keep: []int64{2}}}}, Panel{}, starts)
+	got, err := Save(Panel{Games: []int64{1, 4}, Resolutions: []Resolution{{Sequence: []int64{1, 2}, Keep: []int64{2}}}}, Panel{}, nil, starts)
 	if err != nil || len(got.Panel.Resolutions) != 0 || len(got.Unresolved) != 0 {
 		t.Fatalf("%+v %v", got, err)
 	}
 }
 
 func TestAnIdThisServerNeverVouchedForIsRefusedButAPastGameIsJustDropped(t *testing.T) {
-	if _, err := Save(Panel{Games: []int64{1, 999}}, Panel{}, starts); !errors.Is(err, ErrUnknownGame) {
+	if _, err := Save(Panel{Games: []int64{1, 999}}, Panel{}, nil, starts); !errors.Is(err, ErrUnknownGame) {
 		t.Errorf("got %v", err)
 	}
 	// 999 was on the panel and has since left the schedule: it is over.
-	got, err := Save(Panel{Games: []int64{1, 999}}, Panel{Games: []int64{999}}, starts)
+	got, err := Save(Panel{Games: []int64{1, 999}}, Panel{Games: []int64{999}}, nil, starts)
 	if err != nil || fmt.Sprint(got.Panel.Games) != "[1]" {
 		t.Errorf("%+v %v", got, err)
+	}
+}
+
+func TestCandidatesAreThePanelsGamesThenEachTemplatesInOrder(t *testing.T) {
+	p := Panel{Games: []int64{2}, Templates: []string{"t-1", "t-2", "t-gone"}}
+	tpls := map[string][]int64{"t-1": {1, 2}, "t-2": {1, 3}}
+	games, sources := Candidates(p, tpls)
+	if fmt.Sprint(games) != "[2 1 3]" {
+		t.Errorf("games %v", games)
+	}
+	// 2 is the panel's own, whichever templates also hold it; 1 is credited to
+	// the template earlier in the order; a template with no games listed
+	// contributes nothing and is not an error.
+	if fmt.Sprint(sources) != "map[1:t-1 3:t-2]" {
+		t.Errorf("sources %v", sources)
+	}
+	if games, _ := Candidates(Panel{}, nil); games == nil {
+		t.Error("a panel with nothing asked for has an empty list, not a nil one")
+	}
+}
+
+func TestASaveWithATemplateChecksTheConflictsItCreates(t *testing.T) {
+	tpls := map[string][]int64{"t-1": {2, 3}}
+	// Game 1 on the panel overlaps game 2 from the template: attaching the
+	// template is the owner doing something, and the conflict is theirs to
+	// answer before anything is stored.
+	got, err := Save(Panel{Games: []int64{1}, Templates: []string{"t-1"}}, Panel{}, tpls, starts)
+	if err != nil || fmt.Sprint(got.Unresolved) != "[[1 2]]" {
+		t.Fatalf("%+v %v", got, err)
+	}
+	answered := Panel{Games: []int64{1}, Templates: []string{"t-1"}, Resolutions: []Resolution{{Sequence: []int64{1, 2}, Keep: []int64{2}}}}
+	got, err = Save(answered, Panel{}, tpls, starts)
+	if err != nil || len(got.Unresolved) != 0 || fmt.Sprint(got.Panel.Templates) != "[t-1]" || fmt.Sprint(got.Panel.Resolutions) != "[{[1 2] [2]}]" {
+		t.Fatalf("%+v %v", got, err)
+	}
+	// A template id the caller was not given the games of is refused, and
+	// nothing is stored: the map is the list of what the caller owns.
+	if _, err := Save(Panel{Templates: []string{"t-9"}}, Panel{}, tpls, starts); !errors.Is(err, ErrUnknownTemplate) {
+		t.Errorf("got %v", err)
+	}
+	// A template's own game that has left the season is unplaced, not an
+	// error: template games were vouched for when the template was saved.
+	got, err = Save(Panel{Templates: []string{"t-old"}}, Panel{}, map[string][]int64{"t-old": {999}}, starts)
+	if err != nil || len(got.Unresolved) != 0 {
+		t.Errorf("%+v %v", got, err)
+	}
+}
+
+func TestResolveKeepsTemplateGamesAndThePanelsOwnWinByDefault(t *testing.T) {
+	p := Panel{Games: []int64{1}, Templates: []string{"t-1"}}
+	games, sources := Candidates(p, map[string][]int64{"t-1": {2, 4}})
+	got := Resolve(p, games, sources, starts)
+	// 1 (the panel's) and 2 (the template's) overlap and nobody has answered:
+	// the panel's own game is kept, the template's 4 stands on its own, and
+	// the panel needs a decision.
+	if fmt.Sprint(got.Kept) != "[1 4]" || fmt.Sprint(got.Undecided) != "[[1 2]]" {
+		t.Errorf("%+v", got)
+	}
+	p.Resolutions = []Resolution{{Sequence: []int64{1, 2}, Keep: []int64{2}}}
+	if got := Resolve(p, games, sources, starts); fmt.Sprint(got.Kept) != "[2 4]" || len(got.Undecided) != 0 {
+		t.Errorf("answered: %+v", got)
 	}
 }
 

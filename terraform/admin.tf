@@ -277,6 +277,20 @@ data "aws_iam_policy_document" "api" {
     actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
     resources = [aws_dynamodb_table.accounts.arn]
   }
+  # An account's templates (SCO-40): list the caller's, make one, replace
+  # one, delete one. Query, because every read is under the caller's subject
+  # as the hash key (dynamo.go in internal/templates); PutItem, because a
+  # create and a replace are each a whole item behind a condition on the
+  # key; DeleteItem, because a template is deleted only by its owner and only
+  # while no panel uses it (the handler counts). No GetItem: there is no
+  # read by id in the code, and no grant for one here. No Scan, no
+  # UpdateItem. The key's condition is in the code, not in IAM: this role
+  # runs for every caller, so IAM cannot tell one owner from another; the
+  # store's key shape is what does.
+  statement {
+    actions   = ["dynamodb:Query", "dynamodb:PutItem", "dynamodb:DeleteItem"]
+    resources = [aws_dynamodb_table.templates.arn]
+  }
   # Read from the table the reducer keeps, and nothing else. GetItem: the
   # panel list says what each panel should be showing, which needs the game's
   # state. Scan: the games list needs to know which of yesterday's games are
@@ -333,13 +347,14 @@ resource "aws_lambda_function" "api" {
   memory_size      = 128
   environment {
     variables = {
-      DEVICES_TABLE  = aws_dynamodb_table.devices.name
-      ACCOUNTS_TABLE = aws_dynamodb_table.accounts.name
-      GAMES_TABLE    = aws_dynamodb_table.games.name
-      IOT_ENDPOINT   = "https://${data.aws_iot_endpoint.data.endpoint_address}"
-      SCHEDULE_URL   = var.schedule_url
-      USER_POOL_ID   = aws_cognito_user_pool.admin.id
-      APP_CLIENT_ID  = aws_cognito_user_pool_client.site.id
+      DEVICES_TABLE   = aws_dynamodb_table.devices.name
+      ACCOUNTS_TABLE  = aws_dynamodb_table.accounts.name
+      TEMPLATES_TABLE = aws_dynamodb_table.templates.name
+      GAMES_TABLE     = aws_dynamodb_table.games.name
+      IOT_ENDPOINT    = "https://${data.aws_iot_endpoint.data.endpoint_address}"
+      SCHEDULE_URL    = var.schedule_url
+      USER_POOL_ID    = aws_cognito_user_pool.admin.id
+      APP_CLIENT_ID   = aws_cognito_user_pool_client.site.id
       # The function, not its ARN: the invoke is same-account and the name
       # is what the SDK takes.
       DIRECTOR_FUNCTION = aws_lambda_function.director.function_name
@@ -451,6 +466,10 @@ locals {
     "PUT /api/devices/{thing}/schedule",
     "PUT /api/devices/{thing}/wake",
     "GET /api/schedule",
+    "GET /api/templates",
+    "POST /api/templates",
+    "PUT /api/templates/{id}",
+    "DELETE /api/templates/{id}",
     "GET /api/settings",
     "PUT /api/settings",
     "PATCH /api/devices/{thing}",
