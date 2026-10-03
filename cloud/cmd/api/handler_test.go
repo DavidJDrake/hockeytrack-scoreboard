@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
@@ -18,6 +19,7 @@ import (
 	"hockeytrack-scoreboard/internal/idtoken"
 	"hockeytrack-scoreboard/internal/idtoken/idtokentest"
 	"hockeytrack-scoreboard/internal/iotpub"
+	"hockeytrack-scoreboard/internal/presence"
 )
 
 // req builds a request the way API Gateway delivers a signed-in call: the
@@ -186,6 +188,106 @@ func TestListReturnsOnlyTheCallersDevices(t *testing.T) {
 	if !strings.Contains(res.Body, "scoreboard-7qf2") {
 		t.Errorf("listing omitted the caller's own device: %s", res.Body)
 	}
+}
+
+func TestTheListSaysWhenTheBrokerLastSawEachPanel(t *testing.T) {
+	h, st, _ := handlerWith(t)
+	ctx := context.Background()
+	_ = st.Register(ctx, "scoreboard-aaaa")
+	_ = st.Register(ctx, "scoreboard-bbbb")
+	for _, name := range []string{"scoreboard-7qf2", "scoreboard-aaaa", "scoreboard-bbbb"} {
+		_ = st.Claim(ctx, name, "sub-a")
+	}
+	h.Presence = presence.Fake{
+		"scoreboard-7qf2": {Connected: true, At: clock.Add(-48 * time.Hour)},
+		"scoreboard-aaaa": {At: clock.Add(-time.Hour)},
+		// scoreboard-bbbb: no record, as a panel that never connected since
+		// indexing began has none.
+	}
+	res, _ := h.Handle(ctx, req("GET", "GET /api/devices", "sub-a", "", nil))
+	var got []struct {
+		ThingName string `json:"thingName"`
+		LastSeen  string `json:"lastSeen"`
+		Connected bool   `json:"connected"`
+	}
+	if err := json.Unmarshal([]byte(res.Body), &got); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string][2]string{
+		"scoreboard-7qf2": {clock.Add(-48 * time.Hour).Format(time.RFC3339), "true"},
+		"scoreboard-aaaa": {clock.Add(-time.Hour).Format(time.RFC3339), "false"},
+		"scoreboard-bbbb": {"", "false"},
+	}
+	for _, v := range got {
+		w := want[v.ThingName]
+		if v.LastSeen != w[0] || fmt.Sprint(v.Connected) != w[1] {
+			t.Errorf("%s: lastSeen=%q connected=%v, want %q %s", v.ThingName, v.LastSeen, v.Connected, w[0], w[1])
+		}
+	}
+	// An index that is down does not take the panels off the page; the list
+	// says nothing about last seen rather than something untrue.
+	h.Presence = refusingPresence{}
+	res, _ = h.Handle(ctx, req("GET", "GET /api/devices", "sub-a", "", nil))
+	got = nil
+	if err := json.Unmarshal([]byte(res.Body), &got); err != nil || res.StatusCode != 200 || len(got) != 3 {
+		t.Fatalf("with the index down: %d %s (%v)", res.StatusCode, res.Body, err)
+	}
+	for _, v := range got {
+		if v.LastSeen != "" || v.Connected {
+			t.Errorf("with the index down, %s: lastSeen=%q connected=%v", v.ThingName, v.LastSeen, v.Connected)
+		}
+	}
+	// docs/admin-api.md promises connected on every panel and lastSeen only
+	// when there is a record. A struct decode cannot tell an omitted false
+	// from a written one, so this reads the raw keys.
+	var raw []map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(res.Body), &raw); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range raw {
+		if string(m["connected"]) != "false" {
+			t.Errorf("with the index down, %s: connected is %q, want the literal false", m["thingName"], m["connected"])
+		}
+		if _, ok := m["lastSeen"]; ok {
+			t.Errorf("with the index down, %s carries lastSeen %s", m["thingName"], m["lastSeen"])
+		}
+	}
+}
+
+// The API's iot:SearchIndex grant cannot be scoped below the whole account's
+// things (terraform/admin.tf), so the control that keeps one owner from
+// learning when another's panel connected is this: the handler asks the
+// index only for the names ListByOwner returned. presence.Fake answers
+// whatever it is asked, so this records the asking.
+func TestTheListAsksTheIndexOnlyForTheCallersPanels(t *testing.T) {
+	h, st, _ := handlerWith(t)
+	ctx := context.Background()
+	_ = st.Register(ctx, "scoreboard-aaaa")
+	_ = st.Register(ctx, "scoreboard-bbbb") // unowned: not the caller's either
+	_ = st.Claim(ctx, "scoreboard-7qf2", "sub-a")
+	_ = st.Claim(ctx, "scoreboard-aaaa", "sub-b")
+	rec := &recordingPresence{}
+	h.Presence = rec
+	if res, _ := h.Handle(ctx, req("GET", "GET /api/devices", "sub-a", "", nil)); res.StatusCode != 200 {
+		t.Fatalf("status %d", res.StatusCode)
+	}
+	if len(rec.asked) != 1 || len(rec.asked[0]) != 1 || rec.asked[0][0] != "scoreboard-7qf2" {
+		t.Errorf("the index was asked %v, want exactly [[scoreboard-7qf2]]", rec.asked)
+	}
+}
+
+// recordingPresence keeps every list of names it was asked about.
+type recordingPresence struct{ asked [][]string }
+
+func (r *recordingPresence) Lookup(_ context.Context, things []string) (map[string]presence.Seen, error) {
+	r.asked = append(r.asked, append([]string(nil), things...))
+	return map[string]presence.Seen{}, nil
+}
+
+type refusingPresence struct{}
+
+func (refusingPresence) Lookup(context.Context, []string) (map[string]presence.Seen, error) {
+	return nil, errors.New("index unavailable")
 }
 
 func TestAStrangerCannotRenameAnotherOwnersDevice(t *testing.T) {

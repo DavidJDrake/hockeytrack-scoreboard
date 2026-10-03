@@ -319,6 +319,17 @@ data "aws_iam_policy_document" "api" {
     actions   = ["iot:Publish", "iot:RetainPublish"]
     resources = ["arn:aws:iot:${var.region}:${data.aws_caller_identity.current.account_id}:topic/scoreboard/*/config"]
   }
+  # When each of the caller's panels was last on the broker, from the fleet
+  # index (iot.tf, SCO-33). One read-only action on one index. What it
+  # widens, plainly: the index holds every thing in the account, and IAM
+  # cannot scope SearchIndex to the caller's own, so a handler bug could
+  # show one owner when another's panel connected. The handler asks only
+  # for the names ListByOwner returned; that is the control, and it is the
+  # same one that keeps the list itself to the caller's panels.
+  statement {
+    actions   = ["iot:SearchIndex"]
+    resources = ["arn:aws:iot:${var.region}:${data.aws_caller_identity.current.account_id}:index/AWS_Things"]
+  }
   # After a schedule is saved, ask the director to run for that panel now
   # rather than within the minute. This one function, asynchronously; the
   # API works out and publishes no scheduled game itself, so the director's

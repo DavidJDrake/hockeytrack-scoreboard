@@ -16,6 +16,7 @@ import (
 	"hockeytrack-scoreboard/internal/idtoken"
 	"hockeytrack-scoreboard/internal/iotpub"
 	"hockeytrack-scoreboard/internal/panelconfig"
+	"hockeytrack-scoreboard/internal/presence"
 	"hockeytrack-scoreboard/internal/reduce"
 	"hockeytrack-scoreboard/internal/schedule"
 	"hockeytrack-scoreboard/internal/season"
@@ -49,6 +50,11 @@ type Handler struct {
 	// itself: that stays one principal's job. Nil means the minute sweep is
 	// the only trigger.
 	Direct func(ctx context.Context, thing string) error
+	// Presence is the broker's record of when each panel last connected,
+	// read from the fleet index (internal/presence, SCO-33). Nil means the
+	// list says nothing about it. Read-only: the API can learn when a panel
+	// was last on the broker and cannot change anything about it.
+	Presence presence.Source
 	// Templates holds each account's templates (internal/templates), read
 	// under the caller's subject and never by id alone. Nil means nobody has
 	// any: the template routes say so, a schedule naming one is refused as
@@ -97,6 +103,18 @@ type deviceView struct {
 	// Schedule is what the owner asked this panel to show, and what the
 	// rules make of it today.
 	Schedule scheduleView `json:"schedule"`
+	// LastSeen is when the broker last saw this panel connect or
+	// disconnect, RFC 3339 in UTC, and Connected is whether it is on the
+	// broker now. Both come from the fleet index and only on the list route;
+	// LastSeen is absent when the index has no record (a panel that has
+	// never connected since indexing began) or could not be read; Connected
+	// is always present, and false then, because docs/admin-api.md promises
+	// a boolean and an omitted false would be a third state the reader has
+	// to know about. A connected panel's LastSeen is its connect time, which
+	// may be long ago for one that has simply stayed up: read Connected
+	// first.
+	LastSeen  string `json:"lastSeen,omitempty"`
+	Connected bool   `json:"connected"`
 }
 
 // scheduleView is a panel's schedule as stored, plus what follows from it.
@@ -432,6 +450,26 @@ func decodeBody(req events.APIGatewayV2HTTPRequest) ([]byte, error) {
 	return base64.StdEncoding.DecodeString(req.Body)
 }
 
+// presenceOf reads the broker's record for the caller's own panels, and only
+// those: the index holds every thing in the account, and the names asked for
+// are the ones ListByOwner returned. An index that is down does not take
+// the panels off the page; the list says less.
+func (h *Handler) presenceOf(ctx context.Context, devs []devices.Device) map[string]presence.Seen {
+	if h.Presence == nil || len(devs) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(devs))
+	for _, d := range devs {
+		names = append(names, d.ThingName)
+	}
+	seen, err := h.Presence.Lookup(ctx, names)
+	if err != nil {
+		slog.Warn("presence lookup failed; listing panels without last seen", "err", err)
+		return nil
+	}
+	return seen
+}
+
 // owned returns the device if the caller owns it, or false. Callers must
 // treat false as 404.
 func (h *Handler) owned(ctx context.Context, thing, sub string) (devices.Device, bool, error) {
@@ -479,9 +517,17 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 			slog.Warn("defaults lookup failed; listing panels without resolved settings", "err", err)
 		}
 		sn, tpls := h.scheduleInputs(ctx, sub, devs)
+		seen := h.presenceOf(ctx, devs)
 		out := make([]deviceView, 0, len(devs))
 		for _, d := range devs {
-			out = append(out, h.view(ctx, d, account, sn, tpls))
+			v := h.view(ctx, d, account, sn, tpls)
+			if s, ok := seen[d.ThingName]; ok {
+				v.Connected = s.Connected
+				if !s.At.IsZero() {
+					v.LastSeen = s.At.UTC().Format(time.RFC3339)
+				}
+			}
+			out = append(out, v)
 		}
 		return respond(200, out)
 

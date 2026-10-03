@@ -19,6 +19,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	iotsvc "github.com/aws/aws-sdk-go-v2/service/iot"
 	"github.com/aws/aws-sdk-go-v2/service/iotdataplane"
 	lambdasvc "github.com/aws/aws-sdk-go-v2/service/lambda"
 	lambdatypes "github.com/aws/aws-sdk-go-v2/service/lambda/types"
@@ -28,6 +29,7 @@ import (
 	"hockeytrack-scoreboard/internal/gamestore"
 	"hockeytrack-scoreboard/internal/idtoken"
 	"hockeytrack-scoreboard/internal/iotpub"
+	"hockeytrack-scoreboard/internal/presence"
 	"hockeytrack-scoreboard/internal/season"
 	"hockeytrack-scoreboard/internal/templates"
 	"hockeytrack-scoreboard/internal/today"
@@ -141,6 +143,10 @@ func main() {
 		Games:  func(ctx context.Context) ([]byte, error) { return games(ctx, scheduleURL, gamesStore) },
 		Game:   gamesStore.Get,
 		Tokens: idtoken.New(cfg.Region, pool, client),
+		// When each panel was last on the broker, from the fleet index
+		// (iot.tf). One read-only grant, iot:SearchIndex, in admin.tf; an
+		// index that is down leaves the list without it.
+		Presence: presence.NewIoT(iotsvc.NewFromConfig(cfg)),
 	}
 	seasons := &season.Cache{
 		Fetch:    func(ctx context.Context) ([]byte, error) { return fetchSchedule(ctx, scheduleURL) },

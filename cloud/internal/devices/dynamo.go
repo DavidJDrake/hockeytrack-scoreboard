@@ -46,6 +46,11 @@ func marshalDevice(d Device) (map[string]types.AttributeValue, error) {
 	if d.Owner != "" {
 		item["owner"] = &types.AttributeValueMemberS{Value: d.Owner}
 	}
+	// Sparse for the same reason as owner: it is set on the few rows that
+	// went through the Released list and on no others.
+	if d.ReleasedBy != "" {
+		item["releasedBy"] = &types.AttributeValueMemberS{Value: d.ReleasedBy}
+	}
 	return item, nil
 }
 
@@ -99,6 +104,13 @@ func unmarshalDevice(item map[string]types.AttributeValue) (Device, error) {
 		if d.Sent, err = attrN(item, "sent"); err != nil {
 			return Device{}, err
 		}
+	}
+	// Absent on every row until SCO-32 writes it, and on every row that never
+	// went through the Released list. Anything unreadable is "not released":
+	// the sweep then treats the panel as its own to judge, which is the
+	// stricter of the two readings, and the sweep only logs today.
+	if attr, ok := item["releasedBy"].(*types.AttributeValueMemberS); ok {
+		d.ReleasedBy = attr.Value
 	}
 	return d, nil
 }
@@ -250,8 +262,9 @@ func (x *Dynamo) Update(ctx context.Context, d Device) error {
 // the fleet is a handful of rows. The filter keeps unclaimed devices off the
 // wire; whether a claimed one has anything asked for is decided in Go, from
 // the parsed schedule, so a damaged attribute is "nothing asked for" here as
-// everywhere else. The director's role (terraform/director.tf) is the only
-// one granted Scan on this table.
+// everywhere else. Two roles are granted Scan on this table: the director's
+// (terraform/director.tf) and the sweep's (terraform/sweep.tf), each for its
+// own work list below.
 func (x *Dynamo) ListScheduled(ctx context.Context) ([]Device, error) {
 	var out []Device
 	var start map[string]types.AttributeValue
@@ -273,6 +286,36 @@ func (x *Dynamo) ListScheduled(ctx context.Context) ([]Device, error) {
 			if !d.Schedule.IsZero() {
 				out = append(out, d)
 			}
+		}
+		if start = res.LastEvaluatedKey; len(start) == 0 {
+			return out, nil
+		}
+	}
+}
+
+// ListUnowned is ListScheduled's mirror image: the rows with no owner, which
+// is the sweep's whole world (internal/sweep). The filter is the same
+// attribute Claim conditions on, so a panel is unowned here exactly when it
+// is claimable. Read-only, like everything the sweep's role may do.
+func (x *Dynamo) ListUnowned(ctx context.Context) ([]Device, error) {
+	var out []Device
+	var start map[string]types.AttributeValue
+	for {
+		res, err := x.client.Scan(ctx, &dynamodb.ScanInput{
+			TableName:                aws.String(x.table),
+			FilterExpression:         aws.String("attribute_not_exists(#o)"),
+			ExpressionAttributeNames: map[string]string{"#o": "owner"},
+			ExclusiveStartKey:        start,
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, item := range res.Items {
+			d, err := unmarshalDevice(item)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, d)
 		}
 		if start = res.LastEvaluatedKey; len(start) == 0 {
 			return out, nil

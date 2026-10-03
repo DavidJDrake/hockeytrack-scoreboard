@@ -50,7 +50,8 @@ data "aws_iam_policy_document" "director" {
   # Every claimed panel with a schedule is its work list, and there is no
   # index on "has a schedule": a Scan, filtered to claimed rows, of a table
   # the size of the fleet. GetItem is the one-panel run the API asks for
-  # after a save. The only role with Scan on this table.
+  # after a save. One of two roles with Scan on this table; the other is
+  # the sweep's (sweep.tf), for the rows this one filters out.
   statement {
     actions   = ["dynamodb:Scan", "dynamodb:GetItem"]
     resources = [aws_dynamodb_table.devices.arn]
