@@ -134,6 +134,31 @@ def test_s_closes_the_screen_from_the_list():
     assert s.closed
 
 
+def test_escape_closes_the_screen_from_the_list():
+    # Escape means "back" everywhere else on this screen -- from the password
+    # to the list, from the reset confirmation to the list -- and from the
+    # list itself, back is out. This was never specified, so it was never
+    # tested (SCO-26). It matters to main(): a KEYDOWN while the panel is
+    # open goes to panel.key() and nothing else, so this is the only way the
+    # Escape that would otherwise quit the whole program reaches the screen.
+    s = fresh()
+    s.key("escape")
+    assert s.closed
+    assert s.pending is None, "closing the screen must not ask the radio for anything"
+
+
+def test_escape_from_a_sub_mode_goes_back_to_the_list_not_out():
+    # One press of Escape is one step back. From the password entry it must
+    # land on the list, still open; it takes a second press to leave.
+    s = fresh()
+    s.key("return")                     # the first network is secured
+    assert s.mode == PASSWORD
+    s.key("escape")
+    assert s.mode == LIST and not s.closed
+    s.key("escape")
+    assert s.closed
+
+
 def test_rescan_requests_a_scan():
     s = fresh()
     s.key("f5")

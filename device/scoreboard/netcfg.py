@@ -1205,6 +1205,18 @@ class NetworkManager:
         It does NOT make a clipped connect safe -- killing the client does not
         cancel NetworkManager's activation, which carries on in the daemon.
         join() is where that is handled.
+
+        **Known and accepted: the pre-shared key is on nmcli's command line,
+        so it is readable in /proc/<pid>/cmdline for as long as the connect
+        runs.** Inherent to driving nmcli as a subprocess. What bounds it: the
+        exposure lasts only for the connect (at most CONNECT_TIMEOUT_S), and
+        reading it needs a process already running on the panel, which the
+        image gives no one -- no SSH, no shell, no other service (design
+        §9.13). A local process with that access can read NetworkManager's
+        own profile store as root anyway, where the same key lives
+        permanently. Closing it means talking to NetworkManager over D-Bus
+        instead of the command line, which is a larger change and deferred;
+        recorded in the image design's §5.4 (SCO-26).
         """
         wait = max(1, int(timeout) - 2)
         args = ["-w", str(wait), "device", "wifi", "connect", settings.ssid]
