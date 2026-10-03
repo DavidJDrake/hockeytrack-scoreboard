@@ -293,6 +293,19 @@ func ownerMatches(p enroll.Pending, caller idtoken.Claims) bool {
 	return false
 }
 
+// refuseClaim answers a claim that did not match with the 404 every refusal
+// shares, so the caller learns nothing, and logs one line saying why. The
+// line carries the reason and nothing else: not the code, which is a secret
+// the log would otherwise copy, and not the caller, whom the API access log
+// already records for the same request. The phrase is what the
+// scoreboard-claim-refused metric filter (terraform/api-alarms.tf) counts,
+// so guessing a pairing code is visible even though every guess is answered
+// the same way; change it there too if it changes here.
+func refuseClaim(reason string) (events.APIGatewayV2HTTPResponse, error) {
+	slog.Warn("claim refused", "reason", reason)
+	return fail(http.StatusNotFound, "no enrollment with that code")
+}
+
 // claim binds a pending enrollment to the signed-in caller and mints the
 // certificate. Reserve runs first, before any AWS call, so two people racing
 // the same code cannot both mint one.
@@ -318,7 +331,7 @@ func (h *Handler) claim(ctx context.Context, req events.APIGatewayV2HTTPRequest)
 		return fail(http.StatusInternalServerError, "claim failed")
 	}
 	if !found {
-		return fail(http.StatusNotFound, "no enrollment with that code")
+		return refuseClaim("unknown code")
 	}
 	// Both bounds are enforced here, not left to DynamoDB's TTL: AWS
 	// documents TTL deletion as happening "within a few days", and GetItem
@@ -327,17 +340,17 @@ func (h *Handler) claim(ctx context.Context, req events.APIGatewayV2HTTPRequest)
 	// the moment it rotates or the enrollment ages out, not days later.
 	now := time.Now().Unix()
 	if now >= p.CodeExpiresAt || now >= p.ExpiresAt {
-		return fail(http.StatusNotFound, "no enrollment with that code")
+		return refuseClaim("expired")
 	}
 	// 404, not 403: somebody who read the code off a screen learns nothing
 	// about whether it was real. Checked before Reserve, so a stranger's
 	// attempt cannot consume the one-time claim.
 	if !ownerMatches(p, caller) {
-		return fail(http.StatusNotFound, "no enrollment with that code")
+		return refuseClaim("owner mismatch")
 	}
 	if err := h.Enrollments.Reserve(ctx, p.TokenHash, sub); err != nil {
 		if errors.Is(err, enroll.ErrAlreadyClaimed) || errors.Is(err, enroll.ErrNotFound) {
-			return fail(http.StatusNotFound, "no enrollment with that code")
+			return refuseClaim("already claimed")
 		}
 		slog.Error("reserving enrollment", "err", err)
 		return fail(http.StatusInternalServerError, "claim failed")

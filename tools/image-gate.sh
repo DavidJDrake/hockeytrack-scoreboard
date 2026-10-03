@@ -871,6 +871,70 @@ run_find "$ROOT/opt/scoreboard/.venv" -name '*.dist-info' ! -name 'pip-*.dist-in
 [ ! -e "$ROOT/root/.cache/pip" ] && [ ! -L "$ROOT/root/.cache/pip" ] || fail "a pip cache ships in the image at /root/.cache/pip"
 ok "no Python package from PyPI, and no pip cache"
 
+# The Python versions this image ships are what device/debian-versions.txt
+# says they are. That file is what lets CI reject a requirements.txt floor
+# trixie cannot meet (device/tests/test_debian_floors.py; PR #44 was such a
+# floor and passed CI), and a pinned version nobody re-reads is a record
+# that rots: a Debian point release moves python3-cryptography and CI keeps
+# comparing floors against last year's number. This is the only check that
+# sees the real rootfs, so it is the one that keeps the file honest.
+#
+# What is compared is the UPSTREAM version -- epoch and Debian revision
+# stripped from both sides -- because that is the number pip compares a floor
+# against. A security revision (-3+deb13u1 to deb13u2) or a binNMU (+b1)
+# changes nothing pip can see and must not cost a release build; a new
+# upstream version does, and fails here until the file is re-read.
+# dpkg's status file is the signal, as for every package rule above, and only
+# a stanza whose Status ends in "installed" counts: a removed package's
+# leftover stanza still carries a Version: line.
+PINS="$REPO/device/debian-versions.txt"
+[ -f "$PINS" ] || fail "$PINS is missing, so the installed Python versions cannot be checked against what CI assumes"
+upstream_version() {
+  # The `|| true` keeps a version with no dotted number from killing the
+  # gate under set -e with no message; the caller fails it by name instead.
+  printf '%s' "$1" | sed -E 's/^[0-9]+://; s/-[^-]*$//' | grep -oE '^[0-9]+(\.[0-9]+)*' || true
+}
+DPKG_VERSION=""
+read_dpkg_version() {
+  DPKG_VERSION="$(awk -v p="$1" '
+    /^Package: / { pkg = $2; ver = ""; st = "" }
+    /^Version: / { ver = $2 }
+    /^Status: / { st = $NF }
+    /^$/ { if (pkg == p && st == "installed") print ver; pkg = "" }
+    END { if (pkg == p && st == "installed") print ver }' "$status")"
+}
+pinned=0
+# `read` returns non-zero on a final line with no newline after it, so a bare
+# `while read` drops that line and the loop below would check two packages
+# instead of three -- and the count guard after it would not notice, because
+# the other lines still count. CI's reader (splitlines) sees every line, so
+# the two checks would disagree about the same file; the `|| [ -n "$line" ]`
+# keeps the last line whether or not it is terminated.
+#
+# Each line is split into words and the count is checked, so that the gate
+# and device/tests/test_debian_floors.py (which asserts exactly four fields)
+# agree on what a well-formed line is: a fifth word is a mistake in the file,
+# not a comment, and a line the two readers would parse differently must not
+# pass either of them.
+while IFS= read -r line || [ -n "$line" ]; do
+  line="${line%%#*}"
+  [ -n "${line// /}" ] || continue
+  read -ra fields <<<"$line"
+  [ "${#fields[@]}" -eq 4 ] || fail "debian-versions.txt line is not '<pip name> <package> <version> <date>' (${#fields[@]} fields): $(sanitize_for_log "$line")"
+  pip_name="${fields[0]}" package="${fields[1]}" version="${fields[2]}" read_on="${fields[3]}"
+  read_dpkg_version "$package"
+  [ -n "$DPKG_VERSION" ] || fail "$package is not installed (dpkg has no installed stanza for it), but debian-versions.txt says the image ships $pip_name from it"
+  want="$(upstream_version "$version")"
+  have="$(upstream_version "$DPKG_VERSION")"
+  [ -n "$want" ] || fail "debian-versions.txt pins $package at '$(sanitize_for_log "$version")', which has no version number to compare"
+  [ -n "$have" ] || fail "$package's installed version '$(sanitize_for_log "$DPKG_VERSION")' has no version number to compare"
+  [ "$have" = "$want" ] \
+    || fail "$package is $(sanitize_for_log "$DPKG_VERSION") in the image but device/debian-versions.txt says $version (read $read_on); re-read it, or CI keeps checking $pip_name floors against a version the image no longer ships"
+  pinned=$((pinned + 1))
+done <"$PINS"
+[ "$pinned" -gt 0 ] || fail "debian-versions.txt pins nothing, so no Python version is checked"
+ok "the $pinned Debian-supplied Python packages match device/debian-versions.txt"
+
 # A unit only counts as enabled if its .wants symlink resolves to the unit
 # file this image installed. A symlink that merely exists but points at the
 # wrong target, or at nothing, must not be read as "enabled".

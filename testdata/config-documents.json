@@ -1,5 +1,5 @@
 {
- "about": "The config document, written by Go and read by Python. cloud/internal/panelconfig's test composes each case and must get `document` byte for byte; device/tests/test_config_documents.py feeds `document` to the panel's own parsers and must get `panelReads`. The wire format has one author and one reader, in two languages, and this file is what holds them to each other.",
+ "about": "The config document, written by Go and read by Python. cloud/internal/panelconfig's test composes each case and must get `document` byte for byte; device/tests/test_config_documents.py feeds `document` to the panel's own parsers and must get `panelReads`. The wire format has one author and one reader, in two languages, and this file is what holds them to each other. A next the panel drops (any field wrong) is never written, so the shared cases carry only the well-formed one and the absent one; the panel's own tests cover the malformed shapes.",
  "cases": [
   {
    "name": "a game, a stamp and every setting",
@@ -29,7 +29,8 @@
      "America/Toronto"
     ],
     "wake": null,
-    "rotate": null
+    "rotate": null,
+    "next": null
    }
   },
   {
@@ -48,7 +49,8 @@
     "finalHoldS": 10800,
     "sleep": null,
     "wake": null,
-    "rotate": null
+    "rotate": null,
+    "next": null
    }
   },
   {
@@ -69,7 +71,8 @@
     "finalHoldS": 0,
     "sleep": null,
     "wake": null,
-    "rotate": null
+    "rotate": null,
+    "next": null
    }
   },
   {
@@ -99,7 +102,8 @@
     "finalHoldS": 10800,
     "sleep": null,
     "wake": null,
-    "rotate": null
+    "rotate": null,
+    "next": null
    }
   },
   {
@@ -136,7 +140,8 @@
      "asleep",
      1789988400000
     ],
-    "rotate": null
+    "rotate": null,
+    "next": null
    }
   },
   {
@@ -157,7 +162,8 @@
     "finalHoldS": 10800,
     "sleep": null,
     "wake": null,
-    "rotate": 270
+    "rotate": 270,
+    "next": null
    }
   },
   {
@@ -190,7 +196,8 @@
      "America/Toronto"
     ],
     "wake": null,
-    "rotate": 0
+    "rotate": 0,
+    "next": null
    }
   },
   {
@@ -211,7 +218,39 @@
     "finalHoldS": 10800,
     "sleep": null,
     "wake": null,
-    "rotate": null
+    "rotate": null,
+    "next": null
+   }
+  },
+  {
+   "name": "a game with the next one behind it",
+   "compose": {
+    "gameId": 2026020101,
+    "chosenAt": 1789871240471,
+    "account": {},
+    "panel": {},
+    "next": {
+     "gameId": 2026020102,
+     "away": "MTL",
+     "home": "TOR",
+     "start": "2026-10-15T02:00:00Z"
+    }
+   },
+   "document": "{\"gameId\":2026020101,\"chosenAt\":1789871240471,\"display\":{\"v\":1,\"countdownLeadMin\":720,\"finalHoldMin\":180},\"next\":{\"gameId\":2026020102,\"away\":\"MTL\",\"home\":\"TOR\",\"start\":\"2026-10-15T02:00:00Z\"}}",
+   "panelReads": {
+    "gameId": 2026020101,
+    "chosenAt": 1789871240471,
+    "countdownLeadS": 43200,
+    "finalHoldS": 10800,
+    "sleep": null,
+    "wake": null,
+    "rotate": null,
+    "next": [
+     2026020102,
+     "MTL",
+     "TOR",
+     "2026-10-15T02:00:00Z"
+    ]
    }
   }
  ]

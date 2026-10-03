@@ -48,3 +48,26 @@ And two things that are not data:
 
 An empty slot must look deliberate: between games, or with no other game on,
 the strip says less, never "undefined" and never yesterday's goal.
+
+## The second panel: 440x1980, 4.5:1 -- choose one
+
+**Not chosen yet.** The owner's second panel (received 2026-09-25) is longer
+than the layout rather than taller, so the spare glass is at the ends: the
+frame is 2160x480 and the layout sits in the middle with **120 px at each
+end** (SCO-70). These two are drawn at that size, with the real fonts and the
+same game as A to D.
+
+| | |
+|---|---|
+| **E** wider columns | The side columns take the width: abbreviations and scores about a quarter bigger, longer penalty bars. Nothing new to feed; reads from further away. |
+| **F** end columns | Today's layout untouched in the middle, and an information column at each end carrying what C's strip carries on the taller panel: last goal, another game, the next game. Needs the same data C needs, and the columns are narrow, so each slot is a heading and a few short lines. |
+
+![E](e-wider-columns.png)
+![F](f-end-columns.png)
+
+**Until one is chosen, the shipped code draws the ends as plain margins** in
+the frame's background (`display.regions`), and the layout in the middle is
+the 4:1 frame byte for byte. That is deliberate: nothing goes into the ends
+that would later have to come out. Whichever is chosen comes with the same
+two things C did: the shift and the stale band placed against it and
+re-tested, and on F, the data.

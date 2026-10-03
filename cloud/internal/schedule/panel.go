@@ -24,7 +24,9 @@ type Resolution struct {
 }
 
 // Panel is what an owner has asked a panel to show: its own games, the
-// templates attached to it in priority order, and the conflicts answered.
+// templates attached to it in priority order (ids from internal/templates,
+// each looked up under the owner before it was stored here), and the
+// conflicts answered.
 type Panel struct {
 	Games       []int64      `json:"games"`
 	Templates   []string     `json:"templates"`
@@ -45,7 +47,15 @@ var (
 	// ErrBadResolution is an answer that keeps a game outside its sequence,
 	// keeps nothing, or keeps two games that overlap.
 	ErrBadResolution = errors.New("schedule: invalid resolution")
+	// ErrUnknownTemplate is a template id the caller was not given the games
+	// of: one that is not theirs, or does not exist, which are the same thing.
+	ErrUnknownTemplate = errors.New("schedule: unknown template")
 )
+
+// maxTemplateID bounds a template id in a request. The server makes ids of
+// 24 characters (internal/templates); anything longer is not one of ours and
+// is refused before it is looked up.
+const maxTemplateID = 64
 
 // Decode reads a request body strictly: unknown keys, trailing data, too
 // many entries, an id that is not positive or appears twice are all
@@ -60,7 +70,7 @@ func Decode(body []byte) (Panel, error) {
 	if len(p.Games) > MaxGames || len(p.Templates) > MaxTemplates || len(p.Resolutions) > MaxGames/2 {
 		return Panel{}, ErrMalformed
 	}
-	if !distinctPositive(p.Games) {
+	if !distinctPositive(p.Games) || !distinctIDs(p.Templates) {
 		return Panel{}, ErrMalformed
 	}
 	for _, r := range p.Resolutions {
@@ -76,6 +86,20 @@ func distinctPositive(ids []int64) bool {
 	seen := make(map[int64]bool, len(ids))
 	for _, id := range ids {
 		if id <= 0 || seen[id] {
+			return false
+		}
+		seen[id] = true
+	}
+	return true
+}
+
+// distinctIDs is distinctPositive for template ids: none empty, none over
+// the bound, none twice. The same template twice on one panel would be one
+// priority claiming two places.
+func distinctIDs(ids []string) bool {
+	seen := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if id == "" || len(id) > maxTemplateID || seen[id] {
 			return false
 		}
 		seen[id] = true
@@ -141,15 +165,7 @@ type Outcome struct {
 // says where a game came from, for the default rule's ranking; a game not in
 // it is the panel's own.
 func Resolve(p Panel, games []int64, sources map[int64]string, starts map[int64]string) Outcome {
-	in := make([]Game, 0, len(games))
-	for _, id := range games {
-		src, ok := sources[id]
-		if !ok {
-			src = PanelSource
-		}
-		in = append(in, Game{ID: id, Start: starts[id], Source: src})
-	}
-	plan := Build(in, p.Templates)
+	plan := Build(toGames(games, sources, starts), p.Templates)
 	answers := map[string][]int64{}
 	for _, r := range p.Resolutions {
 		answers[Key(r.Sequence)] = r.Keep
@@ -209,31 +225,85 @@ type Saved struct {
 	Unresolved [][]int64
 }
 
-// Save checks a request against the season. previous is what the panel has
-// now: a game on it that has since left the schedule is over, and is dropped
-// without complaint; an id that is in neither is refused, because it is
-// something this server has never vouched for.
-func Save(req Panel, previous Panel, starts map[int64]string) (Saved, error) {
+// CheckGames is the rule for a list of game ids an owner is trying to save,
+// on a panel or in a template. previous is the list as stored now: a game in
+// it that has since left the schedule is over, and is dropped without
+// complaint; an id that is in neither the season nor the stored list is
+// refused, because it is something this server has never vouched for. The
+// result is sorted, so what is stored has one shape whatever order the
+// request came in.
+func CheckGames(req, previous []int64, starts map[int64]string) ([]int64, error) {
 	had := map[int64]bool{}
-	for _, id := range previous.Games {
+	for _, id := range previous {
 		had[id] = true
 	}
-	games := make([]int64, 0, len(req.Games))
-	for _, id := range req.Games {
+	games := make([]int64, 0, len(req))
+	for _, id := range req {
 		if _, ok := starts[id]; ok {
 			games = append(games, id)
 		} else if !had[id] {
-			return Saved{}, ErrUnknownGame
+			return nil, ErrUnknownGame
 		}
 	}
 	sort.Slice(games, func(i, j int) bool { return games[i] < games[j] })
+	return games, nil
+}
 
-	plan := Build(toGames(games, starts), nil)
+// Candidates is the union of a panel's own games and its templates' games:
+// what the rules decide among (design section 4). The second value says
+// which template each game came from, for the default rule's ranking. A game
+// the panel holds itself is not in it, because the panel's own games outrank
+// every template (decision 8), whichever templates also hold them; a game in
+// two templates is credited to the one earlier in the panel's order. A
+// template id with no entry in templates contributes nothing: the API
+// refuses to delete a template a panel uses, so this is the backstop for a
+// row that names one anyway, and an empty template is what it reads as.
+func Candidates(p Panel, templates map[string][]int64) ([]int64, map[int64]string) {
+	games := append([]int64{}, p.Games...)
+	seen := make(map[int64]bool, len(games))
+	for _, id := range games {
+		seen[id] = true
+	}
+	sources := map[int64]string{}
+	for _, tid := range p.Templates {
+		for _, id := range templates[tid] {
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			games = append(games, id)
+			sources[id] = tid
+		}
+	}
+	return games, sources
+}
+
+// Save checks a request against the season and the owner's templates.
+// previous is what the panel has now (see CheckGames). templates holds the
+// games of every template the caller owns, by id, and nothing else: a
+// template id in the request that is not a key here is refused, so a
+// template can only be attached to a panel by someone the store listed it
+// for. The conflicts checked are among every candidate game, the templates'
+// included, because attaching a template is the owner doing something, and
+// nothing is decided for an owner who is present (decision 8).
+func Save(req Panel, previous Panel, templates map[string][]int64, starts map[int64]string) (Saved, error) {
+	games, err := CheckGames(req.Games, previous.Games, starts)
+	if err != nil {
+		return Saved{}, err
+	}
+	order := append([]string{}, req.Templates...)
+	for _, id := range order {
+		if _, ok := templates[id]; !ok {
+			return Saved{}, ErrUnknownTemplate
+		}
+	}
+	out := Saved{Panel: Panel{Games: games, Templates: order, Resolutions: []Resolution{}}, Unresolved: [][]int64{}}
+	all, sources := Candidates(out.Panel, templates)
+	plan := Build(toGames(all, sources, starts), order)
 	current := map[string][]int64{}
 	for _, seq := range plan.Sequences {
 		current[Key(seq)] = seq
 	}
-	out := Saved{Panel: Panel{Games: games, Templates: []string{}, Resolutions: []Resolution{}}, Unresolved: [][]int64{}}
 	answered := map[string]bool{}
 	for _, r := range req.Resolutions {
 		key := Key(r.Sequence)
@@ -262,10 +332,15 @@ func Save(req Panel, previous Panel, starts map[int64]string) (Saved, error) {
 	return out, nil
 }
 
-func toGames(ids []int64, starts map[int64]string) []Game {
+// toGames is the shape Build takes. A game not in sources is the panel's own.
+func toGames(ids []int64, sources map[int64]string, starts map[int64]string) []Game {
 	out := make([]Game, 0, len(ids))
 	for _, id := range ids {
-		out = append(out, Game{ID: id, Start: starts[id], Source: PanelSource})
+		src, ok := sources[id]
+		if !ok {
+			src = PanelSource
+		}
+		out = append(out, Game{ID: id, Start: starts[id], Source: src})
 	}
 	return out
 }

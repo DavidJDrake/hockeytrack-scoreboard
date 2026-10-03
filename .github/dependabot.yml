@@ -3,14 +3,15 @@
 #
 # Four ecosystems: the Go Lambdas under cloud/, the device's Python packages
 # under device/, the Terraform providers, and the CI workflow's own actions.
-# The Python ones matter more than their number suggests -- they are
-# installed fresh onto the Pi rather than built here, so whatever is current
-# on install day is what runs on the hardware.
 #
 # Every ecosystem also holds a new release for 7 days before proposing it, so
 # a version yanked or found malicious in its first days (a real supply-chain
 # pattern) never reaches a pull request here. Cooldown applies to version
 # updates only; security updates still arrive immediately.
+#
+# Each ecosystem is one group, so a week's bumps arrive as one pull request
+# per ecosystem instead of one per module: every bump runs the same CI and is
+# read by the same person, and one PR is read more carefully than five.
 version: 2
 updates:
   - package-ecosystem: gomod
@@ -21,14 +22,36 @@ updates:
     open-pull-requests-limit: 5
     commit-message:
       prefix: "deps"
+    # One group for every Go module. The AWS SDK's modules already traveled
+    # together (PRs #45 and #68); the rest are few and small, and a separate
+    # PR for each would be read no more closely than one.
     groups:
-      aws-sdk:
+      go-modules:
         patterns:
-          - "github.com/aws/aws-sdk-go-v2*"
-          - "github.com/aws/aws-lambda-go"
+          - "*"
     cooldown:
       default-days: 7
 
+  # The Python packages here are a smaller set than requirements.txt makes
+  # them look. On the panel, cryptography, paho-mqtt and pygame are Debian
+  # trixie's python3-* packages, installed from Debian's signed archive; pip
+  # runs --no-index there and never reaches PyPI, and pygame in particular
+  # has to be Debian's because no PyPI wheel carries the kmsdrm driver the
+  # panel draws with. A version bump from PyPI therefore cannot be followed,
+  # and one that raises the floor above what trixie ships (PR #44, which
+  # asked for cryptography >=50.0.1 against trixie's 43.0.0) only fails a
+  # release build -- or, since SCO-48, device/tests/test_debian_floors.py.
+  # Those three are ignored. Said plainly, since GitHub documents that a bare
+  # dependency-name ignore applies to security updates as well as version
+  # updates: for these three packages the Dependabot ALERT still surfaces,
+  # but no pull request of either kind is opened -- not a version bump and
+  # not a security fix. That is the intended outcome, because a PR against a
+  # Debian-supplied package could not be followed anyway (the panel installs
+  # what trixie ships, and no PyPI version changes that). Each alert is read
+  # by hand against Debian's tracker to see whether trixie's version is
+  # affected and whether Debian has shipped a fix. The development-only
+  # packages (pytest, pip-audit) are not ignored; they are installed from
+  # PyPI on a workstation and in CI, never on a panel.
   - package-ecosystem: pip
     directory: /device
     schedule:
@@ -37,6 +60,10 @@ updates:
     open-pull-requests-limit: 3
     commit-message:
       prefix: "deps"
+    ignore:
+      - dependency-name: "cryptography"   # Debian's python3-cryptography; see above
+      - dependency-name: "paho-mqtt"      # Debian's python3-paho-mqtt; see above
+      - dependency-name: "pygame"         # Debian's python3-pygame; see above
     cooldown:
       default-days: 7
 
@@ -50,13 +77,25 @@ updates:
     open-pull-requests-limit: 3
     commit-message:
       prefix: "deps"
+    groups:
+      terraform-providers:
+        patterns:
+          - "*"
     cooldown:
       default-days: 7
 
-  # ci.yml pins every action by commit SHA, which is what stops a compromised
-  # tag from silently running in this repo -- but a SHA pin never moves on
-  # its own, so without this it would quietly rot. This is what actually
-  # bumps those pins.
+  # ci.yml and image.yml pin every action by commit SHA, which is what stops
+  # a compromised tag from silently running in this repo -- but a SHA pin
+  # never moves on its own, so without this it would quietly rot. This is
+  # what actually bumps those pins.
+  #
+  # Each pin carries a "# vX.Y.Z" comment naming the tag the SHA was read
+  # from. Dependabot's documented behavior for a SHA-pinned action with such
+  # a comment is to update the SHA and the comment together, so the two do
+  # not drift. That is documented, not yet observed here: as of 2026-09-30
+  # no github-actions PR has been opened in this repository (the ones so far
+  # were gomod, pip and terraform), so the first one should be checked for
+  # both halves of the change before it is merged.
   - package-ecosystem: github-actions
     directory: /
     schedule:
@@ -65,5 +104,9 @@ updates:
     open-pull-requests-limit: 3
     commit-message:
       prefix: "deps"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
     cooldown:
       default-days: 7

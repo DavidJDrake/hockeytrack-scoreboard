@@ -118,3 +118,43 @@ func Current(p Panel, now time.Time) int64 {
 	}
 	return next
 }
+
+// Next is the strip's "up next" (SCO-56): the first kept game whose start is
+// after the current game's end, or after now when nothing is current. 0 for
+// none. Like Current it names a kept game or nothing, never anything else,
+// and the game the panel is being sent is never its own next.
+//
+// A game's end is its final (FinalAt) or, before that, the end of its slot
+// (schedule.Occupies from its start); a live game running past its slot has
+// no known end, so now stands in. A kept game that has already started is
+// not "next" whatever the current game is doing: the strip would be naming
+// a puck drop that has passed.
+func Next(p Panel, now time.Time) int64 {
+	current := Current(p, now)
+	// end is when the current game is done with, or zero when nothing is
+	// current, which no real start is before.
+	var end time.Time
+	if g, ok := p.Games[current]; ok && current != 0 {
+		end = g.Start.Add(schedule.Occupies)
+		if g.State == "FINAL" {
+			end = g.FinalAt
+		}
+	}
+	for _, id := range p.Kept {
+		if id == current {
+			continue
+		}
+		g, ok := p.Games[id]
+		if !ok || g.State == "LIVE" || g.State == "FINAL" {
+			continue
+		}
+		// Strictly after now, but at or after the end: schedule.Overlap lets
+		// an owner keep two games exactly Occupies apart ("touching exactly is
+		// not overlapping"), so a start equal to the current game's end is
+		// the next game, not one to skip past.
+		if g.Start.After(now) && !g.Start.Before(end) {
+			return id
+		}
+	}
+	return 0
+}

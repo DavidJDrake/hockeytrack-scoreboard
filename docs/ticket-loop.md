@@ -34,7 +34,11 @@ way from the HockeyTrack checkout).
    owes a deploy is commented but left open.
 3. **Build** (one agent per ticket, each in its own git worktree under
    `.claude/worktrees/sco-<n>`, made by the agent itself so that it is a
-   worktree of this repository whatever directory the session started in;
+   worktree of the right repository whatever directory the session started
+   in: triage sets `repo` per ticket, `scoreboard` for this one and
+   `hockeytrack` for a ticket whose change is HockeyTrack's
+   `terraform/security-alarms.tf`, which holds both projects' CloudTrail
+   alarms;
    they run in parallel without touching each other). Implements with tests, runs the
    affected suites, makes one commit on `sco-<n>`. Effort is set by triage:
    low for docs, medium for code, high for security-review tickets.

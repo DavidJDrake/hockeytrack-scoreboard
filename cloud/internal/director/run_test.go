@@ -18,6 +18,7 @@ import (
 	"hockeytrack-scoreboard/internal/schedule"
 	"hockeytrack-scoreboard/internal/season"
 	"hockeytrack-scoreboard/internal/settings"
+	"hockeytrack-scoreboard/internal/templates"
 )
 
 // The season the run tests share: early and late tonight (they do not
@@ -112,6 +113,7 @@ type doc struct {
 		CountdownLeadMin int `json:"countdownLeadMin"`
 		FinalHoldMin     int `json:"finalHoldMin"`
 	} `json:"display"`
+	Next *panelconfig.Next `json:"next"`
 }
 
 func decode(t *testing.T, m iotpub.Message) doc {
@@ -144,6 +146,12 @@ func TestTheNextKeptGameIsSentRetainedAsTheWholeDocumentAndRecorded(t *testing.T
 	}
 	if d.Display.CountdownLeadMin != 45 || d.Display.FinalHoldMin != settings.BuiltIn.FinalHoldMin {
 		t.Errorf("settings %+v: the account's defaults were not laid under", d.Display)
+	}
+	// The strip's next game rides along (SCO-56), from the season's row: the
+	// late game, its clubs and its start as the season wrote them.
+	want := &panelconfig.Next{GameID: late, Away: "MTL", Home: "TOR", Start: clock.Add(150 * time.Minute).UTC().Format(time.RFC3339)}
+	if d.Next == nil || *d.Next != *want {
+		t.Errorf("next %+v, want %+v", d.Next, want)
 	}
 	row := h.row(t, "scoreboard-01")
 	if row.GameID != early || row.Sent != early || row.ChosenAt != clock.UnixMilli() {
@@ -187,6 +195,9 @@ func TestThePanelFollowsTheNightFromLiveToFinalToTheNextGame(t *testing.T) {
 		}
 	}
 	sent(early, "before the reducer sees it")
+	if d := decode(t, h.pub.Messages[0]); d.Next == nil || d.Next.GameID != late {
+		t.Errorf("early's document names next %+v, want %d", d.Next, late)
+	}
 	h.game(early, "LIVE", time.Time{})
 	sent(early, "live")
 	// Past its 2h40 and still live: a live game is not cut off.
@@ -200,6 +211,11 @@ func TestThePanelFollowsTheNightFromLiveToFinalToTheNextGame(t *testing.T) {
 	// reducer has not caught up: puck drop is what cuts the hold short.
 	h.clock = clock.Add(151 * time.Minute)
 	sent(late, "late puck drop")
+	// Nothing kept after the late game: its document carries no next at all,
+	// not a null one.
+	if m := h.pub.Messages[1]; strings.Contains(string(m.Payload), "next") {
+		t.Errorf("the last game's document says %s", m.Payload)
+	}
 	h.game(late, "FINAL", h.clock.Add(150*time.Minute))
 	h.clock = h.clock.Add(150*time.Minute + 3*time.Hour) // hold over, nothing ahead
 	sent(late, "nothing ahead: nothing sent, the panel goes dark by its own rule")
@@ -388,6 +404,84 @@ func TestNothingIsSentOnAGuess(t *testing.T) {
 	}
 }
 
+func TestAPanelsKeptSetIncludesItsTemplatesGames(t *testing.T) {
+	h := newHarness(t)
+	tp := templates.NewFake()
+	h.Templates = tp
+	ctx := context.Background()
+	// A template holding the late game and tomorrow's, attached to a panel
+	// with no games of its own: the panel is sent the template's game, the
+	// same one the API shows its owner as next.
+	_ = tp.Create(ctx, "sub-a", templates.Template{ID: "t-1", Name: "Habs", Games: []int64{late, tomorrow}})
+	h.panel(t, "scoreboard-01", "sub-a")
+	_ = h.devices.Update(ctx, devices.Device{ThingName: "scoreboard-01", Owner: "sub-a",
+		Schedule: schedule.Panel{Templates: []string{"t-1"}}})
+	if err := h.Run(ctx, ""); err != nil || len(h.pub.Messages) != 1 {
+		t.Fatalf("published %d, err %v", len(h.pub.Messages), err)
+	}
+	if got := decode(t, h.pub.Messages[0]); *got.GameID != late {
+		t.Errorf("sent %d, want the template's %d", *got.GameID, late)
+	}
+	// The stranger's slot overlaps the early game's, and neither has been
+	// seen by the reducer. From a template, the stranger loses to the early
+	// game set on the panel itself while the conflict is unanswered: the
+	// kept set is the API's, panel games winning, so the director sends the
+	// early game and never the stranger.
+	h = newHarness(t)
+	h.Templates = tp
+	_ = tp.Create(ctx, "sub-a", templates.Template{ID: "t-2", Name: "Strangers", Games: []int64{stranger}})
+	h.panel(t, "scoreboard-01", "sub-a", early)
+	_ = h.devices.Update(ctx, devices.Device{ThingName: "scoreboard-01", Owner: "sub-a",
+		Schedule: schedule.Panel{Games: []int64{early}, Templates: []string{"t-2"}}})
+	if err := h.Run(ctx, ""); err != nil || len(h.pub.Messages) != 1 {
+		t.Fatalf("published %d, err %v", len(h.pub.Messages), err)
+	}
+	if got := decode(t, h.pub.Messages[0]); *got.GameID != early {
+		t.Errorf("sent %d, want the panel's own %d", *got.GameID, early)
+	}
+	// Answered the other way, the template's game is what is sent.
+	_ = h.devices.Update(ctx, devices.Device{ThingName: "scoreboard-01", Owner: "sub-a",
+		Schedule: schedule.Panel{Games: []int64{early}, Templates: []string{"t-2"},
+			Resolutions: []schedule.Resolution{{Sequence: []int64{early, stranger}, Keep: []int64{stranger}}}}})
+	if err := h.Run(ctx, ""); err != nil || len(h.pub.Messages) != 2 {
+		t.Fatalf("published %d, err %v", len(h.pub.Messages), err)
+	}
+	if got := decode(t, h.pub.Messages[1]); *got.GameID != stranger {
+		t.Errorf("sent %d, want the answer's %d", *got.GameID, stranger)
+	}
+	// The templates table down: a panel with a template is skipped and
+	// reported, not directed from its own games as if it had none; a panel
+	// without one is still directed.
+	h = newHarness(t)
+	h.Templates = &templates.Fake{Err: errors.New("table down")}
+	h.panel(t, "scoreboard-01", "sub-a", early)
+	_ = h.devices.Update(ctx, devices.Device{ThingName: "scoreboard-01", Owner: "sub-a",
+		Schedule: schedule.Panel{Games: []int64{early}, Templates: []string{"t-1"}}})
+	h.panel(t, "scoreboard-02", "sub-a", late)
+	err := h.Run(ctx, "")
+	if err == nil || !strings.Contains(err.Error(), "scoreboard-01") || !strings.Contains(err.Error(), "templates") {
+		t.Errorf("err %v", err)
+	}
+	if len(h.pub.Messages) != 1 || h.pub.Messages[0].Topic != panelconfig.Topic("scoreboard-02") {
+		t.Errorf("messages %+v", h.pub.Messages)
+	}
+	// No templates store wired at all is the same: the panel naming one is
+	// skipped and reported, never directed from its own games alone.
+	h = newHarness(t)
+	h.Templates = nil
+	h.panel(t, "scoreboard-01", "sub-a", early)
+	_ = h.devices.Update(ctx, devices.Device{ThingName: "scoreboard-01", Owner: "sub-a",
+		Schedule: schedule.Panel{Games: []int64{early}, Templates: []string{"t-1"}}})
+	h.panel(t, "scoreboard-02", "sub-a", late)
+	err = h.Run(ctx, "")
+	if err == nil || !strings.Contains(err.Error(), "scoreboard-01") || !strings.Contains(err.Error(), "templates") {
+		t.Errorf("err %v", err)
+	}
+	if len(h.pub.Messages) != 1 || h.pub.Messages[0].Topic != panelconfig.Topic("scoreboard-02") {
+		t.Errorf("messages %+v", h.pub.Messages)
+	}
+}
+
 type failingGames struct {
 	gamestore.Store
 	id int64
@@ -467,8 +561,13 @@ func TestNoPanelIsEverSentAGameOutsideItsKeptSet(t *testing.T) {
 	}
 	for _, m := range h.pub.Messages {
 		thing := strings.TrimSuffix(strings.TrimPrefix(m.Topic, "scoreboard/"), "/config")
-		if d := decode(t, m); d.GameID == nil || !kept[thing][*d.GameID] {
+		d := decode(t, m)
+		if d.GameID == nil || !kept[thing][*d.GameID] {
 			t.Errorf("%s was sent %s, kept %v", thing, m.Payload, kept[thing])
+		}
+		// The next game is held to the same: kept, and never the game sent.
+		if d.Next != nil && (!kept[thing][d.Next.GameID] || d.Next.GameID == *d.GameID) {
+			t.Errorf("%s was sent next %s, kept %v", thing, m.Payload, kept[thing])
 		}
 	}
 }

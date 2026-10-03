@@ -193,9 +193,29 @@ def _stale_banner(surface, assets, stale_s: float | None, link_ok: bool) -> None
               W // 2, BANNER_TOP + BANNER_H // 2, "center")
 
 
+def display_line(display: tuple[int, int]) -> str:
+    """The display's reported size and shape as one line, e.g. ``440 x 1980
+    (4.5:1)``: long side over short side, to one decimal, whichever way
+    round the panel reported itself. The hardware's numbers are shown as
+    reported and never divided by zero: a side of zero gets no ratio."""
+    w, h = display
+    long_side, short_side = max(w, h), min(w, h)
+    if short_side <= 0:
+        return f"{w} x {h}"
+    return f"{w} x {h}  ({long_side / short_side:.1f}:1)"
+
+
 def draw(surface: pygame.Surface, state: GameState | None, now_ms: int, assets: Assets,
-         link_ok: bool = True, clock_ok: bool = True, stale_s: float | None = None) -> None:
+         link_ok: bool = True, clock_ok: bool = True, stale_s: float | None = None,
+         display: tuple[int, int] | None = None) -> None:
     """Paint one frame of the scoreboard.
+
+    ``display`` is the size the attached display reported, or None when the
+    caller has nothing to say about it. It appears on the waiting-for-a-game
+    screen only, as one muted line, so a new panel's resolution can be read
+    off the glass instead of off the card: the second panel turned out to
+    be 440x1980 and nobody knew until the journal was read. Nothing else on
+    the panel changes with it.
 
     ``clock_ok`` is False while this panel's wall clock has not been set by
     NTP. It has no RTC, so until then ``now_ms`` may be hours out, and the
@@ -224,6 +244,11 @@ def draw(surface: pygame.Surface, state: GameState | None, now_ms: int, assets: 
     if state is None:
         _text(surface, assets, "HOCKEYTRACK", 120, INK, W // 2, H // 2 - 40, "center")
         _text(surface, assets, "waiting for a game...", 48, MUTED, W // 2, H // 2 + 60, "center", bold=False)
+        if display is not None:
+            # Under the waiting line, well clear of the bottom edge: the
+            # burn-in shift only ever moves the frame up, and this must not
+            # become the one line the bottom margin cannot afford.
+            _text(surface, assets, display_line(display), 36, MUTED, W // 2, H // 2 + 135, "center", bold=False)
         return
 
     if state.state == "PRE":
