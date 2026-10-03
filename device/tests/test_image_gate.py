@@ -5,6 +5,7 @@ breaks exactly it, and the clean fixture must pass. The fixtures are plain
 directories; nothing is mounted and nothing needs root.
 """
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -151,9 +152,13 @@ def clean_image(tmp_path: Path) -> tuple[Path, Path]:
     (venv / "lib" / "python3.13" / "site-packages" / "pip").mkdir()
     dpkg = root / "var" / "lib" / "dpkg"
     dpkg.mkdir(parents=True)
+    # The Debian-supplied Python packages at exactly the versions
+    # device/debian-versions.txt pins, read from the file rather than
+    # repeated here, so re-reading the pins never breaks the clean fixture.
     (dpkg / "status").write_text(
-        "Package: python3-paho-mqtt\nStatus: install ok installed\nVersion: 2.1.0-1\n\n"
-        "Package: network-manager\nStatus: install ok installed\nVersion: 1.52.0-1\n"
+        "".join(f"Package: {package}\nStatus: install ok installed\nVersion: {version}\n\n"
+                for package, version in debian_pins())
+        + "Package: network-manager\nStatus: install ok installed\nVersion: 1.52.0-1\n"
     )
     (root / "var" / "lib" / "scoreboard").mkdir(parents=True)
     (root / "home" / "pi").mkdir(parents=True)
@@ -176,6 +181,31 @@ def clean_image(tmp_path: Path) -> tuple[Path, Path]:
 
 
 ARCH_LIB = "usr/lib/aarch64-linux-gnu"
+
+
+def debian_pins() -> list[tuple[str, str]]:
+    """(Debian package, Debian version) for each line of debian-versions.txt."""
+    out = []
+    for line in (REPO / "device" / "debian-versions.txt").read_text().splitlines():
+        line = line.split("#", 1)[0].split()
+        if line:
+            out.append((line[1], line[2]))
+    return out
+
+
+def _set_dpkg_version(r: Path, package: str, version: str) -> None:
+    status_file = r / "var/lib/dpkg/status"
+    stanzas = status_file.read_text().split("\n\n")
+    for i, stanza in enumerate(stanzas):
+        if stanza.startswith(f"Package: {package}\n"):
+            stanzas[i] = re.sub(r"(?m)^Version: .*$", f"Version: {version}", stanza)
+    status_file.write_text("\n\n".join(stanzas))
+
+
+def _drop_dpkg_stanza(r: Path, package: str) -> None:
+    status_file = r / "var/lib/dpkg/status"
+    stanzas = status_file.read_text().split("\n\n")
+    status_file.write_text("\n\n".join(s for s in stanzas if not s.startswith(f"Package: {package}\n")))
 
 
 def layout_print(what: str) -> str:
@@ -527,6 +557,19 @@ BREAKS = {
         lambda r, b: (r / "opt/scoreboard/.venv/lib/python3.13/site-packages/paho_mqtt-2.1.0.dist-info").mkdir(), "PyPI"),
     "the distribution's paho-mqtt not installed": (
         lambda r, b: shutil.rmtree(r / "usr/lib/python3/dist-packages/paho"), "paho"),
+    # device/debian-versions.txt is what lets CI reject a requirements.txt
+    # floor trixie cannot meet; only the gate sees the real rootfs, so only
+    # the gate can tell when the file has fallen behind a Debian release.
+    "a Debian point release moving cryptography past the pinned version": (
+        lambda r, b: _set_dpkg_version(r, "python3-cryptography", "44.0.0-1"), "debian-versions.txt"),
+    "the pinned pygame replaced by an older one in the image": (
+        lambda r, b: _set_dpkg_version(r, "python3-pygame", "2.5.2-2"), "debian-versions.txt"),
+    "a pinned Debian Python package with no dpkg stanza at all": (
+        lambda r, b: _drop_dpkg_stanza(r, "python3-cryptography"), "python3-cryptography is not installed"),
+    "a pinned Debian Python package removed but not purged": (
+        lambda r, b: (_drop_dpkg_stanza(r, "python3-paho-mqtt"),
+                      _add_package(r, "python3-paho-mqtt", "deinstall ok config-files")),
+        "python3-paho-mqtt is not installed"),
     # A directory named "x<newline>certs" splits find's output into two
     # lines, the second reading as the one allowed certificate path.
     "a foreign CA smuggled behind a newline in a directory name": (
@@ -961,6 +1004,76 @@ def test_each_assertion_can_fail(tmp_path, name):
     assert expected in result.stderr, f"{name}: {result.stderr}"
 
 
+@pytest.mark.parametrize("installed", ["43.0.0-3+deb13u2", "43.0.0-3+b1", "1:43.0.0-4"])
+def test_a_debian_revision_that_does_not_move_the_upstream_version_passes(tmp_path, installed):
+    # A security revision, a binNMU or an epoch changes nothing pip compares
+    # a floor against, so it must not cost a thirty-five-minute release build.
+    root, boot = clean_image(tmp_path)
+    _set_dpkg_version(root, "python3-cryptography", installed)
+    result = gate(root, boot)
+    assert result.returncode == 0, result.stderr
+
+
+def test_a_missing_pin_file_fails_closed(tmp_path):
+    # The gate takes the repository as an argument; a checkout without the
+    # pin file has nothing to compare against and must not read as clean.
+    root, boot = clean_image(tmp_path)
+    repo = tmp_path / "repo"
+    shutil.copytree(REPO / "tools", repo / "tools")
+    shutil.copytree(REPO / "device", repo / "device", ignore=shutil.ignore_patterns(".venv", "__pycache__", "config"))
+    (repo / "device" / "debian-versions.txt").unlink()
+    result = subprocess.run(["bash", str(GATE), str(root), str(boot), str(repo)],
+                            capture_output=True, text=True, timeout=600)
+    assert result.returncode == 1, result.stdout
+    assert "debian-versions.txt is missing" in result.stderr, result.stderr
+
+
+def _repo_with_pins(tmp_path: Path, pins_text: str) -> Path:
+    """A copy of the repository whose pin file holds exactly pins_text."""
+    repo = tmp_path / "repo"
+    shutil.copytree(REPO / "tools", repo / "tools")
+    shutil.copytree(REPO / "device", repo / "device", ignore=shutil.ignore_patterns(".venv", "__pycache__", "config"))
+    (repo / "device" / "debian-versions.txt").write_text(pins_text)
+    return repo
+
+
+def _gate_against(root: Path, boot: Path, repo: Path):
+    return subprocess.run(["bash", str(GATE), str(root), str(boot), str(repo)],
+                          capture_output=True, text=True, timeout=600)
+
+
+def test_a_pin_file_without_a_trailing_newline_still_checks_its_last_line(tmp_path):
+    # bash's `read` returns non-zero on an unterminated final line, so a bare
+    # `while read` loop drops it: the gate would check two packages, report
+    # ok, and never compare pygame -- while CI's splitlines() reader still
+    # sees all three. The two readers must agree on the same file.
+    root, boot = clean_image(tmp_path)
+    pins = (REPO / "device" / "debian-versions.txt").read_text().rstrip("\n")
+    assert not pins.endswith("\n")
+    repo = _repo_with_pins(tmp_path, pins)
+    result = _gate_against(root, boot, repo)
+    assert result.returncode == 0, result.stderr
+    assert f"the {len(debian_pins())} Debian-supplied Python packages match" in result.stdout, result.stdout
+    # And a mismatch on that last line is still a finding, not a line skipped.
+    last_package = debian_pins()[-1][0]
+    _set_dpkg_version(root, last_package, "0.0.1-1")
+    result = _gate_against(root, boot, repo)
+    assert result.returncode == 1, result.stdout
+    assert last_package in result.stderr and "debian-versions.txt says" in result.stderr, result.stderr
+
+
+def test_a_pin_line_with_a_fifth_field_fails_the_gate_as_it_fails_ci(tmp_path):
+    # test_debian_floors.py asserts exactly four fields; a gate that folded a
+    # fifth into the date would pass a line CI rejects, and the two readers
+    # would again disagree about one file.
+    root, boot = clean_image(tmp_path)
+    pins = (REPO / "device" / "debian-versions.txt").read_text().rstrip("\n") + " extra\n"
+    repo = _repo_with_pins(tmp_path, pins)
+    result = _gate_against(root, boot, repo)
+    assert result.returncode == 1, result.stdout
+    assert "5 fields" in result.stderr, result.stderr
+
+
 @pytest.mark.parametrize("unit", MASKED_UNITS)
 def test_each_mask_is_asserted_on_its_own(tmp_path, unit):
     # The mask is the control, so its absence is a finding by itself: a purge
@@ -1241,7 +1354,7 @@ def test_a_release_public_key_the_repository_names_passes_byte_for_byte(tmp_path
     # Everything else the gate compares an image against, copied unchanged.
     for sub in ("certs", "polkit", "generators", "system.conf.d", "NetworkManager.service.d"):
         shutil.copytree(REPO / "device" / sub, repo / "device" / sub)
-    for name in ("scoreboard-journal-prune", "scoreboard-journal-prune.service"):
+    for name in ("scoreboard-journal-prune", "scoreboard-journal-prune.service", "debian-versions.txt"):
         shutil.copy(REPO / "device" / name, repo / "device" / name)
     (repo / "tools").mkdir()
     shutil.copy(LAYOUT, repo / "tools" / "image-layout.sh")
