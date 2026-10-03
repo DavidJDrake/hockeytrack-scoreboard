@@ -134,3 +134,63 @@ def test_nothing_drawn_on_the_layout_can_land_outside_it():
     pygame.draw.rect(canvas.layout, (255, 0, 0), (-50, -50, W + 100, H + 100))
     for margin in canvas.area.margins:
         assert rgb(canvas.frame, margin) == bytes(BG) * (margin[2] * margin[3])
+
+
+# --- the wider frame for the longer panel (SCO-70) --------------------------
+#
+# The same proof the other way round: the second panel is 440x1980 (4.5:1),
+# so its frame is 2160x480, and the 1920 columns in the middle must be the
+# old frame byte for byte, with background and nothing else at each end.
+
+LONG = (440, 1980)
+END = 120
+
+
+@pytest.mark.parametrize("name", list(PAINTERS))
+def test_the_longer_panel_shows_the_same_layout_in_the_middle_of_a_wider_frame(name):
+    canvas = the_new_way(PAINTERS[name], LONG, (0, 0))
+    assert canvas.frame.get_size() == (2160, H)
+    assert rgb(canvas.frame, (END, 0, W, H)) == rgb(the_old_way(PAINTERS[name], (0, 0)))
+    assert canvas.area.margins == ((0, 0, END, H), (W + END, 0, END, H))
+    for margin in canvas.area.margins:
+        assert rgb(canvas.frame, margin) == bytes(BG) * (margin[2] * margin[3]), \
+            f"{name} drew outside the layout"
+
+
+@pytest.mark.parametrize("offset", [o for o in SHIFT_PATTERN if o != (0, 0)])
+def test_the_shift_on_a_wider_frame_loses_nothing_across_and_leaves_nothing_behind(offset):
+    # Across, the layout moves into the end margins and every column
+    # survives. Up, the frame is still 480 rows, so the top rows go off the
+    # panel exactly as they do on a 4:1 panel (background; test_render
+    # proves it), which is why the comparison below is over the rows kept.
+    dx, dy = offset
+    still = the_new_way(PAINTERS["live"], LONG, (0, 0))
+    moved = the_new_way(PAINTERS["live"], LONG, offset)
+    kept = pygame.Rect(END, -dy, W, H + dy)
+    assert rgb(still.frame, kept) == rgb(moved.frame, kept.move(dx, dy))
+
+    PAINTERS["live"](moved.layout, Assets())
+    moved.clear_margins(BG)
+    assert rgb(moved.frame) == rgb(still.frame)
+
+
+def test_the_end_margins_really_do_need_clearing():
+    # The flash washes the away half, which is the left one, so a step to
+    # the left is the one that carries colour into an end margin.
+    moved = the_new_way(PAINTERS["goal flash"], LONG, (-4, -2))
+    left = moved.area.margins[0]
+    assert rgb(moved.frame, left) != bytes(BG) * (left[2] * left[3])
+
+
+def test_the_shift_stays_inside_every_frame_it_is_applied_to():
+    # main.SHIFT_PATTERN is one ring for every panel. Across, no step reaches
+    # past the layout's own 60 px side margins, let alone the 120 px ends of
+    # the wider frame; up, no step reaches past the layout's 76 px top
+    # margin; and no step ever goes down, because the game screen's bottom
+    # margin is zero. Held here so a change to the ring is caught against
+    # the frames it moves, not discovered on the glass.
+    ends = the_new_way(PAINTERS["live"], LONG, (0, 0)).area.margins
+    end_w = min(m[2] for m in ends)
+    for dx, dy in SHIFT_PATTERN:
+        assert abs(dx) <= 60 and abs(dx) < end_w, f"{(dx, dy)} reaches past the ends"
+        assert -76 < dy <= 0, f"{(dx, dy)} moves the frame down or off the top"
