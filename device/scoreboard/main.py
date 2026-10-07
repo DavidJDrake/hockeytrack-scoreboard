@@ -769,8 +769,8 @@ def turned(screen_size: tuple[int, int], rotate: int | None) -> tuple[Canvas, Pl
     (display.regions): the 3.2:1 panel this was built for. A 4:1 panel has
     none, and its frame is byte for byte what it was; a panel longer than
     4:1 (the 440x1980 one) has none either, because its spare glass is at
-    the ends, which are margins until a layout for them is chosen
-    (docs/mockups, E and F). Both are held in test_canvas."""
+    the ends, which the scoreboard's team columns take (Canvas.board,
+    docs/mockups E). Both are held in test_canvas."""
     canvas = Canvas(frame_size(screen_size, rotate), strip=True)
     return canvas, placement(canvas.frame.get_size(), screen_size, rotate)
 
@@ -1800,7 +1800,7 @@ def main() -> None:
                     # is following something it cannot show, such as a game
                     # whose start it cannot read.
                     on_screen = None if now_showing.show == NO_GAME else current
-                    draw(layout, on_screen, now_ms, assets, link_ok, clock_ok=now_utc is not None,
+                    draw(canvas.board, on_screen, now_ms, assets, link_ok, clock_ok=now_utc is not None,
                          stale_s=state_age, display=screen.get_size())
                     if canvas.strip is not None:
                         strip = strip_for(now_ms, on_screen, state_age, kept_goal, summary,
@@ -1822,6 +1822,10 @@ def main() -> None:
                 _complain_once(_where(e), "could not paint the panel: %s: %s",
                                type(e).__name__, e)
                 try:
+                    # The scoreboard may have got part-way across the ends
+                    # (Canvas.board) before it failed; this screen is drawn
+                    # on the layout, so they are put back first.
+                    canvas.clear_margins(BG)
                     screens.draw_cannot_draw(layout, assets, build)
                 except Exception:
                     # The fallback draws text, so it needs the same fonts
