@@ -791,3 +791,137 @@ def test_fuzzed_summary_rows_and_goals_never_stop_the_strip_being_drawn():
                          rng.randint(0, 99), rng.choice(["", "1", "OT", "2OT", "SO", "99"]), rng.choice(["", "12:41", "20:00"]))
         draw_strip(surf, strip_lines(goal, parsed[0] if parsed else None,
                                      NextGame(1, "TOR", "MTL", rng.choice([None, "", "2026-10-03T23:00:00Z"])), ZONE), assets)
+
+
+# --------------------------------------------------------------------------
+# The longer panel's frame (SCO-74)
+#
+# On a 4.5:1 panel draw() is handed the layout's rows across the whole
+# 2160-column frame, and the team columns are drawn bigger (LONG_COLUMN).
+# What this file holds the 1920 frame to, the wider one is held to here:
+# the gutter the stale band goes in stays empty, the band covers no team
+# colour, the rows a shift pushes off hold nothing, and text as wide as the
+# cloud allows still leaves the clock its full size.
+# --------------------------------------------------------------------------
+
+from scoreboard.render import COLUMN, LONG_COLUMN, _side  # noqa: E402
+
+LONG_W = 2160
+
+
+def long_surface():
+    pygame.init()
+    return pygame.Surface((LONG_W, H))
+
+
+def widest() -> GameState:
+    """The live game with the widest strings the panel can be sent: four
+    of the widest capital (model._ABBREV allows two to four letters), and
+    two-digit scores and shot counts, the away side on a power play."""
+    d = json.loads((FIX / "state_live.json").read_text())
+    for side in ("away", "home"):
+        d[side].update(abbrev="WWWW", score=88, sog=88)
+    d["situation"]["pp"] = "WWWW"
+    d["lastGoal"] = None
+    return GameState.from_json(json.dumps(d))
+
+
+def final() -> GameState:
+    return GameState.from_json((FIX / "state_live.json").read_text().replace('"state":"LIVE"', '"state":"FINAL"'))
+
+
+def intermission() -> GameState:
+    d = json.loads((FIX / "state_live.json").read_text())
+    d["clock"]["intermission"] = True
+    return GameState.from_json(json.dumps(d))
+
+
+def test_the_longer_frame_is_bigger_only_where_it_has_room():
+    assert LONG_COLUMN.abbrev_px > COLUMN.abbrev_px and LONG_COLUMN.score_px > COLUMN.score_px
+    assert LONG_COLUMN.label_px >= COLUMN.label_px and LONG_COLUMN.pp_px >= COLUMN.pp_px
+
+
+@pytest.mark.parametrize("state", [busy_state, intermission, final, widest])
+def test_the_band_still_goes_where_the_longer_frame_draws_nothing(state):
+    s = state()
+    surf = long_surface()
+    draw(surf, s, s.as_of_ms, Assets())
+    band = pygame.Rect(0, BANNER_TOP, LONG_W, BANNER_H)
+    assert pygame.image.tostring(surf.subsurface(band), "RGB") == bg_bytes(band), \
+        f"{state.__name__} on the longer frame draws something in the band's gutter"
+
+
+def test_power_play_on_the_longer_frame_ends_clear_of_the_band():
+    # POWER PLAY is the lowest thing in a column, with the band right under
+    # it: measured as ink, with the widest strings too.
+    for s in (live(), widest()):
+        surf = long_surface()
+        draw(surf, s, s.as_of_ms, Assets())
+        ink = [y for y in range(0, BANNER_TOP) if any(surf.get_at((x, y))[:3] == RED for x in range(60, 700, 2))]
+        assert ink, "no POWER PLAY drawn"
+        assert max(ink) < BANNER_TOP - 4, f"POWER PLAY runs to y={max(ink)}"
+
+
+def test_the_stale_band_on_the_longer_frame_covers_no_team_colour():
+    surf = long_surface()
+    s = busy_state()
+    draw(surf, s, s.as_of_ms + 300_000, Assets(), stale_s=600)
+    for colour in ((0x00, 0x28, 0x68), (0x00, 0x38, 0xA8)):
+        covered = [y for y in range(BANNER_TOP, BANNER_TOP + BANNER_H)
+                   if any(surf.get_at((x, y))[:3] == colour for x in range(0, LONG_W, 2))]
+        assert not covered, covered
+    # Inset 60 px from the frame's own edges, like the rule line under it.
+    row = BANNER_TOP + 2
+    assert surf.get_at((59, row))[:3] == BG and surf.get_at((60, row))[:3] != BG
+    assert surf.get_at((LONG_W - 61, row))[:3] != BG and surf.get_at((LONG_W - 60, row))[:3] == BG
+
+
+@pytest.mark.parametrize("offset", list(SHIFT_PATTERN))
+def test_the_shift_cuts_nothing_off_the_longer_frame(offset):
+    dx, dy = offset
+    for s in (busy_state(), widest(), final()):
+        surf = long_surface()
+        draw(surf, s, s.as_of_ms, Assets())
+        before = surf.copy()
+        lost = []
+        if dx:
+            lost.append(pygame.Rect(LONG_W - dx, 0, dx, H) if dx > 0 else pygame.Rect(0, 0, -dx, H))
+        if dy:
+            lost.append(pygame.Rect(0, 0, LONG_W, -dy))
+        for rect in lost:
+            assert pygame.image.tostring(before.subsurface(rect), "RGB") == bg_bytes(rect), offset
+        shift_frame(surf, offset)
+        kept = pygame.Rect(max(0, -dx), max(0, -dy), LONG_W - abs(dx), H - abs(dy))
+        assert pygame.image.tostring(before.subsurface(kept), "RGB") == \
+            pygame.image.tostring(surf.subsurface(kept.move(dx, dy)), "RGB")
+
+
+def test_the_widest_strings_still_leave_the_clock_its_full_size():
+    # The clock is fitted to the gap between the columns, and on the longer
+    # frame the columns are bigger. The widest abbreviation and score the
+    # cloud can send must still leave it the 220 px it is drawn at: the
+    # middle of the frame -- the 540 columns between where the widest
+    # columns end, x 798 and 1362 -- is the same with them as without.
+    centre = pygame.Rect(LONG_W // 2 - 270, 0, 540, 372)
+    frames = []
+    for s in (live(), widest()):
+        surf = long_surface()
+        draw(surf, s, s.as_of_ms, Assets())
+        frames.append(pygame.image.tostring(surf.subsurface(centre), "RGB"))
+    assert frames[0] == frames[1]
+    surf, assets = long_surface(), Assets()
+    away = _side(surf, assets, widest().away, 60, "left", True, False, False, LONG_COLUMN)
+    home = _side(surf, assets, widest().home, LONG_W - 60, "right", True, False, False, LONG_COLUMN)
+    assert fit_px(assets, "20:00", 220, home - away - 80) == 220
+
+
+def test_the_longer_frame_with_a_fallback_font_stays_inside_its_edges(tmp_path):
+    # A checkout that has lost Barlow Condensed draws with a wider system
+    # face. The clock may shrink (that is what fitting it is for), but
+    # nothing may reach into the 60 px the burn-in shift moves through.
+    assets = Assets(tmp_path)
+    for s in (live(), widest(), busy_state()):
+        surf = long_surface()
+        draw(surf, s, s.as_of_ms, assets, stale_s=600)
+        for edge in (pygame.Rect(0, 0, 56, H), pygame.Rect(LONG_W - 56, 0, 56, H)):
+            assert pygame.image.tostring(surf.subsurface(edge), "RGB") == bg_bytes(edge)

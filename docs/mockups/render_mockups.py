@@ -8,7 +8,8 @@ panel would actually look like.
 
 The second panel is 440x1980, which is 4.5:1: longer than the layout rather
 than taller, so the spare glass is 120 px at each END of the frame, which is
-2160x480. Pictures E and F are drawn at that size. Run from the repo root:
+2160x480. Pictures E and F are drawn at that size; E was chosen and built
+(SCO-74), so it is now drawn by the production renderer. Run from the repo root:
 
     SDL_VIDEODRIVER=dummy .venv/bin/python docs/mockups/render_mockups.py [name ...]
 
@@ -26,6 +27,7 @@ import pygame  # noqa: E402
 
 from scoreboard import render  # noqa: E402
 from scoreboard.assets import Assets  # noqa: E402
+from scoreboard.display import Canvas, frame_size  # noqa: E402
 from scoreboard.model import GameState, fmt_clock  # noqa: E402
 from scoreboard.render import BG, INK, MUTED, RED, RULE, _text, _text_fit  # noqa: E402
 
@@ -143,29 +145,14 @@ def wide_label(surface, assets, text):
 
 
 def wider_columns(assets, s):
-    """E: the side columns take the extra width. Bigger abbreviations and
-    scores, a wider clock; the centre and the penalty rows keep their sizes."""
-    surface = pygame.Surface((WIDE_W, render.H))
-    surface.fill(BG)
-    for team, x, anchor in ((s.away, 60, "topleft"), (s.home, WIDE_W - 60, "topright")):
-        r = _text(surface, assets, team.abbrev, 190, team.color, x, 30, anchor)
-        sx = r.right + 44 if anchor == "topleft" else r.left - 44
-        _text(surface, assets, str(team.score), 240, INK, sx, 6, anchor)
-        _text(surface, assets, f"SOG {team.sog}", 60, MUTED, x, 225, anchor, bold=False)
-        if s.pp == team.abbrev:
-            _text(surface, assets, "POWER PLAY", 44, RED, x, 290, anchor)
-    _text_fit(surface, assets, fmt_clock(s.clock_seconds), 220, 760, INK, WIDE_W // 2, 150, "center")
-    _text(surface, assets, "2ND PERIOD", 60, MUTED, WIDE_W // 2, 300, "center")
-    pygame.draw.line(surface, RULE, (60, 372), (WIDE_W - 60, 372), 2)
-    for side, x0 in (("away", 60), ("home", WIDE_W // 2 + 60)):
-        team = s.away if side == "away" else s.home
-        for i, p in enumerate([p for p in s.penalties if p.team == team.abbrev][:2]):
-            ry = 382 + i * 52
-            _text(surface, assets, f"#{p.number}  {p.team}  {fmt_clock(p.seconds)}", 40, INK, x0, ry - 6, "topleft", bold=False)
-            pygame.draw.rect(surface, RULE, (x0, ry + 36, 840, 8))
-            pygame.draw.rect(surface, team.color, (x0, ry + 36, int(840 * min(1.0, p.seconds / 120)), 8))
-    wide_label(surface, assets, "E  wider columns: bigger names and scores, longer penalty bars, nothing new")
-    return surface
+    """E, chosen (SCO-74): the side columns take the extra width. Drawn by
+    the production renderer now, on the 4.5:1 panel's own frame, so this is
+    what that panel shows rather than a picture of an idea."""
+    canvas = Canvas(frame_size((440, 1980), None))
+    canvas.clear_margins(BG)
+    render.draw(canvas.board, s, s.as_of_ms, assets)
+    wide_label(canvas.frame, assets, "E  wider columns (chosen, built): bigger names and scores, longer penalty bars")
+    return canvas.frame
 
 
 def end_columns(assets, s):

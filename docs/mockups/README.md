@@ -1,6 +1,6 @@
 # Layout mock-ups for the real panel
 
-**Chosen by the owner, 2026-09-21: C, the information strip.** The rest are kept as the record of what was considered. What C needed before it could be built is below, with what has since been built against it. The second, longer panel has its own pair of mock-ups at the end, not chosen yet.
+**Chosen by the owner, 2026-09-21: C, the information strip.** The rest are kept as the record of what was considered. What C needed before it could be built is below, with what has since been built against it. The second, longer panel has its own pair of mock-ups at the end; E was chosen and built (SCO-74).
 
 The panel is 400x1280: **3.2:1**. The scoreboard frame is drawn at 1920x480,
 which is 4:1, so turned and scaled it lands as 1280x320 with **40 px of unused
@@ -68,29 +68,41 @@ abbreviations, scores 0-99 and a fixed set of states); a document the panel
 cannot read changes nothing and cannot stop the render loop. Each slot's text
 is fitted to its width and then drawn on the slot's own clipped surface, so
 nothing runs into the next slot or off the panel whatever it says. A 4:1
-panel has no strip and its frame is byte for byte what it was, and so is
-the longer panel's wider frame below: the strip is what a taller panel
+panel has no strip and its frame is byte for byte what it was, and the
+longer panel below has no strip either: the strip is what a taller panel
 gains (`device/tests/test_canvas.py`).
 
-## The second panel: 440x1980, 4.5:1 -- choose one
+## The second panel: 440x1980, 4.5:1 -- E chosen and built
 
-**Not chosen yet.** The owner's second panel (received 2026-09-25) is longer
-than the layout rather than taller, so the spare glass is at the ends: the
-frame is 2160x480 and the layout sits in the middle with **120 px at each
-end** (SCO-70). These two are drawn at that size, with the real fonts and the
-same game as A to D.
+**E, built in SCO-74.** The owner's second panel (received 2026-09-25) is
+longer than the layout rather than taller, so the spare glass is at the ends:
+the frame is 2160x480, **120 px wider at each end** than the layout (SCO-70).
+These two were drawn at that size, with the real fonts and the same game as
+A to D.
 
 | | |
 |---|---|
-| **E** wider columns | The side columns take the width: abbreviations and scores about a quarter bigger, longer penalty bars. Nothing new to feed; reads from further away. |
-| **F** end columns | Today's layout untouched in the middle, and an information column at each end carrying what C's strip carries on the taller panel: last goal, another game, the next game. The data is what C's strip already reads (`main.strip_for`); the columns are narrow, so each slot is a heading and a few short lines. |
+| **E** wider columns -- **built** | The side columns take the width: abbreviations and scores a fifth bigger, SOG and POWER PLAY a little bigger, penalty bars 120 px longer. The clock and period stay exactly where and what they were. Nothing new to feed. |
+| **F** end columns | Today's layout untouched in the middle, and an information column at each end carrying what C's strip carries on the taller panel. Not chosen; kept as the record. |
 
 ![E](e-wider-columns.png)
 ![F](f-end-columns.png)
 
-**Until one is chosen, the shipped code draws the ends as plain margins** in
-the frame's background (`display.regions`), and the layout in the middle is
-the 4:1 frame byte for byte. That is deliberate: nothing goes into the ends
-that would later have to come out. Whichever is chosen comes with the same
-two things C did: the shift and the stale band placed against it and
-re-tested, and on F, the data.
+E is now drawn by the production renderer (`render_mockups.py` calls
+`render.draw` on the 4.5:1 frame), so the picture above is what that panel
+shows. The scoreboard is drawn across the whole frame (`display.Canvas.board`)
+with `render.LONG_COLUMN`'s sizes; every other screen stays on the 1920-column
+layout with plain ends. Placed and re-tested the way C was:
+
+- **Stale band:** the columns' lowest ink (POWER PLAY) ends at y=315, above
+  the band's gutter at 324..367, which stays empty on the longer frame too.
+  The band itself spans the frame, inset 60 px, and covers no team colour.
+- **Burn-in shift:** the columns sit 60 px from the frame's edges, the
+  layout's own margin, and their top ink is at y=50. Every step of the ring
+  loses only background.
+- **Fitted text:** with the widest strings the cloud can send (`WWWW`, scores
+  and shots of 88) the clock still gets its full 220 px; with a fallback font
+  nothing reaches the frame's outer 60 px.
+- **Other panels:** 4:1 either way round, 3.2:1 with the strip and a 16:9 TV
+  are byte for byte what they were, and so is every screen on the 4.5:1
+  panel other than a live, intermission or final game (`test_canvas.py`).

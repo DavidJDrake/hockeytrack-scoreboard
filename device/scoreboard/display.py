@@ -50,8 +50,8 @@ STRIP_H = 120
 # height is 2160 columns: 120 px of spare glass at each end. 2400 (5:1) is
 # where this stops. Past that the ends would be wider than a whole side
 # column of the layout, which is not a margin any more but a region with no
-# design (docs/mockups, E and F are the candidates for the 120 px case and
-# neither has been chosen), and a frame that is mostly nothing is the same
+# design (docs/mockups, E: the team columns take the ends, which was drawn
+# for the 120 px case and sized to it), and a frame that is mostly nothing is the same
 # fault the height cap exists to avoid. Past the cap placement() letterboxes
 # the ends the way it always did.
 MAX_FRAME_W = 2400
@@ -106,12 +106,10 @@ def regions(frame_h: int, strip: bool = False, frame_w: int = LAYOUT_W) -> Regio
     taller panel gains, never something a panel is assumed to have.
 
     A frame wider than the layout (the 440x1980 panel: 2160 columns) keeps
-    the layout in the middle and the spare columns at each end are margins,
-    painted in the background and nothing else. That is deliberate and it is
-    not the finished design: docs/mockups has two candidates for what those
-    120 px could carry, and until the owner chooses one, plain dark ends are
-    what a longer panel shows. Nothing is drawn there that would later have
-    to be un-drawn.
+    the layout in the middle and the spare columns at each end are margins:
+    painted in the background under every screen that is drawn on the
+    layout. The scoreboard alone is drawn across them (Canvas.board), its
+    team columns taking the ends (SCO-74, docs/mockups E).
     """
     if frame_h < LAYOUT_H:
         raise ValueError(f"a frame cannot be shorter than the layout, got {frame_h}")
@@ -153,6 +151,12 @@ class Canvas:
         self.frame = pygame.Surface(size)
         self.area = regions(size[1], strip, size[0])
         self.layout = self.frame.subsurface(self.area.layout)
+        # The layout's rows across the whole frame: what render.draw paints
+        # the scoreboard on, so that on a panel longer than 4:1 the team
+        # columns can use the ends (SCO-74, mock-up E). Every other screen
+        # stays on the layout. On a 4:1 or a taller panel it is the layout.
+        _, top, _, rows = self.area.layout
+        self.board = self.frame.subsurface((0, top, size[0], rows))
         # The strip's own subsurface, clipped the same way, or None on a
         # panel with no rows for one: render.draw_strip draws on it and can
         # no more reach the layout than the layout can reach the strip.

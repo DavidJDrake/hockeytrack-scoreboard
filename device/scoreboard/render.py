@@ -134,37 +134,70 @@ def _text_fit(surface, assets, s, max_px, max_width, color, x, y, anchor="center
                  color, x, y, anchor, bold)
 
 
-def _side(surface, assets, team, x_abbrev, align, pp_here, en_here, flash):
+class Column(NamedTuple):
+    """The sizes (px) and tops (y) of what a team's column draws."""
+    abbrev_px: int
+    abbrev_y: int
+    score_px: int
+    score_y: int
+    gap: int
+    label_px: int
+    label_y: int
+    pp_px: int
+    pp_y: int
+
+
+# The layout's column, as it has always been drawn on a 4:1 panel.
+COLUMN = Column(150, 40, 190, 20, 36, 60, 205, 44, 270)
+
+# The column on a panel longer than 4:1 (SCO-74, mock-up E): the frame's
+# spare columns go to the two team columns, which start 60 px from the
+# frame's own edges instead of the layout's, so there is room across for
+# everything a fifth bigger. The clock and the period in the middle keep
+# their sizes and their place; only what is beside them grows.
+#
+# Across is not the limit, height is. Measured on Barlow Condensed, in ink
+# rather than font boxes: the abbreviation runs y 66..191, the score 50..212,
+# SOG 221..268 and POWER PLAY 282..315 -- clear of the stale band at
+# 324..367 (test_render holds the gutter empty on this frame too), and the
+# top of it 50 rows below a burn-in shift's reach.
+LONG_COLUMN = Column(180, 12, 230, -17, 40, 66, 202, 48, 268)
+
+
+def _side(surface, assets, team, x_abbrev, align, pp_here, en_here, flash, col=COLUMN):
     """One team's column. align is 'left' (away) or 'right' (home). Returns
     the x-coordinate of the innermost (centre-facing) edge of what was
     drawn, so the caller can keep the centre content clear of it."""
+    w = surface.get_width()
     if flash:
-        pygame.draw.rect(surface, team.color, (0 if align == "left" else W // 2, 0, W // 2, H))
+        pygame.draw.rect(surface, team.color, (0 if align == "left" else w // 2, 0, w // 2, H))
         fg = INK
     else:
         fg = team.color
     anchor = "topleft" if align == "left" else "topright"
-    abbrev_rect = _text(surface, assets, team.abbrev, 150, fg if not flash else INK, x_abbrev, 40, anchor)
-    gap = 36
-    score_x = abbrev_rect.right + gap if align == "left" else abbrev_rect.left - gap
+    abbrev_rect = _text(surface, assets, team.abbrev, col.abbrev_px, fg if not flash else INK, x_abbrev, col.abbrev_y, anchor)
+    score_x = abbrev_rect.right + col.gap if align == "left" else abbrev_rect.left - col.gap
     score_anchor = "topleft" if align == "left" else "topright"
-    score_rect = _text(surface, assets, str(team.score), 190, INK, score_x, 20, score_anchor)
+    score_rect = _text(surface, assets, str(team.score), col.score_px, INK, score_x, col.score_y, score_anchor)
     label = "EN" if en_here else f"SOG {team.sog}"
-    _text(surface, assets, label, 60, MUTED if not flash else INK, x_abbrev, 205, anchor, bold=False)
+    _text(surface, assets, label, col.label_px, MUTED if not flash else INK, x_abbrev, col.label_y, anchor, bold=False)
     if pp_here:
-        _text(surface, assets, "POWER PLAY", 44, RED if not flash else INK, x_abbrev, 270, anchor)
+        _text(surface, assets, "POWER PLAY", col.pp_px, RED if not flash else INK, x_abbrev, col.pp_y, anchor)
     return score_rect.right if align == "left" else score_rect.left
 
 
 def _penalty_rows(surface, assets, state, now_ms, y, limit=2):
     pens = state.penalties_at(now_ms)
+    w = surface.get_width()
     for side in ("away", "home"):
         team = state.away if side == "away" else state.home
         rows = [p for p in pens if p.team == team.abbrev][:limit]
         for i, p in enumerate(rows):
             ry = y + i * 52
-            x0 = 60 if side == "away" else W // 2 + 60
-            width = 720
+            x0 = 60 if side == "away" else w // 2 + 60
+            # 720 on the layout; on a longer frame, longer by what each half
+            # gained, and still ending where it always did against the centre.
+            width = w // 2 - 240
             frac = p.seconds / max(1, 120 if p.type in ("MIN", "BEN") else 300 if p.type == "MAJ" else 600)
             pygame.draw.rect(surface, RULE, (x0, ry + 36, width, 8))
             pygame.draw.rect(surface, team.color, (x0, ry + 36, int(width * min(1.0, frac)), 8))
@@ -193,9 +226,10 @@ def _stale_banner(surface, assets, stale_s: float | None, link_ok: bool) -> None
     minutes = int((stale_s or 0) // 60)
     age = f"{minutes} MIN OLD" if minutes else "UNDER A MINUTE OLD"
     why = "NO UPDATES" if link_ok else "NO LINK"
-    pygame.draw.rect(surface, BANNER_BG, (60, BANNER_TOP, W - 120, BANNER_H))
-    _text_fit(surface, assets, f"{why} - {age}", 40, W - 160, INK,
-              W // 2, BANNER_TOP + BANNER_H // 2, "center")
+    w = surface.get_width()
+    pygame.draw.rect(surface, BANNER_BG, (60, BANNER_TOP, w - 120, BANNER_H))
+    _text_fit(surface, assets, f"{why} - {age}", 40, w - 160, INK,
+              w // 2, BANNER_TOP + BANNER_H // 2, "center")
 
 
 def stale_frame(state: GameState | None, stale_s: float | None) -> bool:
@@ -222,6 +256,13 @@ def draw(surface: pygame.Surface, state: GameState | None, now_ms: int, assets: 
          link_ok: bool = True, clock_ok: bool = True, stale_s: float | None = None,
          display: tuple[int, int] | None = None) -> None:
     """Paint one frame of the scoreboard.
+
+    ``surface`` is 480 rows and at least 1920 columns: the layout, or on a
+    panel longer than 4:1 the layout's rows across the whole frame
+    (display.Canvas.board). Everything is centred on the surface's own
+    middle, so the clock lands where it always did; the extra columns go
+    to the two team columns (LONG_COLUMN) and the penalty bars. At 1920
+    columns the frame is byte for byte what it always was (test_canvas).
 
     ``display`` is the size the attached display reported, or None when the
     caller has nothing to say about it. It appears on the waiting-for-a-game
@@ -254,14 +295,16 @@ def draw(surface: pygame.Surface, state: GameState | None, now_ms: int, assets: 
     and a period clock counting down to 0:00 and sticking there.
     """
     surface.fill(BG)
+    w = surface.get_width()
+    cx = w // 2
     if state is None:
-        _text(surface, assets, "HOCKEYTRACK", 120, INK, W // 2, H // 2 - 40, "center")
-        _text(surface, assets, "waiting for a game...", 48, MUTED, W // 2, H // 2 + 60, "center", bold=False)
+        _text(surface, assets, "HOCKEYTRACK", 120, INK, cx, H // 2 - 40, "center")
+        _text(surface, assets, "waiting for a game...", 48, MUTED, cx, H // 2 + 60, "center", bold=False)
         if display is not None:
             # Under the waiting line, well clear of the bottom edge: the
             # burn-in shift only ever moves the frame up, and this must not
             # become the one line the bottom margin cannot afford.
-            _text(surface, assets, display_line(display), 36, MUTED, W // 2, H // 2 + 135, "center", bold=False)
+            _text(surface, assets, display_line(display), 36, MUTED, cx, H // 2 + 135, "center", bold=False)
         return
 
     if state.state == "PRE":
@@ -279,10 +322,10 @@ def draw(surface: pygame.Surface, state: GameState | None, now_ms: int, assets: 
             m, s = divmod(rem, 60)
             digits = f"{d}d {h:02d}:{m:02d}:{s:02d}" if d else f"{h:02d}:{m:02d}:{s:02d}"
         matchup_w = W - 240
-        _text_fit(surface, assets, f"{state.away.abbrev} @ {state.home.abbrev}", 110, matchup_w, INK, W // 2, 90, "center")
-        _text(surface, assets, "PUCK DROP", 44, RED, W // 2, 175, "center")
+        _text_fit(surface, assets, f"{state.away.abbrev} @ {state.home.abbrev}", 110, matchup_w, INK, cx, 90, "center")
+        _text(surface, assets, "PUCK DROP", 44, RED, cx, 175, "center")
         countdown_w = W - 480
-        _text_fit(surface, assets, digits, 200, countdown_w, RED, W // 2, 300, "center")
+        _text_fit(surface, assets, digits, 200, countdown_w, RED, cx, 300, "center")
         return
 
     # The moment every derived clock is measured from. Frozen at the
@@ -290,6 +333,7 @@ def draw(surface: pygame.Surface, state: GameState | None, now_ms: int, assets: 
     # penalties_at return exactly what it said.
     stale = stale_frame(state, stale_s)
     clock_ms = state.as_of_ms if stale else now_ms
+    col = COLUMN if w == W else LONG_COLUMN
     # The goal flash is deliberately left on the real clock: it is a
     # three-second animation, and freezing it would leave a wash on the
     # screen for ever. But it is suppressed on a stale frame -- a document
@@ -298,8 +342,8 @@ def draw(surface: pygame.Surface, state: GameState | None, now_ms: int, assets: 
     # with no RTC may be minutes out and could fire the wash over a stalled
     # frame, painting the band out of sight.
     flash_team = state.last_goal[0] if not stale and state.goal_flash(now_ms) else None
-    away_edge = _side(surface, assets, state.away, 60, "left", state.pp == state.away.abbrev, state.empty_net == state.away.abbrev, flash_team == state.away.abbrev)
-    home_edge = _side(surface, assets, state.home, W - 60, "right", state.pp == state.home.abbrev, state.empty_net == state.home.abbrev, flash_team == state.home.abbrev)
+    away_edge = _side(surface, assets, state.away, 60, "left", state.pp == state.away.abbrev, state.empty_net == state.away.abbrev, flash_team == state.away.abbrev, col)
+    home_edge = _side(surface, assets, state.home, w - 60, "right", state.pp == state.home.abbrev, state.empty_net == state.home.abbrev, flash_team == state.home.abbrev, col)
 
     # Centre column: whatever width is left between the two side columns,
     # minus a margin, is available for the clock/period/FINAL text. This
@@ -310,22 +354,22 @@ def draw(surface: pygame.Surface, state: GameState | None, now_ms: int, assets: 
 
     # Centre: clock and period.
     if state.state == "FINAL":
-        _text_fit(surface, assets, "FINAL", 200, centre_w, INK, W // 2, 150, "center")
+        _text_fit(surface, assets, "FINAL", 200, centre_w, INK, cx, 150, "center")
         if state.period_type in ("OT", "SO"):
-            _text_fit(surface, assets, state.period_label, 60, centre_w, MUTED, W // 2, 290, "center")
+            _text_fit(surface, assets, state.period_label, 60, centre_w, MUTED, cx, 290, "center")
     elif state.intermission:
-        _text_fit(surface, assets, "INTERMISSION", 70, centre_w, MUTED, W // 2, 110, "center")
-        _text_fit(surface, assets, fmt_clock(state.clock_at(clock_ms)), 170, centre_w, INK, W // 2, 220, "center")
+        _text_fit(surface, assets, "INTERMISSION", 70, centre_w, MUTED, cx, 110, "center")
+        _text_fit(surface, assets, fmt_clock(state.clock_at(clock_ms)), 170, centre_w, INK, cx, 220, "center")
     else:
-        _text_fit(surface, assets, fmt_clock(state.clock_at(clock_ms)), 220, centre_w, INK, W // 2, 150, "center")
+        _text_fit(surface, assets, fmt_clock(state.clock_at(clock_ms)), 220, centre_w, INK, cx, 150, "center")
         suffix = "PERIOD" if state.period_label.isdigit() else ""
         label = {"1": "1ST", "2": "2ND", "3": "3RD"}.get(state.period_label, state.period_label)
-        _text_fit(surface, assets, f"{label} {suffix}".strip(), 60, centre_w, MUTED, W // 2, 300, "center")
+        _text_fit(surface, assets, f"{label} {suffix}".strip(), 60, centre_w, MUTED, cx, 300, "center")
 
     if flash_team and state.last_goal:
-        _text_fit(surface, assets, f"GOAL  #{state.last_goal[1]}", 90, W - 240, INK, W // 2, 400, "center")
+        _text_fit(surface, assets, f"GOAL  #{state.last_goal[1]}", 90, w - 240, INK, cx, 400, "center")
     else:
-        pygame.draw.line(surface, RULE, (60, 372), (W - 60, 372), 2)
+        pygame.draw.line(surface, RULE, (60, 372), (w - 60, 372), 2)
         # Both penalty rows, stalled or not: the band lives in the gutter
         # above the rule line now, so it no longer costs the second row.
         # 382, not the 386 this was: with two rows the second bar ran to
@@ -338,7 +382,7 @@ def draw(surface: pygame.Surface, state: GameState | None, now_ms: int, assets: 
     if stale:
         _stale_banner(surface, assets, stale_s, link_ok)
     if not link_ok:
-        pygame.draw.circle(surface, RED, (W - 24, 24), 8)
+        pygame.draw.circle(surface, RED, (w - 24, 24), 8)
 
 
 # ---------------------------------------------------------------------------
