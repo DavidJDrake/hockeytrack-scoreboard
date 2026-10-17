@@ -3,4 +3,4 @@ pytest>=9.1.1
 pip-audit>=2.10.1
 # tests/test_debian_floors.py parses requirements.txt with it. pytest happens
 # to depend on it too, but a test's dependency is declared, not inherited.
-packaging>=24.0
+packaging>=26.3
